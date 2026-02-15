@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from "vue";
-import { mdiWeatherSunny, mdiWeatherNight, mdiChevronLeft, mdiChevronRight, mdiMagnifyPlusOutline, mdiClose } from '@mdi/js';
 import { screenshots } from "~/data/screenshots";
 
 const { t } = useI18n();
@@ -100,6 +99,7 @@ onUnmounted(() => {
     <div class="screenshots-section__container">
       <!-- Header area -->
       <div class="screenshots-section__header">
+        <span class="screenshots-section__badge">{{ t("nav.screenshots") }}</span>
         <h2 class="screenshots-section__title">
           {{ t("screenshots.sectionTitle") }}
         </h2>
@@ -115,7 +115,7 @@ onUnmounted(() => {
               class="screenshots-section__toggle-label"
               :class="{ 'screenshots-section__toggle-label--active': !isScreenshotDark }"
             >
-              <v-icon size="18" :icon="mdiWeatherSunny" />
+              <v-icon size="18" icon="mdi-weather-sunny" />
               {{ t("screenshots.light") }}
             </span>
             <button
@@ -132,7 +132,7 @@ onUnmounted(() => {
               class="screenshots-section__toggle-label"
               :class="{ 'screenshots-section__toggle-label--active': isScreenshotDark }"
             >
-              <v-icon size="18" :icon="mdiWeatherNight" />
+              <v-icon size="18" icon="mdi-weather-night" />
               {{ t("screenshots.dark") }}
             </span>
           </div>
@@ -140,13 +140,13 @@ onUnmounted(() => {
           <!-- Navigation arrows (mobile/tablet only) -->
           <div class="screenshots-section__nav">
             <button class="screenshots-section__nav-btn" aria-label="Previous" @click="prev">
-              <v-icon size="20" :icon="mdiChevronLeft" />
+              <v-icon size="20" icon="mdi-chevron-left" />
             </button>
             <span class="screenshots-section__nav-count">
               {{ activeIndex + 1 }} / {{ totalSlides }}
             </span>
             <button class="screenshots-section__nav-btn" aria-label="Next" @click="next">
-              <v-icon size="20" :icon="mdiChevronRight" />
+              <v-icon size="20" icon="mdi-chevron-right" />
             </button>
           </div>
         </div>
@@ -186,7 +186,7 @@ onUnmounted(() => {
               </Transition>
               <!-- Zoom icon overlay -->
               <div class="screenshots-section__zoom-overlay">
-                <v-icon class="screenshots-section__zoom-icon" :icon="mdiMagnifyPlusOutline" />
+                <v-icon class="screenshots-section__zoom-icon" icon="mdi-magnify-plus-outline" />
               </div>
             </div>
             <span class="screenshots-section__caption">{{ t(shot.labelKey) }}</span>
@@ -222,7 +222,7 @@ onUnmounted(() => {
               aria-label="Close lightbox"
               @click="closeLightbox"
             >
-              <v-icon size="28" :icon="mdiClose" />
+              <v-icon size="28" icon="mdi-close" />
             </button>
 
             <!-- Navigation arrows -->
@@ -231,14 +231,14 @@ onUnmounted(() => {
               aria-label="Previous screenshot"
               @click="lightboxPrev"
             >
-              <v-icon size="32" :icon="mdiChevronLeft" />
+              <v-icon size="32" icon="mdi-chevron-left" />
             </button>
             <button
               class="lightbox__nav lightbox__nav--next"
               aria-label="Next screenshot"
               @click="lightboxNext"
             >
-              <v-icon size="32" :icon="mdiChevronRight" />
+              <v-icon size="32" icon="mdi-chevron-right" />
             </button>
 
             <!-- Image container -->
@@ -249,7 +249,7 @@ onUnmounted(() => {
                   class="lightbox__toggle-label"
                   :class="{ 'lightbox__toggle-label--active': !isScreenshotDark }"
                 >
-                  <v-icon size="16" :icon="mdiWeatherSunny" />
+                  <v-icon size="16" icon="mdi-weather-sunny" />
                 </span>
                 <button
                   class="lightbox__switch"
@@ -265,7 +265,7 @@ onUnmounted(() => {
                   class="lightbox__toggle-label"
                   :class="{ 'lightbox__toggle-label--active': isScreenshotDark }"
                 >
-                  <v-icon size="16" :icon="mdiWeatherNight" />
+                  <v-icon size="16" icon="mdi-weather-night" />
                 </span>
               </div>
 

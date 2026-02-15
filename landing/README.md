@@ -1,4 +1,4 @@
-# VoicetextAI Landing
+# HackInterviewAI Landing
 
 ## Quick start
 

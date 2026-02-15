@@ -1,5 +1,12 @@
-function escapeHtml(input: string): string {
-  return input
+import { Marked } from 'marked';
+import { markedHighlight } from 'marked-highlight';
+import hljs from 'highlight.js';
+import DOMPurify from 'dompurify';
+
+const MAX_CODE_LINES = 25;
+
+function escapeHtmlAttr(input: string): string {
+  return String(input ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -7,103 +14,119 @@ function escapeHtml(input: string): string {
     .replace(/'/g, '&#039;');
 }
 
-function escapeHtmlAttr(input: string): string {
-  // Нам достаточно закрыть кавычки и угловые скобки + амперсанд.
-  return escapeHtml(input);
+function getSafeUrl(href: string): string | null {
+  const v = String(href ?? '').trim();
+  if (!v) return null;
+  try {
+    const u = new URL(v);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:' && u.protocol !== 'mailto:') return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
 }
 
-function linkify(text: string): string {
-  // Простейшие markdown-ссылки: [text](url)
-  // URL оставляем только http/https чтобы не получить javascript:.
-  return text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) => {
-    const safeLabel = escapeHtml(String(label));
-    const rawUrl = String(url).trim();
-    if (!/^https?:\/\//i.test(rawUrl)) return safeLabel;
-    const safeUrl = escapeHtmlAttr(rawUrl);
-    return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeLabel}</a>`;
+function createMarked(enableCodeCollapse: boolean): Marked {
+  const md = new Marked();
+
+  // В marked v17+ удобнее конфигурировать через use().
+  md.use({
+    gfm: true,
+    breaks: true,
+    silent: true,
   });
-}
 
-function renderInlineMarkdown(text: string): string {
-  // Порядок важен: сначала экранируем весь текст, потом разрешаем немного разметки.
-  let s = escapeHtml(text);
+  md.use({
+    renderer: {
+      link({ href, title, tokens }) {
+        const text = this.parser.parseInline(tokens);
+        const safeHref = getSafeUrl(String(href ?? ''));
+        if (!safeHref) return text;
 
-  // Inline code: `code`
-  s = s.replace(/`([^`]+)`/g, (_m, code: string) => `<code>${code}</code>`);
+        let out = `<a href="${escapeHtmlAttr(safeHref)}" target="_blank" rel="noopener noreferrer"`;
+        if (title) out += ` title="${escapeHtmlAttr(String(title))}"`;
+        out += `>${text}</a>`;
+        return out;
+      },
+    },
+  });
 
-  // Bold: **text**
-  s = s.replace(/\*\*([^*]+)\*\*/g, (_m, bold: string) => `<strong>${bold}</strong>`);
+  md.use(
+    markedHighlight({
+      langPrefix: 'hljs language-',
+      emptyLangClass: 'hljs',
+      highlight(code, lang) {
+        const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+        return hljs.highlight(code, { language }).value;
+      },
+    })
+  );
 
-  // Links
-  s = linkify(s);
+  if (enableCodeCollapse) {
+    md.use({
+      hooks: {
+        postprocess(html) {
+          // Оборачиваем fenced code blocks в контейнер, чтобы:
+          // - ограничивать высоту (макс 25 строк)
+          // - показывать кнопку "развернуть/свернуть"
+          //
+          // Важно: это работает и с marked-highlight, потому что внутри <code> сохраняются "\n".
+          return String(html ?? '').replace(
+            /<pre><code class="([^"]*)">([\s\S]*?)<\/code><\/pre>/g,
+            (_m, cls: string, inner: string) => {
+              const classes = String(cls ?? '');
+              const content = String(inner ?? '');
+              // Для корректного подсчёта строк игнорируем одиночный trailing newline.
+              const forCount = content.endsWith('\n') ? content.slice(0, -1) : content;
+              const lineCount = Math.max(1, forCount.split('\n').length);
+              const langMatch = classes.match(/\blanguage-([a-z0-9_+#.-]+)\b/i);
+              const lang = langMatch?.[1] ? String(langMatch[1]).toLowerCase() : 'plaintext';
+              const safeLang = escapeHtmlAttr(lang);
+              const safeLines = escapeHtmlAttr(String(lineCount));
+              const safeMax = escapeHtmlAttr(String(MAX_CODE_LINES));
 
-  return s;
-}
+              const pre = `<pre><code class="${escapeHtmlAttr(classes)}">${content}</code></pre>`;
+              if (lineCount <= MAX_CODE_LINES) {
+                return `<div class="code-block" data-lang="${safeLang}" data-lines="${safeLines}">${pre}</div>`;
+              }
 
-/**
- * Минимальный безопасный markdown→HTML для отображения релиз-ноутов в диалоге обновления.
- * Поддержка:
- * - ### заголовки
- * - списки "- "
- * - inline code `...`, bold **...**, ссылки [t](https://...)
- *
- * Не поддерживаем HTML внутри markdown — всё экранируем.
- */
-export function renderMarkdownToSafeHtml(markdown: string): string {
-  const lines = String(markdown ?? '').split(/\r?\n/);
-  const out: string[] = [];
-
-  let inList = false;
-  const closeListIfNeeded = () => {
-    if (inList) {
-      out.push('</ul>');
-      inList = false;
-    }
-  };
-
-  for (const raw of lines) {
-    const line = raw.trimEnd();
-    const trimmed = line.trim();
-
-    if (!trimmed) {
-      closeListIfNeeded();
-      out.push('<br/>');
-      continue;
-    }
-
-    if (trimmed === '---') {
-      closeListIfNeeded();
-      continue;
-    }
-
-    if (trimmed.startsWith('### ')) {
-      closeListIfNeeded();
-      const title = trimmed.slice(4).trim();
-      out.push(`<div class="md-h3">${renderInlineMarkdown(title)}</div>`);
-      continue;
-    }
-
-    // список "- item"
-    if (/^-\s+/.test(trimmed)) {
-      if (!inList) {
-        out.push('<ul class="md-ul">');
-        inList = true;
-      }
-      const item = trimmed.replace(/^-+\s+/, '');
-      out.push(`<li class="md-li">${renderInlineMarkdown(item)}</li>`);
-      continue;
-    }
-
-    closeListIfNeeded();
-    out.push(`<div class="md-p">${renderInlineMarkdown(trimmed)}</div>`);
+              return `<div class="code-block code-block-collapsible collapsed" data-lang="${safeLang}" data-lines="${safeLines}" data-max-lines="${safeMax}">${pre}<button class="code-block-toggle" type="button" aria-label="Показать или свернуть код"></button></div>`;
+            }
+          );
+        },
+      },
+    });
   }
 
-  closeListIfNeeded();
+  return md;
+}
 
-  // Убираем лишние <br/> в начале/конце
-  while (out[0] === '<br/>') out.shift();
-  while (out[out.length - 1] === '<br/>') out.pop();
+const mdWithCodeCollapse = createMarked(true);
+const mdWithoutCodeCollapse = createMarked(false);
 
-  return out.join('\n');
+export function renderMarkdownToSafeHtml(
+  markdown: string,
+  options?: { codeCollapse?: boolean }
+): string {
+  const source = String(markdown ?? '');
+  if (!source.trim()) return '';
+
+  const enableCollapse = options?.codeCollapse !== false;
+  const rendered = (enableCollapse ? mdWithCodeCollapse : mdWithoutCodeCollapse).parse(source);
+  if (typeof rendered !== 'string') return '';
+
+  return DOMPurify.sanitize(rendered, {
+    USE_PROFILES: { html: true },
+    ADD_TAGS: ['button'],
+    ADD_ATTR: [
+      'target',
+      'rel',
+      'type',
+      'aria-label',
+      'data-lang',
+      'data-lines',
+      'data-max-lines',
+    ],
+  });
 }
 

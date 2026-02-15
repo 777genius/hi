@@ -15,11 +15,6 @@ const tauriUpdaterUrl =
 export default defineNuxtConfig({
   compatibilityDate: "2026-01-19",
   ssr: true,
-  experimental: {
-    // Не инлайним стили — они раздувают HTML на 60+ КиБ,
-    // а render-blocking Vuetify CSS всё равно грузится отдельно
-    inlineSSRStyles: false
-  },
   app: {
     head: {
       link: [
@@ -42,7 +37,7 @@ export default defineNuxtConfig({
     "@nuxt/eslint",
     "nuxt-gtag"
   ],
-  css: ["~/assets/styles/main.scss"],
+  css: ["@mdi/font/css/materialdesignicons.css", "~/assets/styles/main.scss"],
   components: [
     {
       path: "~/components",
@@ -56,9 +51,8 @@ export default defineNuxtConfig({
     plugins: [vuetify({ autoImport: true })]
   },
   nitro: {
-    compressPublicAssets: true,
     prerender: {
-      // Важно для static деплоя (Render): пререндерим не только страницы, но и "сервисные" файлы
+      // Важно для static деплоя (Render): пререндерим не только страницы, но и “сервисные” файлы
       // (sitemap/robots) + слепок актуальных ссылок на релизы.
       routes: [
         ...generateI18nRoutes(),
@@ -67,12 +61,6 @@ export default defineNuxtConfig({
         "/_robots.txt",
         // "/releases.json" — теперь подгружаем с GitHub API в рантайме
       ]
-    }
-  },
-  routeRules: {
-    // Статика с хешем в имени — кешируем навсегда
-    "/_nuxt/**": {
-      headers: { "Cache-Control": "public, max-age=31536000, immutable" }
     }
   },
   i18n: {
@@ -98,7 +86,7 @@ export default defineNuxtConfig({
   // @ts-expect-error - поле предоставляется nuxt-модулями (например sitemap/site), типы в текущем конфиге не подключены.
   site: {
     url: siteUrl,
-    name: "VoicetextAI"
+    name: "HackInterviewAI"
   },
   gtag: {
     id: process.env.NUXT_PUBLIC_GTAG_ID,

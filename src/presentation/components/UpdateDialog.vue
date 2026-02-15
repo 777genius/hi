@@ -18,7 +18,7 @@ const { store, installUpdate } = useUpdater();
 const releaseNotesHtml = computed(() => {
   const notes = store.releaseNotes;
   if (!notes) return '';
-  return renderMarkdownToSafeHtml(notes);
+  return renderMarkdownToSafeHtml(notes, { codeCollapse: false });
 });
 
 const isOpen = computed({
@@ -139,22 +139,61 @@ async function handleInstall() {
   overflow-y: auto;
 }
 
-.release-notes :deep(.md-h3) {
+.release-notes :deep(h1),
+.release-notes :deep(h2),
+.release-notes :deep(h3),
+.release-notes :deep(h4),
+.release-notes :deep(h5),
+.release-notes :deep(h6) {
   font-weight: 700;
   margin: 8px 0 6px;
+  line-height: 1.25;
 }
 
-.release-notes :deep(.md-p) {
+.release-notes :deep(h1) {
+  font-size: 1.05em;
+}
+
+.release-notes :deep(h2) {
+  font-size: 1.02em;
+}
+
+.release-notes :deep(h3),
+.release-notes :deep(h4),
+.release-notes :deep(h5),
+.release-notes :deep(h6) {
+  font-size: 0.98em;
+}
+
+.release-notes :deep(p) {
   margin: 4px 0;
 }
 
-.release-notes :deep(.md-ul) {
+.release-notes :deep(ul),
+.release-notes :deep(ol) {
   margin: 6px 0 10px;
   padding-left: 18px;
 }
 
-.release-notes :deep(.md-li) {
+.release-notes :deep(li) {
   margin: 2px 0;
+}
+
+.release-notes :deep(pre) {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  overflow-x: auto;
+  background: rgba(var(--v-theme-on-surface), 0.08);
+}
+
+.release-notes :deep(pre code) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: transparent;
+  padding: 0;
 }
 
 .release-notes :deep(code) {

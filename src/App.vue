@@ -420,9 +420,8 @@ if (import.meta.hot) {
   display: block;
   margin: 0;
   padding: 0;
-  border-radius: var(--radius-xl);
-  overflow: hidden;
   background: transparent;
   position: relative;
+  overflow: visible;
 }
 </style>

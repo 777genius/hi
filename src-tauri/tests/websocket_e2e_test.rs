@@ -1,3 +1,5 @@
+#![cfg(feature = "integration-tests")]
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::sleep;

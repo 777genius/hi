@@ -1,6 +1,6 @@
 {
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-    "productName": "VoicetextAI",
+    "productName": "HackInterviewAI",
     "version": "0.9.4",
     "identifier": "com.voicetotext.app",
     "build": {
@@ -11,17 +11,16 @@
     },
     "app": {
         "withGlobalTauri": true,
-        "windows": [
-            {
+        "windows": [{
                 "label": "main",
-                "title": "VoicetextAI",
-                "width": 460,
-                "height": 330,
-                "minWidth": 460,
-                "minHeight": 300,
-                "maxWidth": 460,
-                "maxHeight": 700,
-                "resizable": false,
+                "title": "HackInterviewAI",
+                "width": 960,
+                "height": 720,
+                "minWidth": 640,
+                "minHeight": 480,
+                "maxWidth": 1400,
+                "maxHeight": 1000,
+                "resizable": true,
                 "fullscreen": false,
                 "decorations": false,
                 "transparent": true,
@@ -35,7 +34,7 @@
             },
             {
                 "label": "auth",
-                "title": "VoicetextAI",
+                "title": "HackInterviewAI",
                 "width": 460,
                 "height": 580,
                 "visible": false,
@@ -50,7 +49,7 @@
             },
             {
                 "label": "profile",
-                "title": "VoicetextAI — Profile",
+                "title": "HackInterviewAI — Profile",
                 "width": 460,
                 "height": 580,
                 "visible": false,
@@ -65,7 +64,7 @@
             },
             {
                 "label": "settings",
-                "title": "VoicetextAI — Settings",
+                "title": "HackInterviewAI — Settings",
                 "width": 860,
                 "height": 680,
                 "minWidth": 720,
@@ -89,13 +88,7 @@
         "active": true,
         "targets": ["deb", "appimage", "msi", "dmg", "app"],
         "createUpdaterArtifacts": true,
-        "icon": [
-            "icons/32x32.png",
-            "icons/128x128.png",
-            "icons/128x128@2x.png",
-            "icons/icon.icns",
-            "icons/icon.ico"
-        ],
+        "icon": [],
         "macOS": {
             "entitlements": "entitlements.plist",
             "exceptionDomain": null,

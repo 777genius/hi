@@ -1,4 +1,4 @@
-# VoicetextAI
+# HackInterviewAI
 
 Modern voice-to-text desktop application using AI, built with Tauri 2.0, Rust, and Vue 3.
 

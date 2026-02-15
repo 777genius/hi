@@ -20,6 +20,10 @@ interface MicrophoneLevelPayload {
   level: number;
 }
 
+interface SystemAudioLevelPayload {
+  level: number;
+}
+
 class TauriSettingsService {
   // STT конфигурация
 
@@ -64,14 +68,14 @@ class TauriSettingsService {
     if (typeof config.recording_hotkey === 'string') {
       args.recordingHotkey = config.recording_hotkey;
     }
-    if (typeof config.auto_copy_to_clipboard === 'boolean') {
-      args.autoCopyToClipboard = config.auto_copy_to_clipboard;
-    }
-    if (typeof config.auto_paste_text === 'boolean') {
-      args.autoPasteText = config.auto_paste_text;
-    }
     if (typeof config.selected_audio_device === 'string' || config.selected_audio_device === null) {
       args.selectedAudioDevice = config.selected_audio_device;
+    }
+    if (
+      typeof config.selected_output_audio_device === 'string' ||
+      config.selected_output_audio_device === null
+    ) {
+      args.selectedOutputAudioDevice = config.selected_output_audio_device;
     }
 
     await invokeUpdateAppConfig(args);
@@ -81,6 +85,10 @@ class TauriSettingsService {
 
   async getAudioDevices(): Promise<string[]> {
     return invoke<string[]>('get_audio_devices');
+  }
+
+  async getOutputAudioDevices(): Promise<string[]> {
+    return invoke<string[]>('get_output_audio_devices');
   }
 
   // Тест микрофона
@@ -103,6 +111,24 @@ class TauriSettingsService {
     callback: (level: number) => void
   ): Promise<UnlistenFn> {
     return listen<MicrophoneLevelPayload>('microphone_test:level', (event) => {
+      callback(event.payload.level);
+    });
+  }
+
+  // Тест системного звука
+
+  async startSystemAudioTest(deviceName: string | null): Promise<void> {
+    await invoke('start_system_audio_test', {
+      device_name: deviceName,
+    });
+  }
+
+  async stopSystemAudioTest(): Promise<number[]> {
+    return invoke<number[]>('stop_system_audio_test');
+  }
+
+  listenSystemAudioLevel(callback: (level: number) => void): Promise<UnlistenFn> {
+    return listen<SystemAudioLevelPayload>('system_audio_test:level', (event) => {
       callback(event.payload.level);
     });
   }

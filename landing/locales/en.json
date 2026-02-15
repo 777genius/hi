@@ -1,119 +1,119 @@
 {
-  "nav": {
-    "features": "Features",
-    "providers": "Providers",
-    "screenshots": "Screenshots",
-    "download": "Download",
-    "openSource": "Open Source",
-    "viewOnGithub": "View on GitHub",
-    "faq": "FAQ",
-    "pricing": "Pricing"
-  },
-  "hero": {
-    "badge": "VoicetextAI",
-    "ctaPrimary": "Download for {platform}",
-    "ctaSecondary": "View Features",
-    "preview": "Product preview",
-    "trust": {
-      "realtime": "Real-time",
-      "multilingual": "40+ languages",
-      "crossPlatform": "Cross-platform"
+    "nav": {
+        "features": "Features",
+        "providers": "Providers",
+        "screenshots": "Screenshots",
+        "download": "Download",
+        "openSource": "Open Source",
+        "viewOnGithub": "View on GitHub",
+        "faq": "FAQ",
+        "pricing": "Pricing"
     },
-    "transcription": {
-      "sample": "Hello, this is a voice message..."
+    "hero": {
+        "badge": "HackInterviewAI",
+        "ctaPrimary": "Download for {platform}",
+        "ctaSecondary": "View Features",
+        "preview": "Product preview",
+        "trust": {
+            "realtime": "Real-time",
+            "multilingual": "40+ languages",
+            "crossPlatform": "Cross-platform"
+        },
+        "transcription": {
+            "sample": "Hello, this is a voice message..."
+        },
+        "status": {
+            "recording": "Recording"
+        }
     },
-    "status": {
-      "recording": "Recording"
+    "download": {
+        "title": "Download",
+        "detected": "Detected",
+        "systemRequirements": "System requirements",
+        "version": "Version {version}"
+    },
+    "theme": {
+        "dark": "Dark",
+        "light": "Light"
+    },
+    "language": {
+        "label": "Language"
+    },
+    "features": {
+        "sectionTitle": "Everything you need for voice input",
+        "sectionSubtitle": "Powerful features for seamless, lightning-fast voice-to-text."
+    },
+    "providers": {
+        "sectionTitle": "Powered by Deepgram Nova-3",
+        "sectionSubtitle": "Industry-leading speech-to-text engine with unmatched accuracy and real-time multilingual support.",
+        "learnMoreBtn": "Explore Deepgram Nova-3 Speech Recognition"
+    },
+    "pricing": {
+        "sectionTitle": "Simple, transparent pricing",
+        "sectionSubtitle": "Start free. Upgrade when you need more power.",
+        "getStarted": "Get Started",
+        "popular": "Most Popular",
+        "refundNote": "14-day money-back guarantee. Payments processed by Paddle."
+    },
+    "faq": {
+        "sectionTitle": "Got questions? We've got answers",
+        "subtitle": "Answers to frequently asked questions"
+    },
+    "common": {
+        "learnMore": "Learn more"
+    },
+    "screenshots": {
+        "sectionTitle": "See it in action",
+        "sectionSubtitle": "Explore the sleek interface designed for productivity and comfort.",
+        "main": "Main screen",
+        "mainDark": "Main interface",
+        "recordDark": "Recording",
+        "settingsDark": "Settings",
+        "dark": "Dark theme",
+        "light": "Light theme",
+        "settings": "Settings",
+        "recording": "Recording",
+        "toggleTheme": "Toggle screenshot theme"
+    },
+    "footer": {
+        "copyright": "© {year} HackInterviewAI",
+        "tagline": "Fast, accurate voice-to-text",
+        "links": {
+            "terms": "Terms",
+            "privacyPolicy": "Privacy",
+            "refundPolicy": "Refunds"
+        }
+    },
+    "meta": {
+        "checkoutSuccessTitle": "Payment successful — HackInterviewAI",
+        "checkoutSuccessDescription": "Thank you. We received your payment. Provisioning is handled via Paddle webhooks and may take a short moment.",
+        "payTitle": "Secure checkout — HackInterviewAI",
+        "payDescription": "Secure checkout entry point used by Paddle payment links and payment method update flows.",
+        "homeTitle": "HackInterviewAI — free, easy, fast, real-time voice-to-text",
+        "homeDescription": "Modern cross-platform desktop app using AI. 40 languages. Free.",
+        "downloadTitle": "Download HackInterviewAI",
+        "downloadDescription": "Get the latest builds for macOS, Windows, and Linux.",
+        "privacyTitle": "Privacy at HackInterviewAI",
+        "privacyDescription": "Learn how we protect your data and privacy.",
+        "privacyPolicyTitle": "Privacy Policy — HackInterviewAI",
+        "privacyPolicyDescription": "How we collect, use, and protect your data. HackInterviewAI privacy policy.",
+        "termsTitle": "Terms of Service — HackInterviewAI",
+        "termsDescription": "Terms and conditions for using HackInterviewAI application and services.",
+        "refundPolicyTitle": "Refund Policy — HackInterviewAI",
+        "refundPolicyDescription": "Refunds, cancellations, and how to request a refund for HackInterviewAI subscriptions.",
+        "openSourceTitle": "Open Source — HackInterviewAI",
+        "openSourceDescription": "Explore the open-source code behind HackInterviewAI on GitHub."
+    },
+    "languages": {
+        "badge": "Languages",
+        "title": "40+ Supported Languages",
+        "subtitle": "Accurate speech recognition across dozens of languages and dialects worldwide."
+    },
+    "error": {
+        "notFoundTitle": "Page not found",
+        "notFoundDescription": "The page you are looking for does not exist or has been moved.",
+        "genericTitle": "Something went wrong",
+        "genericDescription": "An unexpected error occurred. Please try again later.",
+        "goHome": "Go to homepage"
     }
-  },
-  "download": {
-    "title": "Download",
-    "detected": "Detected",
-    "systemRequirements": "System requirements",
-    "version": "Version {version}"
-  },
-  "theme": {
-    "dark": "Dark",
-    "light": "Light"
-  },
-  "language": {
-    "label": "Language"
-  },
-  "features": {
-    "sectionTitle": "Everything you need for voice input",
-    "sectionSubtitle": "Powerful features for seamless, lightning-fast voice-to-text."
-  },
-  "providers": {
-    "sectionTitle": "Powered by Deepgram Nova-3",
-    "sectionSubtitle": "The fastest and most accurate speech AI on the market. Used by NASA, Spotify, and thousands of companies.",
-    "learnMoreBtn": "Explore Deepgram Nova-3 Speech Recognition"
-  },
-  "pricing": {
-    "sectionTitle": "Simple, transparent pricing",
-    "sectionSubtitle": "Start free. Upgrade when you need more power.",
-    "getStarted": "Get Started",
-    "popular": "Most Popular",
-    "refundNote": "14-day money-back guarantee. Payments processed by Paddle."
-  },
-  "faq": {
-    "sectionTitle": "Got questions? We've got answers",
-    "subtitle": "Answers to frequently asked questions"
-  },
-  "common": {
-    "learnMore": "Learn more"
-  },
-  "screenshots": {
-    "sectionTitle": "See it in action",
-    "sectionSubtitle": "Explore the sleek interface designed for productivity and comfort.",
-    "main": "Main screen",
-    "mainDark": "Main interface",
-    "recordDark": "Recording",
-    "settingsDark": "Settings",
-    "dark": "Dark theme",
-    "light": "Light theme",
-    "settings": "Settings",
-    "recording": "Recording",
-    "toggleTheme": "Toggle screenshot theme"
-  },
-  "footer": {
-    "copyright": "© {year} VoicetextAI",
-    "tagline": "Fast, accurate voice-to-text",
-    "links": {
-      "terms": "Terms",
-      "privacyPolicy": "Privacy",
-      "refundPolicy": "Refunds"
-    }
-  },
-  "meta": {
-    "checkoutSuccessTitle": "Payment successful — VoicetextAI",
-    "checkoutSuccessDescription": "Thank you. We received your payment. Provisioning is handled via Paddle webhooks and may take a short moment.",
-    "payTitle": "Secure checkout — VoicetextAI",
-    "payDescription": "Secure checkout entry point used by Paddle payment links and payment method update flows.",
-    "homeTitle": "VoicetextAI — free, easy, fast, real-time voice-to-text",
-    "homeDescription": "Modern cross-platform desktop app using AI. 40 languages. Free.",
-    "downloadTitle": "Download VoicetextAI",
-    "downloadDescription": "Get the latest builds for macOS, Windows, and Linux.",
-    "privacyTitle": "Privacy at VoicetextAI",
-    "privacyDescription": "Learn how we protect your data and privacy.",
-    "privacyPolicyTitle": "Privacy Policy — VoicetextAI",
-    "privacyPolicyDescription": "How we collect, use, and protect your data. VoicetextAI privacy policy.",
-    "termsTitle": "Terms of Service — VoicetextAI",
-    "termsDescription": "Terms and conditions for using VoicetextAI application and services.",
-    "refundPolicyTitle": "Refund Policy — VoicetextAI",
-    "refundPolicyDescription": "Refunds, cancellations, and how to request a refund for VoicetextAI subscriptions.",
-    "openSourceTitle": "Open Source — VoicetextAI",
-    "openSourceDescription": "Explore the open-source code behind VoicetextAI on GitHub."
-  },
-  "languages": {
-    "badge": "Languages",
-    "title": "40+ Supported Languages",
-    "subtitle": "Accurate speech recognition across dozens of languages and dialects worldwide."
-  },
-  "error": {
-    "notFoundTitle": "Page not found",
-    "notFoundDescription": "The page you are looking for does not exist or has been moved.",
-    "genericTitle": "Something went wrong",
-    "genericDescription": "An unexpected error occurred. Please try again later.",
-    "goHome": "Go to homepage"
-  }
 }

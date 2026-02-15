@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { mdiMonitorCellphone, mdiMicrophoneOutline, mdiTagOutline, mdiShieldLockOutline, mdiKeyboardSettingsOutline, mdiSourceBranch, mdiHelpCircleOutline, mdiFrequentlyAskedQuestions } from '@mdi/js'
 
 const { content } = useLandingContent();
 const { t } = useI18n();
@@ -18,12 +17,10 @@ watch(openPanels, (newVal, oldVal) => {
 });
 
 const faqIcons = [
-  mdiMonitorCellphone,
-  mdiMicrophoneOutline,
-  mdiTagOutline,
-  mdiShieldLockOutline,
-  mdiKeyboardSettingsOutline,
-  mdiSourceBranch,
+  'mdi-monitor-cellphone',
+  'mdi-microphone-outline',
+  'mdi-keyboard-settings-outline',
+  'mdi-shield-check-outline',
 ];
 </script>
 
@@ -39,6 +36,7 @@ const faqIcons = [
     <v-container>
       <!-- Header -->
       <div class="faq-section__header">
+        <span class="faq-section__badge">{{ t('nav.faq') }}</span>
         <h2 class="faq-section__title">{{ t('faq.sectionTitle') }}</h2>
         <p class="faq-section__subtitle">{{ t('faq.subtitle') }}</p>
       </div>
@@ -62,7 +60,9 @@ const faqIcons = [
               <v-expansion-panel-title class="faq-section__panel-title">
                 <div class="faq-section__panel-header">
                   <div class="faq-section__panel-icon-wrap">
-                    <v-icon size="22" class="faq-section__panel-icon" :icon="faqIcons[index] || mdiHelpCircleOutline" />
+                    <v-icon size="22" class="faq-section__panel-icon">
+                      {{ faqIcons[index] || 'mdi-help-circle-outline' }}
+                    </v-icon>
                   </div>
                   <span class="faq-section__panel-question">{{ item.question }}</span>
                 </div>
@@ -77,7 +77,7 @@ const faqIcons = [
         <!-- Decorative side element -->
         <div class="faq-section__decoration">
           <div class="faq-section__deco-circle">
-            <v-icon size="40" class="faq-section__deco-icon" :icon="mdiFrequentlyAskedQuestions" />
+            <v-icon size="40" class="faq-section__deco-icon">mdi-frequently-asked-questions</v-icon>
           </div>
           <div class="faq-section__deco-ring faq-section__deco-ring--1" />
           <div class="faq-section__deco-ring faq-section__deco-ring--2" />

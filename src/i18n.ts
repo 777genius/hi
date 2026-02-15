@@ -3,7 +3,7 @@ import { createI18n } from 'vue-i18n';
 const messages = {
   en: {
     app: {
-      title: 'VoicetextAI',
+      title: 'HackInterviewAI',
     },
     main: {
       minimize: 'Minimize',
@@ -95,10 +95,23 @@ const messages = {
         default: 'System default device',
         hint: 'Choose a microphone for recording. If "Default" is selected, the system input device is used.',
       },
+      systemDevice: {
+        label: 'System sound source',
+        default: 'System default output',
+        hint: 'Choose the output device to capture (what you hear). On Windows this selects the WASAPI loopback endpoint. On macOS/Linux the selection may be ignored.',
+      },
       micTest: {
         label: 'Microphone test',
         hintLine1: 'Click the button below to check if the microphone works.',
         hintLine2: 'After stopping, you will hear what was recorded.',
+        start: 'Start test',
+        stop: 'Stop and play back',
+        audioLevel: 'Audio level:',
+      },
+      systemTest: {
+        label: 'System audio test',
+        hintLine1: 'Click the button below to check if system audio capture works.',
+        hintLine2: 'After stopping, you will hear what was captured.',
         start: 'Start test',
         stop: 'Stop and play back',
         audioLevel: 'Audio level:',
@@ -321,7 +334,7 @@ const messages = {
   },
   ru: {
     app: {
-      title: 'VoicetextAI',
+      title: 'HackInterviewAI',
     },
     main: {
       minimize: 'Свернуть',
@@ -413,10 +426,23 @@ const messages = {
         default: 'Системное устройство (по умолчанию)',
         hint: 'Выберите микрофон для записи. Если выбрано "По умолчанию", будет использоваться системное устройство ввода.',
       },
+      systemDevice: {
+        label: 'Источник системного звука',
+        default: 'Системный вывод (по умолчанию)',
+        hint: 'Выберите устройство вывода для захвата системного звука (то, что вы слышите). На Windows это выбирает loopback-источник. На macOS/Linux выбор может игнорироваться.',
+      },
       micTest: {
         label: 'Проверка микрофона',
         hintLine1: 'Нажмите кнопку ниже чтобы проверить работает ли микрофон.',
         hintLine2: 'После остановки записи вы услышите что было записано.',
+        start: 'Начать проверку',
+        stop: 'Остановить и воспроизвести',
+        audioLevel: 'Уровень громкости:',
+      },
+      systemTest: {
+        label: 'Проверка системного звука',
+        hintLine1: 'Нажмите кнопку ниже чтобы проверить захват системного звука.',
+        hintLine2: 'После остановки записи вы услышите что было захвачено.',
         start: 'Начать проверку',
         stop: 'Остановить и воспроизвести',
         audioLevel: 'Уровень громкости:',
@@ -639,7 +665,7 @@ const messages = {
   },
   es: {
     app: {
-      title: 'VoicetextAI',
+      title: 'HackInterviewAI',
     },
     main: {
       minimize: 'Minimizar',
@@ -957,7 +983,7 @@ const messages = {
   },
   fr: {
     app: {
-      title: 'VoicetextAI',
+      title: 'HackInterviewAI',
     },
     main: {
       minimize: 'Réduire',
@@ -1275,7 +1301,7 @@ const messages = {
   },
   de: {
     app: {
-      title: 'VoicetextAI',
+      title: 'HackInterviewAI',
     },
     main: {
       minimize: 'Minimieren',
@@ -1593,7 +1619,7 @@ const messages = {
   },
   uk: {
     app: {
-      title: 'VoicetextAI',
+      title: 'HackInterviewAI',
     },
     main: {
       minimize: 'Згорнути',

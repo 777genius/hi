@@ -47,8 +47,8 @@ type ApiResponse = {
 const emptyVariant: NormalizedVariant = { url: null, platformKey: null, version: null };
 
 // Паттерны для матчинга артефактов Tauri:
-// VoicetextAI_0.6.0_aarch64.dmg, VoicetextAI_0.6.0_x64.dmg,
-// VoicetextAI_0.6.0_x64_en-US.msi, VoicetextAI_0.6.0_amd64.AppImage, ...
+// HackInterviewAI_0.6.0_aarch64.dmg, HackInterviewAI_0.6.0_x64.dmg,
+// HackInterviewAI_0.6.0_x64_en-US.msi, HackInterviewAI_0.6.0_amd64.AppImage, ...
 const findAsset = (assets: ReleaseAsset[], pattern: RegExp): ReleaseAsset | null =>
   assets.find((a) => pattern.test(a.name)) || null;
 
@@ -86,7 +86,7 @@ export default defineEventHandler(async (): Promise<ApiResponse> => {
       `https://api.github.com/repos/${githubRepo}/releases/latest`,
       {
         headers: {
-          "User-Agent": "voicetextai-landing",
+          "User-Agent": "hackinterviewai-landing",
           Accept: "application/vnd.github+json",
           ...(githubToken && { Authorization: `Bearer ${githubToken}` }),
         },

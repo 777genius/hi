@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig, SupportedStreamConfig};
-use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
 use std::sync::{Arc, Mutex};
 
-use crate::domain::{AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, AudioError, AudioResult};
+use crate::domain::{AudioCapture, AudioChunkCallback, AudioConfig, AudioError, AudioResult};
+use crate::infrastructure::audio::speech_audio::{
+    f32_to_i16, interleaved_to_mono_i16, Mono16kResampleState, TARGET_CHANNELS, TARGET_SAMPLE_RATE,
+};
 
 /// Real system audio capture using cpal + rubato resampling
 ///
@@ -23,9 +23,6 @@ use crate::domain::{AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, A
 /// - 16kHz sample rate
 /// - Mono channel
 /// - i16 PCM samples
-const TARGET_SAMPLE_RATE: u32 = 16000;
-const TARGET_CHANNELS: u16 = 1;
-const RESAMPLER_CHUNK_SIZE: usize = 1024; // Fixed chunk size for rubato
 
 /// System audio capture with automatic resampling
 pub struct SystemAudioCapture {
@@ -120,49 +117,7 @@ impl SystemAudioCapture {
         })
     }
 
-    /// Create resampler for converting native sample rate to 16kHz
-    fn create_resampler(
-        from_sample_rate: u32,
-        channels: usize,
-    ) -> AudioResult<SincFixedIn<f32>> {
-        let params = SincInterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: 0.95,
-            interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256,
-            window: WindowFunction::BlackmanHarris2,
-        };
-
-        SincFixedIn::<f32>::new(
-            TARGET_SAMPLE_RATE as f64 / from_sample_rate as f64,
-            2.0, // Max relative ratio change
-            params,
-            RESAMPLER_CHUNK_SIZE,
-            channels,
-        )
-        .map_err(|e| AudioError::Internal(format!("Failed to create resampler: {}", e)))
-    }
-
-    /// Convert f32 samples to i16 PCM (in-place conversion concept)
-    #[inline]
-    fn f32_to_i16(samples: &[f32]) -> Vec<i16> {
-        samples
-            .iter()
-            .map(|&sample| {
-                let clamped = sample.clamp(-1.0, 1.0);
-                (clamped * 32767.0) as i16
-            })
-            .collect()
-    }
-
-    /// Convert stereo to mono by averaging channels
-    #[inline]
-    fn stereo_to_mono(samples: &[i16]) -> Vec<i16> {
-        samples
-            .chunks_exact(2)
-            .map(|chunk| ((chunk[0] as i32 + chunk[1] as i32) / 2) as i16)
-            .collect()
-    }
+    // Processing helpers находятся в speech_audio.rs
 }
 
 // SAFETY: SystemAudioCapture содержит cpal::Stream который не Send/Sync на macOS.
@@ -199,24 +154,9 @@ impl AudioCapture for SystemAudioCapture {
             TARGET_CHANNELS
         );
 
-        // Create resampler if needed (wrapped in Arc<Mutex<>> for thread safety)
-        let needs_resampling = native_sample_rate != TARGET_SAMPLE_RATE;
-        let resampler: Option<Arc<Mutex<SincFixedIn<f32>>>> = if needs_resampling {
-            Some(Arc::new(Mutex::new(Self::create_resampler(
-                native_sample_rate,
-                1, // mono after conversion
-            )?)))
-        } else {
-            None
-        };
-
-        // Input buffer for accumulating samples before resampling
-        // Shared between callback invocations via Arc<Mutex<>>
-        let input_buffer: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::with_capacity(RESAMPLER_CHUNK_SIZE * 2)));
-
-        // Clone for move into callback
-        let resampler_clone = resampler.clone();
-        let input_buffer_clone = input_buffer.clone();
+        let processing_state: Arc<Mutex<Mono16kResampleState>> =
+            Arc::new(Mutex::new(Mono16kResampleState::new(native_sample_rate)?));
+        let state_clone = processing_state.clone();
 
         // Build audio stream with the selected config
         let stream_config: StreamConfig = self.native_config.clone().into();
@@ -226,73 +166,26 @@ impl AudioCapture for SystemAudioCapture {
             .build_input_stream(
                 &stream_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    // 1. Convert f32 to i16
-                    let mut pcm_samples = Self::f32_to_i16(data);
+                    // 1) Convert f32 → i16
+                    let pcm_samples = f32_to_i16(data);
 
-                    // 2. Convert stereo to mono if needed
-                    if native_channels > 1 {
-                        pcm_samples = Self::stereo_to_mono(&pcm_samples);
-                    }
+                    // 2) Downmix to mono if needed
+                    let mono_samples = if native_channels > 1 {
+                        interleaved_to_mono_i16(&pcm_samples, native_channels)
+                    } else {
+                        pcm_samples
+                    };
 
-                    // 3. Add to input buffer (защита от poisoned mutex)
-                    let mut buffer = match input_buffer_clone.lock() {
-                        Ok(b) => b,
+                    // 3) Buffer + resample + emit
+                    let mut state = match state_clone.lock() {
+                        Ok(s) => s,
                         Err(e) => {
-                            log::error!("Audio input buffer poisoned (panic in other thread): {}", e);
-                            log::error!("Audio capture stopping due to unrecoverable error");
+                            log::error!("Audio processing state poisoned: {}", e);
                             return;
                         }
                     };
-                    buffer.extend_from_slice(&pcm_samples);
 
-                    // 4. Process chunks of fixed size for resampler
-                    while buffer.len() >= RESAMPLER_CHUNK_SIZE {
-                        let chunk: Vec<i16> = buffer.drain(..RESAMPLER_CHUNK_SIZE).collect();
-
-                        // 5. Resample if needed
-                        let final_samples = if let Some(ref rs) = resampler_clone {
-                            // Convert i16 to f32 for rubato
-                            let float_chunk: Vec<f32> = chunk
-                                .iter()
-                                .map(|&s| s as f32 / 32767.0)
-                                .collect();
-
-                            // Prepare input for resampler (channels x samples)
-                            let resampler_input = vec![float_chunk];
-
-                            // Resample (защита от poisoned mutex)
-                            let mut resampler_guard = match rs.lock() {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    log::error!("Resampler mutex poisoned: {}", e);
-                                    log::error!("Skipping audio chunk due to resampler error");
-                                    continue; // пропускаем этот чанк
-                                }
-                            };
-
-                            match resampler_guard.process(&resampler_input, None) {
-                                Ok(output) => {
-                                    // Convert back to i16
-                                    Self::f32_to_i16(&output[0])
-                                }
-                                Err(e) => {
-                                    log::error!("Resampling error: {}", e);
-                                    continue; // пропускаем этот чанк
-                                }
-                            }
-                        } else {
-                            chunk
-                        };
-
-                        // 6. Send chunk via callback
-                        let audio_chunk = AudioChunk::new(
-                            final_samples,
-                            TARGET_SAMPLE_RATE,
-                            TARGET_CHANNELS,
-                        );
-
-                        on_chunk(audio_chunk);
-                    }
+                    state.push_mono_i16(&mono_samples, &on_chunk);
                 },
                 |err| {
                     log::error!("Audio stream error: {}", err);
@@ -341,11 +234,12 @@ impl AudioCapture for SystemAudioCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::audio::speech_audio;
 
     #[test]
     fn test_f32_to_i16_conversion() {
         let input = vec![0.0, 0.5, -0.5, 1.0, -1.0];
-        let output = SystemAudioCapture::f32_to_i16(&input);
+        let output = speech_audio::f32_to_i16(&input);
 
         assert_eq!(output[0], 0);
         assert_eq!(output[1], 16383); // 0.5 * 32767
@@ -357,7 +251,7 @@ mod tests {
     #[test]
     fn test_stereo_to_mono() {
         let stereo = vec![1000, 2000, 3000, 4000, 5000, 6000];
-        let mono = SystemAudioCapture::stereo_to_mono(&stereo);
+        let mono = speech_audio::interleaved_to_mono_i16(&stereo, 2);
 
         assert_eq!(mono.len(), 3);
         assert_eq!(mono[0], 1500); // (1000 + 2000) / 2
@@ -384,7 +278,7 @@ mod tests {
     fn test_f32_to_i16_edge_cases() {
         // Тест граничных случаев конвертации
         let edge_cases = vec![-1.5, 1.5, -2.0, 2.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
-        let output = SystemAudioCapture::f32_to_i16(&edge_cases);
+        let output = speech_audio::f32_to_i16(&edge_cases);
 
         // Значения должны быть clamped в диапазон [-1.0, 1.0]
         assert_eq!(output[0], -32767); // -1.5 clamped to -1.0
@@ -396,7 +290,7 @@ mod tests {
     #[test]
     fn test_stereo_to_mono_empty() {
         let empty: Vec<i16> = vec![];
-        let result = SystemAudioCapture::stereo_to_mono(&empty);
+        let result = speech_audio::interleaved_to_mono_i16(&empty, 2);
         assert_eq!(result.len(), 0);
     }
 
@@ -404,7 +298,7 @@ mod tests {
     fn test_stereo_to_mono_overflow_protection() {
         // Проверяем что нет overflow при усреднении больших значений
         let stereo = vec![i16::MAX, i16::MAX, i16::MIN, i16::MIN];
-        let mono = SystemAudioCapture::stereo_to_mono(&stereo);
+        let mono = speech_audio::interleaved_to_mono_i16(&stereo, 2);
 
         // (MAX + MAX) / 2 = MAX, (MIN + MIN) / 2 = MIN
         assert_eq!(mono.len(), 2);

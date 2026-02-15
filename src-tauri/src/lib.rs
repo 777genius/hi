@@ -6,6 +6,12 @@ mod presentation;
 
 mod demo;
 
+// objc crate uses macro helpers (sel_impl) internally on macOS.
+// Keeping this gated to macOS avoids impacting other targets.
+#[cfg(target_os = "macos")]
+#[macro_use]
+extern crate objc;
+
 use presentation::commands;
 use presentation::state::AppState;
 use tauri::{Emitter, Manager};
@@ -21,8 +27,10 @@ use tauri_nspanel::tauri_panel;
 tauri_panel! {
     panel!(FloatingPanel {
         config: {
-            can_become_key_window: false,  // Критично для fullscreen! Активация через программный метод в auth режиме
-            can_become_main_window: false
+            // Делаем окно "обычным" с точки зрения ввода: должно уметь получать фокус и принимать клавиатуру.
+            // При показе по хоткею мы всё равно не вызываем set_focus, так что фокус не "крадём".
+            can_become_key_window: true,
+            can_become_main_window: true
         }
     })
 }
@@ -98,6 +106,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::start_recording,
             commands::stop_recording,
+            commands::set_microphone_transcription_enabled,
             commands::get_recording_status,
             commands::toggle_window,
             commands::toggle_recording_with_window,
@@ -112,6 +121,8 @@ pub fn run() {
             commands::update_app_config,
             commands::start_microphone_test,
             commands::stop_microphone_test,
+            commands::start_system_audio_test,
+            commands::stop_system_audio_test,
             commands::register_recording_hotkey,
             commands::unregister_recording_hotkey,
             commands::check_for_updates,
@@ -121,6 +132,12 @@ pub fn run() {
             commands::download_whisper_model,
             commands::delete_whisper_model,
             commands::get_audio_devices,
+            commands::get_output_audio_devices,
+            commands::get_audio_permission_status,
+            commands::request_system_audio_permission,
+            commands::start_haiku_stream,
+            commands::start_haiku_chat_stream,
+            commands::start_code_explain_stream,
             commands::check_accessibility_permission,
             commands::request_accessibility_permission,
             commands::auto_paste_text,
@@ -137,7 +154,7 @@ pub fn run() {
         .setup(|app| {
             #[cfg(debug_assertions)]
             {
-                log::info!("VoicetextAI application started in debug mode");
+                log::info!("HackInterviewAI application started in debug mode");
             }
 
             // E2E режим: нужен для WebDriver тестов (Linux/Windows), чтобы:
@@ -208,12 +225,6 @@ pub fn run() {
                         match window_clone.to_panel::<FloatingPanel>() {
                             Ok(panel) => {
                                 log::info!("Окно успешно конвертировано в NSPanel (macOS)");
-
-                                // Устанавливаем nonactivatingPanel style mask - окно не забирает фокус
-                                // Это критично для появления поверх fullscreen приложений
-                                use tauri_nspanel::StyleMask;
-                                panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
-                                log::info!("🎭 Установлен style mask: nonactivating_panel");
 
                                 // Устанавливаем максимальный window level для появления поверх fullscreen
                                 panel.set_level(PanelLevel::ScreenSaver.value());
@@ -361,7 +372,8 @@ pub fn run() {
                                 .unwrap_or_default();
                             stt.backend_auth_token = store.session.as_ref().map(|s| s.access_token.clone());
                             let _ = crate::infrastructure::ConfigStore::save_config(&stt).await;
-                            let _ = state.transcription_service.update_config(stt).await;
+                            let _ = state.transcription_service.update_config(stt.clone()).await;
+                            let _ = state.microphone_transcription_service.update_config(stt).await;
 
                             // Запускаем фоновый refresh (если возможен).
                             state.restart_auth_refresh_task(app_handle.clone()).await;
@@ -429,6 +441,14 @@ pub fn run() {
                         if let Err(e) = state.transcription_service.update_config(saved_config.clone()).await {
                             log::error!("Failed to load saved STT config: {}", e);
                         } else {
+                            if let Err(e) = state
+                                .microphone_transcription_service
+                                .update_config(saved_config.clone())
+                                .await
+                            {
+                                log::warn!("Failed to update microphone STT config: {}", e);
+                            }
+
                             // Синхронизируем с AppConfig
                             state.config.write().await.stt = saved_config;
                             log::info!("Loaded saved STT configuration");
@@ -485,22 +505,46 @@ pub fn run() {
 
                         *state.config.write().await = saved_app_config.clone();
 
-                        state.transcription_service
+                        state.microphone_transcription_service
                             .set_microphone_sensitivity(saved_app_config.microphone_sensitivity)
                             .await;
 
+                        // Применяем выбранный микрофон (если задан) — best-effort.
+                        if let Some(mic) = saved_app_config.selected_audio_device.clone() {
+                            if let Ok(capture) = crate::infrastructure::audio::SystemAudioCapture::with_device(Some(mic.clone())) {
+                                if let Err(e) = state
+                                    .microphone_transcription_service
+                                    .replace_audio_capture(Box::new(capture))
+                                    .await
+                                {
+                                    log::warn!("Failed to apply selected microphone device {:?}: {}", mic, e);
+                                } else {
+                                    log::info!("Applied selected microphone device: {:?}", mic);
+                                }
+                            } else {
+                                log::warn!("Failed to create microphone capture for device: {:?}", mic);
+                            }
+                        }
+
                         if let Err(e) = state.recreate_audio_capture_with_device(
-                            saved_app_config.selected_audio_device.clone(),
+                            saved_app_config.selected_output_audio_device.clone(),
                             app_handle.clone()
                         ).await {
                             log::error!("Failed to apply selected audio device: {}", e);
                             log::warn!("Using default audio device instead");
-                        } else if saved_app_config.selected_audio_device.is_some() {
-                            log::info!("Applied selected audio device: {:?}", saved_app_config.selected_audio_device);
+                        } else if saved_app_config.selected_output_audio_device.is_some() {
+                            log::info!(
+                                "Applied selected system output device: {:?}",
+                                saved_app_config.selected_output_audio_device
+                            );
                         }
 
-                        log::info!("Loaded saved app configuration (sensitivity: {}%, device: {:?})",
-                            saved_app_config.microphone_sensitivity, saved_app_config.selected_audio_device);
+                        log::info!(
+                            "Loaded saved app configuration (sensitivity: {}%, mic: {:?}, system: {:?})",
+                            saved_app_config.microphone_sensitivity,
+                            saved_app_config.selected_audio_device,
+                            saved_app_config.selected_output_audio_device
+                        );
 
                         // Аналогично STT: после асинхронной загрузки пинаем invalidation.
                         let revision = AppState::bump_revision(&state.app_config_revision).await;

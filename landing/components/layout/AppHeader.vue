@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { mdiMenu, mdiClose } from '@mdi/js';
+import { useDisplay } from 'vuetify';
 
 const { t } = useI18n();
+const { smAndDown } = useDisplay();
 const menuOpen = ref(false);
 const { trackNavClick } = useAnalytics();
 
@@ -13,140 +14,78 @@ const navItems = computed(() => [
 </script>
 
 <template>
-  <header class="app-header">
-    <v-container class="app-header__inner">
+  <v-app-bar flat class="app-header">
+    <v-container class="d-flex align-center header-container ml-24">
       <AppLogo />
-      <nav class="app-header__nav">
+      <div class="nav-links ml-6" v-show="!smAndDown">
         <v-btn v-for="item in navItems" :key="item.id" variant="text" :href="`#${item.id}`" @click="trackNavClick(item.id)">
           {{ item.label }}
         </v-btn>
-      </nav>
-      <div class="app-header__spacer" />
-      <div class="app-header__desktop-actions">
+      </div>
+      <v-spacer />
+      <div class="desktop-actions" v-show="!smAndDown">
         <LanguageSwitcher compact />
         <ThemeToggle />
       </div>
-      <div class="app-header__mobile-actions">
-        <v-btn :icon="mdiMenu" variant="text" @click="menuOpen = true" />
-        <Teleport to="body">
-          <Transition name="mobile-menu-fade">
-            <div v-if="menuOpen" class="mobile-menu-overlay" @click.self="menuOpen = false">
-              <div class="mobile-menu">
-                <div class="mobile-menu__header">
-                  <AppLogo />
-                  <div style="flex: 1" />
-                  <v-btn :icon="mdiClose" variant="text" @click="menuOpen = false" />
-                </div>
-                <hr class="mobile-menu__divider" />
-                <nav class="mobile-menu__list">
-                  <a
-                    v-for="item in navItems"
-                    :key="item.id"
-                    :href="`#${item.id}`"
-                    class="mobile-menu__link"
-                    @click="trackNavClick(item.id); menuOpen = false"
-                  >
-                    {{ item.label }}
-                  </a>
-                </nav>
-                <hr class="mobile-menu__divider" />
-                <div class="mobile-menu__actions">
-                  <LanguageSwitcher icon-only />
-                  <ThemeToggle />
-                </div>
-              </div>
+      <div class="mobile-actions" v-show="smAndDown">
+        <v-btn icon="mdi-menu" variant="text" @click="menuOpen = true" />
+        <v-dialog v-model="menuOpen" fullscreen scrim>
+          <v-card class="mobile-menu">
+            <div class="mobile-menu__header">
+              <AppLogo />
+              <v-spacer />
+              <v-btn icon="mdi-close" variant="text" @click="menuOpen = false" />
             </div>
-          </Transition>
-        </Teleport>
+            <v-divider />
+            <v-list class="mobile-menu__list">
+              <v-list-item
+                v-for="item in navItems"
+                :key="item.id"
+                :title="item.label"
+                :href="`#${item.id}`"
+                @click="trackNavClick(item.id); menuOpen = false"
+              />
+            </v-list>
+            <v-divider />
+            <div class="mobile-menu__actions">
+              <LanguageSwitcher icon-only />
+              <ThemeToggle />
+            </div>
+          </v-card>
+        </v-dialog>
       </div>
     </v-container>
-  </header>
+  </v-app-bar>
 </template>
 
 <style scoped>
-.app-header {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 1000;
-  height: 64px;
-  display: flex;
-  align-items: center;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-}
-
-.v-theme--light .app-header {
-  background: rgba(255, 255, 255, 0.85);
-  border-bottom-color: rgba(0, 0, 0, 0.06);
-}
-
-.v-theme--dark .app-header {
-  background: rgba(18, 18, 18, 0.85);
-}
-
-.app-header__inner {
-  display: flex;
-  align-items: center;
-  flex-wrap: nowrap;
-}
-
-/* Desktop nav — скрыто на мобилке через CSS media query (SSR-safe) */
-.app-header__nav {
+.nav-links {
   display: flex;
   align-self: stretch;
   align-items: stretch;
-  margin-left: 16px;
 }
 
-.app-header__nav :deep(.v-btn) {
+.nav-links :deep(.v-btn) {
   height: 100% !important;
   border-radius: 0;
 }
 
-.app-header__spacer {
-  flex: 1;
+.header-container {
+  flex-wrap: nowrap;
 }
 
-.app-header__desktop-actions {
+.desktop-actions {
   display: flex;
   gap: 8px;
   align-items: center;
 }
 
-/* Мобильное меню — скрыто на десктопе через CSS */
-.app-header__mobile-actions {
-  display: none;
-}
-
-@media (max-width: 959px) {
-  .app-header__nav {
-    display: none;
-  }
-
-  .app-header__desktop-actions {
-    display: none;
-  }
-
-  .app-header__mobile-actions {
-    display: flex;
-  }
-}
-
-/* Fullscreen мобильное меню — заменяет v-dialog для экономии ~37KB CSS */
-.mobile-menu-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9999;
-  background: rgb(var(--v-theme-surface));
+.mobile-actions :deep(.v-list-item) {
+  min-height: 40px;
 }
 
 .mobile-menu {
   padding: 16px 16px 24px;
-  height: 100%;
-  overflow-y: auto;
 }
 
 .mobile-menu__header {
@@ -156,30 +95,8 @@ const navItems = computed(() => [
   padding-bottom: 12px;
 }
 
-.mobile-menu__divider {
-  border: none;
-  border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-}
-
 .mobile-menu__list {
-  display: flex;
-  flex-direction: column;
   padding: 8px 0;
-}
-
-.mobile-menu__link {
-  display: flex;
-  align-items: center;
-  padding: 12px 16px;
-  font-size: 1rem;
-  color: rgb(var(--v-theme-on-surface));
-  text-decoration: none;
-  border-radius: 8px;
-  transition: background-color 0.15s;
-}
-
-.mobile-menu__link:hover {
-  background: rgba(var(--v-theme-on-surface), 0.06);
 }
 
 .mobile-menu__actions {
@@ -189,16 +106,5 @@ const navItems = computed(() => [
   align-items: center;
   justify-content: center;
   padding-top: 16px;
-}
-
-/* Анимация появления/скрытия */
-.mobile-menu-fade-enter-active,
-.mobile-menu-fade-leave-active {
-  transition: opacity 0.2s ease;
-}
-
-.mobile-menu-fade-enter-from,
-.mobile-menu-fade-leave-to {
-  opacity: 0;
 }
 </style>

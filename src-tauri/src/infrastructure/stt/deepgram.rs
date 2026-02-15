@@ -29,6 +29,9 @@ use crate::infrastructure::embedded_keys;
 /// 3. Stream raw PCM binary audio data
 /// 4. Receive JSON messages: type=Results, is_final, speech_final
 const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen";
+// Deepgram endpointing по умолчанию = 10ms (очень агрессивно) и может давать ранние `speech_final`.
+// Поднимаем порог, чтобы "конец фразы" определялся по более заметной паузе.
+const DEEPGRAM_ENDPOINTING_MS: u32 = 1000;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -157,10 +160,11 @@ impl SttProvider for DeepgramProvider {
 
         // Собираем URL с параметрами (добавляем channels=1 для mono)
         let url = format!(
-            "{}?encoding=linear16&sample_rate=16000&channels=1&model={}&language={}&punctuate=true&interim_results=true",
+            "{}?encoding=linear16&sample_rate=16000&channels=1&model={}&language={}&punctuate=true&interim_results=true&endpointing={}",
             DEEPGRAM_WS_URL,
             model,
-            language
+            language,
+            DEEPGRAM_ENDPOINTING_MS
         );
 
         log::debug!("Connecting to Deepgram: {}", url);
@@ -1259,7 +1263,7 @@ impl DeepgramProvider {
                                     timestamp: std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-                                        .as_secs() as i64,
+                                        .as_millis() as i64,
                                     start, // передаем start время из Deepgram
                                     duration, // передаем duration из Deepgram
                                 };
@@ -1390,8 +1394,19 @@ mod tests {
         let config = SttConfig::default();
 
         let result = provider.initialize(&config).await;
-        assert!(result.is_ok(), "Should succeed with embedded key");
-        assert!(provider.api_key.is_some(), "API key should be set from embedded key");
+        if embedded_keys::has_embedded_deepgram_key() {
+            assert!(result.is_ok(), "Should succeed with embedded key");
+            assert!(
+                provider.api_key.is_some(),
+                "API key should be set from embedded key"
+            );
+        } else {
+            assert!(
+                result.is_err(),
+                "Should fail when neither user key nor embedded key is available"
+            );
+            assert!(provider.api_key.is_none());
+        }
     }
 
     #[tokio::test]

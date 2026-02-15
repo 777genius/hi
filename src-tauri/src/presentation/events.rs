@@ -10,9 +10,21 @@ pub const EVENT_RECORDING_STATUS: &str = "recording:status";
 pub const EVENT_AUDIO_LEVEL: &str = "audio:level";
 pub const EVENT_AUDIO_SPECTRUM: &str = "audio:spectrum";
 pub const EVENT_MICROPHONE_TEST_LEVEL: &str = "microphone_test:level";
+pub const EVENT_SYSTEM_AUDIO_TEST_LEVEL: &str = "system_audio_test:level";
+pub const EVENT_MICROPHONE_AUDIO_LEVEL: &str = "microphone:level";
 
 pub const EVENT_TRANSCRIPTION_ERROR: &str = "transcription:error";
 pub const EVENT_CONNECTION_QUALITY: &str = "connection:quality";
+
+// Haiku (Anthropic) streaming events
+pub const EVENT_HAIKU_DELTA: &str = "haiku:delta";
+pub const EVENT_HAIKU_DONE: &str = "haiku:done";
+pub const EVENT_HAIKU_ERROR: &str = "haiku:error";
+
+// Code explain streaming events (separate channel from chat Haiku)
+pub const EVENT_CODE_EXPLAIN_DELTA: &str = "code_explain:delta";
+pub const EVENT_CODE_EXPLAIN_DONE: &str = "code_explain:done";
+pub const EVENT_CODE_EXPLAIN_ERROR: &str = "code_explain:error";
 
 // UI lifecycle events
 // Важно: это не "focus", потому что main окно на macOS может быть nonactivating NSPanel и не получать фокус.
@@ -37,7 +49,10 @@ pub struct PartialTranscriptionPayload {
     /// Уникальный идентификатор сессии записи (монотонно растёт).
     /// Нужен, чтобы frontend мог игнорировать "поздние" события от предыдущей сессии.
     pub session_id: u64,
+    /// Источник аудио: "system" | "microphone"
+    pub source: String,
     pub text: String,
+    /// Unix timestamp in milliseconds (epoch ms).
     pub timestamp: i64,
     pub is_segment_final: bool, // true когда сегмент финализирован (is_final=true в Deepgram)
     pub start: f64, // start время utterance в секундах (от Deepgram)
@@ -45,9 +60,10 @@ pub struct PartialTranscriptionPayload {
 }
 
 impl PartialTranscriptionPayload {
-    pub fn from_transcription(t: Transcription, session_id: u64) -> Self {
+    pub fn from_transcription(t: Transcription, session_id: u64, source: &str) -> Self {
         Self {
             session_id,
+            source: source.to_string(),
             text: t.text,
             timestamp: t.timestamp,
             is_segment_final: t.is_final, // передаем флаг финализации сегмента
@@ -62,16 +78,20 @@ impl PartialTranscriptionPayload {
 pub struct FinalTranscriptionPayload {
     /// Уникальный идентификатор сессии записи (монотонно растёт).
     pub session_id: u64,
+    /// Источник аудио: "system" | "microphone"
+    pub source: String,
     pub text: String,
     pub confidence: Option<f32>,
     pub language: Option<String>,
+    /// Unix timestamp in milliseconds (epoch ms).
     pub timestamp: i64,
 }
 
 impl FinalTranscriptionPayload {
-    pub fn from_transcription(t: Transcription, session_id: u64) -> Self {
+    pub fn from_transcription(t: Transcription, session_id: u64, source: &str) -> Self {
         Self {
             session_id,
+            source: source.to_string(),
             text: t.text,
             confidence: t.confidence,
             language: t.language,
@@ -107,6 +127,13 @@ pub struct AudioSpectrumPayload {
 /// Payload for microphone test level event
 #[derive(Debug, Clone, Serialize)]
 pub struct MicrophoneTestLevelPayload {
+    /// Normalized audio level (0.0 - 1.0)
+    pub level: f32,
+}
+
+/// Payload for system audio (output/loopback) test level event
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemAudioTestLevelPayload {
     /// Normalized audio level (0.0 - 1.0)
     pub level: f32,
 }
@@ -188,4 +215,38 @@ pub struct ConnectionQualityPayload {
     pub quality: ConnectionQuality,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>, // дополнительная информация о причине
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HaikuDeltaPayload {
+    pub request_id: String,
+    pub delta: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HaikuDonePayload {
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HaikuErrorPayload {
+    pub request_id: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeExplainDeltaPayload {
+    pub request_id: String,
+    pub delta: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeExplainDonePayload {
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeExplainErrorPayload {
+    pub request_id: String,
+    pub error: String,
 }

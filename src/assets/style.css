@@ -1,3 +1,5 @@
+@import 'highlight.js/styles/github-dark.css';
+
 :root {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
     /* Color scheme */
@@ -118,4 +120,11 @@ html, body {
 
 ::-webkit-scrollbar-thumb {
     background: transparent;
+}
+
+/* highlight.js theme: let контейнеры управляют фоном */
+pre code.hljs,
+code.hljs,
+.hljs {
+    background: transparent !important;
 }

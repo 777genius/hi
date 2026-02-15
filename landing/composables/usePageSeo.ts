@@ -23,7 +23,7 @@ export const usePageSeo = (titleKey: string, descriptionKey: string, options: Pa
   const route = useRoute();
   const config = useRuntimeConfig();
   const siteUrl = config.public.siteUrl || "https://example.com";
-  const siteName = (config as any)?.site?.name || "VoicetextAI";
+  const siteName = (config as any)?.site?.name || "HackInterviewAI";
   const switchLocale = useSwitchLocalePath();
 
   const title = computed(() => t(titleKey));

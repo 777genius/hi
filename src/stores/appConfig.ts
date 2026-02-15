@@ -15,10 +15,11 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const isSyncing = ref(false);
 
   const recordingHotkey = ref('CmdOrCtrl+Shift+X');
-  const autoCopyToClipboard = ref(true);
+  const autoCopyToClipboard = ref(false);
   const autoPasteText = ref(false);
   const microphoneSensitivity = ref(95);
   const selectedAudioDevice = ref('');
+  const selectedOutputAudioDevice = ref('');
 
   let syncHandle: RevisionSyncHandle | null = null;
 
@@ -29,6 +30,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     autoPasteText.value = data.auto_paste_text ?? autoPasteText.value;
     microphoneSensitivity.value = data.microphone_sensitivity ?? microphoneSensitivity.value;
     selectedAudioDevice.value = data.selected_audio_device ?? '';
+    selectedOutputAudioDevice.value = data.selected_output_audio_device ?? '';
     isLoaded.value = true;
   }
 
@@ -82,8 +84,10 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     autoPasteText,
     microphoneSensitivity,
     selectedAudioDevice,
+    selectedOutputAudioDevice,
 
     hasSelectedAudioDevice: computed(() => Boolean(selectedAudioDevice.value)),
+    hasSelectedOutputAudioDevice: computed(() => Boolean(selectedOutputAudioDevice.value)),
 
     refresh,
     startSync,

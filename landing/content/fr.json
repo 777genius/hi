@@ -1,144 +1,130 @@
 {
-  "hero": {
-    "title": "VoicetextAI",
-    "subtitle": "Voix en texte rapide et précise propulsée par Deepgram Nova-3."
-  },
-  "features": [
-    {
-      "id": "realtime",
-      "title": "Transcription en temps réel",
-      "description": "Résultats partiels et finaux pendant que vous parlez."
+    "hero": {
+        "title": "HackInterviewAI",
+        "subtitle": "Voix en texte rapide et précise propulsée par Deepgram Nova-3."
     },
-    {
-      "id": "multilingual",
-      "title": "40+ langues",
-      "description": "Transcrivez la parole dans plus de 40 langues avec une grande précision."
-    },
-    {
-      "id": "crossPlatform",
-      "title": "Multiplateforme",
-      "description": "Compatible macOS, Windows et Linux."
-    },
-    {
-      "id": "openSource",
-      "title": "Open source",
-      "description": "Code source complet sur GitHub. Transparent et communautaire."
-    }
-  ],
-  "providers": [
-    {
-      "id": "nova3-accuracy",
-      "name": "Meilleure précision de sa catégorie",
-      "description": "54% d'erreurs en moins que les concurrents. Comprend exactement ce que vous dites, même dans un environnement bruyant."
-    },
-    {
-      "id": "nova3-multilingual",
-      "name": "Temps réel en 40+ langues",
-      "description": "Parlez dans n'importe quelle langue — la transcription apparaît instantanément pendant que vous parlez."
-    },
-    {
-      "id": "nova3-customization",
-      "name": "S'adapte à votre vocabulaire",
-      "description": "Termes techniques, noms, jargon — reconnaît vos mots sans aucune configuration."
-    },
-    {
-      "id": "nova3-enterprise",
-      "name": "Fonctionne avec tout audio",
-      "description": "Bruit de fond, accents, micros de mauvaise qualité — Nova-3 gère tout."
-    },
-    {
-      "id": "nova3-preferred",
-      "name": "Préféré 8 contre 1 face à Whisper",
-      "description": "Dans des tests en aveugle sur 7 langues, les utilisateurs ont massivement choisi Nova-3."
-    }
-  ],
-  "openSource": {
-    "title": "Open source",
-    "bullets": [
-      "100% open source — lisez chaque ligne de code sur GitHub",
-      "Développé en public — chaque correctif et fonctionnalité suivi ouvertement",
-      "Pas de télémétrie, pas de verrouillage — vos données vocales restent les vôtres"
+    "features": [{
+            "id": "realtime",
+            "title": "Transcription en temps réel",
+            "description": "Résultats partiels et finaux pendant que vous parlez."
+        },
+        {
+            "id": "multilingual",
+            "title": "40+ langues",
+            "description": "Transcrivez la parole dans plus de 40 langues avec une grande précision."
+        },
+        {
+            "id": "crossPlatform",
+            "title": "Multiplateforme",
+            "description": "Compatible macOS, Windows et Linux."
+        },
+        {
+            "id": "openSource",
+            "title": "Open source",
+            "description": "Code source complet sur GitHub. Transparent et communautaire."
+        }
     ],
-    "note": "Transparence et confiance grâce au code ouvert."
-  },
-  "faq": [
-    {
-      "id": "platforms",
-      "question": "Quelles plateformes sont prises en charge ?",
-      "answer": "macOS, Windows et Linux."
+    "providers": [{
+            "id": "nova3-accuracy",
+            "name": "Précision supérieure",
+            "description": "54,3% de réduction du taux d'erreur en streaming et 47,4% en traitement par lots par rapport aux concurrents."
+        },
+        {
+            "id": "nova3-multilingual",
+            "name": "Multilingue en temps réel",
+            "description": "Premier modèle vocal IA offrant la transcription multilingue en temps réel."
+        },
+        {
+            "id": "nova3-customization",
+            "name": "Personnalisation autonome",
+            "description": "Adaptation instantanée du vocabulaire sans réentraînement — précise et efficace."
+        },
+        {
+            "id": "nova3-enterprise",
+            "name": "Prêt pour l'entreprise",
+            "description": "Capacités étendues pour les cas d'usage en entreprise et les conditions audio difficiles."
+        },
+        {
+            "id": "nova3-preferred",
+            "name": "Préféré à Whisper",
+            "description": "Préféré dans 7 langues sur 7 testées — jusqu'à 8 contre 1 pour certaines langues."
+        }
+    ],
+    "openSource": {
+        "title": "Open source",
+        "bullets": [
+            "Code source disponible sur GitHub — inspectez, modifiez et compilez librement",
+            "Développement communautaire avec issues ouvertes et contributions",
+            "Mises à jour régulières et processus de développement transparent"
+        ],
+        "note": "Transparence et confiance grâce au code ouvert."
     },
-    {
-      "id": "howItWorks",
-      "question": "Comment fonctionne la transcription ?",
-      "answer": "Appuyez sur le raccourci, parlez — le texte apparaît instantanément et est copié dans le presse-papiers."
+    "faq": [{
+            "id": "platforms",
+            "question": "Quelles plateformes sont prises en charge ?",
+            "answer": "macOS, Windows et Linux."
+        },
+        {
+            "id": "howItWorks",
+            "question": "Comment fonctionne la transcription ?",
+            "answer": "Votre voix est envoyée à Deepgram Nova-3 et transcrite en temps réel avec une grande précision."
+        },
+        {
+            "id": "hotkey",
+            "question": "Comment changer le raccourci ?",
+            "answer": "Modifiez-le dans les paramètres de l'application."
+        },
+        {
+            "id": "openSource",
+            "question": "Le projet est-il open source ?",
+            "answer": "Oui, le code est open source sur <a href='https://github.com/777genius/voice-to-text' target='_blank'>GitHub</a>."
+        }
+    ],
+    "download": {
+        "title": "Télécharger",
+        "note": "Choisissez votre plateforme et installez en quelques minutes."
     },
-    {
-      "id": "isFree",
-      "question": "C'est gratuit ?",
-      "answer": "Oui. Le plan gratuit est sans limite de durée. Les plans payants offrent plus de minutes et un support prioritaire."
-    },
-    {
-      "id": "privacy",
-      "question": "Mes données vocales sont-elles privées ?",
-      "answer": "L'audio est traité en temps réel et n'est pas stocké. Aucun enregistrement n'est conservé."
-    },
-    {
-      "id": "hotkey",
-      "question": "Comment changer le raccourci ?",
-      "answer": "Dans les paramètres de l'application."
-    },
-    {
-      "id": "openSource",
-      "question": "Le projet est-il open source ?",
-      "answer": "Oui, tout le code sur <a href='https://github.com/777genius/voice-to-text' target='_blank'>GitHub</a>."
-    }
-  ],
-  "download": {
-    "title": "Télécharger",
-    "note": "Choisissez votre plateforme et installez en quelques minutes."
-  },
-  "pricing": [
-    {
-      "id": "free",
-      "name": "Gratuit",
-      "price": "$0",
-      "period": "pour toujours",
-      "description": "Essayez VoicetextAI avec un généreux forfait gratuit.",
-      "features": [
-        "Deepgram Nova-3",
-        "Transcription en temps réel",
-        "Raccourcis globaux",
-        "Copie auto & collage auto",
-        "Support communautaire"
-      ]
-    },
-    {
-      "id": "pro",
-      "name": "Pro",
-      "price": "$9",
-      "period": "par mois",
-      "description": "Plus de minutes et support prioritaire pour les utilisateurs avancés.",
-      "features": [
-        "Tout du plan Gratuit",
-        "Limites d'utilisation étendues",
-        "Support prioritaire",
-        "Accès anticipé aux fonctionnalités"
-      ],
-      "highlighted": true
-    },
-    {
-      "id": "business",
-      "name": "Team",
-      "price": "$29",
-      "period": "par mois",
-      "description": "Pour les équipes avec facturation partagée et contrôle admin.",
-      "features": [
-        "Tout du plan Pro",
-        "Jusqu'à 10 places",
-        "Facturation partagée",
-        "Tableau de bord d'utilisation",
-        "Support dédié"
-      ]
-    }
-  ]
+    "pricing": [{
+            "id": "free",
+            "name": "Gratuit",
+            "price": "$0",
+            "period": "pour toujours",
+            "description": "Essayez HackInterviewAI avec un généreux forfait gratuit.",
+            "features": [
+                "Deepgram Nova-3",
+                "Transcription en temps réel",
+                "Raccourcis globaux",
+                "Copie auto & collage auto",
+                "Support communautaire"
+            ]
+        },
+        {
+            "id": "pro",
+            "name": "Pro",
+            "price": "$9",
+            "period": "par mois",
+            "description": "Plus de minutes et support prioritaire pour les utilisateurs avancés.",
+            "features": [
+                "Tout du plan Gratuit",
+                "Limites d'utilisation étendues",
+                "Support prioritaire",
+                "Accès anticipé aux fonctionnalités"
+            ],
+            "highlighted": true
+        },
+        {
+            "id": "business",
+            "name": "Team",
+            "price": "$29",
+            "period": "par mois",
+            "description": "Pour les équipes avec facturation partagée et contrôle admin.",
+            "features": [
+                "Tout du plan Pro",
+                "Jusqu'à 10 places",
+                "Facturation partagée",
+                "Tableau de bord d'utilisation",
+                "Support dédié"
+            ]
+        }
+    ]
 }

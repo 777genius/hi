@@ -11,7 +11,7 @@ usePageSeo("meta.refundPolicyTitle", "meta.refundPolicyDescription");
       <section class="legal-section">
         <h2 class="text-h6">1. Overview</h2>
         <p>
-          This Refund Policy applies to paid subscriptions to VoicetextAI (the "Service").
+          This Refund Policy applies to paid subscriptions to HackInterviewAI (the "Service").
           All payments are processed by
           <a href="https://www.paddle.com" target="_blank" rel="noopener">Paddle.com</a>,
           which acts as the Merchant of Record for all transactions.

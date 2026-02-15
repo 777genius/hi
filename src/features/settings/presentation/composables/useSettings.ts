@@ -69,6 +69,11 @@ export function useSettings() {
     set: (value: string) => store.setSelectedAudioDevice(value),
   });
 
+  const selectedOutputAudioDevice = computed({
+    get: () => store.selectedOutputAudioDevice,
+    set: (value: string) => store.setSelectedOutputAudioDevice(value),
+  });
+
   const autoCopyToClipboard = computed({
     get: () => store.autoCopyToClipboard,
     set: (value: boolean) => store.setAutoCopyToClipboard(value),
@@ -106,19 +111,22 @@ export function useSettings() {
         if (appConfigStoreInstance.isLoaded) {
           store.setMicrophoneSensitivity(appConfigStoreInstance.microphoneSensitivity, { persist: false });
           store.setRecordingHotkey(appConfigStoreInstance.recordingHotkey);
-          store.setAutoCopyToClipboard(appConfigStoreInstance.autoCopyToClipboard);
-          store.setAutoPasteText(appConfigStoreInstance.autoPasteText);
+          store.setAutoCopyToClipboard(false);
+          store.setAutoPasteText(false);
           store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
+          store.setSelectedOutputAudioDevice(appConfigStoreInstance.selectedOutputAudioDevice);
         } else {
           store.setMicrophoneSensitivity(95, { persist: false });
           store.setRecordingHotkey('CmdOrCtrl+Shift+X');
-          store.setAutoCopyToClipboard(true);
+          store.setAutoCopyToClipboard(false);
           store.setAutoPasteText(false);
           store.setSelectedAudioDevice('');
+          store.setSelectedOutputAudioDevice('');
         }
 
         // В web режиме аудио-устройства/permission недоступны
         store.setAvailableAudioDevices([]);
+        store.setAvailableOutputAudioDevices([]);
         store.setAccessibilityPermission(true);
 
         // API ключи и whisper-модель не используются в backend-only.
@@ -165,17 +173,19 @@ export function useSettings() {
       if (appConfigStoreInstance.isLoaded) {
         store.setMicrophoneSensitivity(appConfigStoreInstance.microphoneSensitivity, { persist: false });
         store.setRecordingHotkey(appConfigStoreInstance.recordingHotkey);
-        store.setAutoCopyToClipboard(appConfigStoreInstance.autoCopyToClipboard);
-        store.setAutoPasteText(appConfigStoreInstance.autoPasteText);
+        store.setAutoCopyToClipboard(false);
+        store.setAutoPasteText(false);
         store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
+        store.setSelectedOutputAudioDevice(appConfigStoreInstance.selectedOutputAudioDevice);
       } else {
         try {
           const appConfig = await tauriSettingsService.getAppConfig();
           store.setMicrophoneSensitivity(appConfig.microphone_sensitivity ?? 95, { persist: false });
           store.setRecordingHotkey(appConfig.recording_hotkey ?? 'CmdOrCtrl+Shift+X');
-          store.setAutoCopyToClipboard(appConfig.auto_copy_to_clipboard ?? true);
-          store.setAutoPasteText(appConfig.auto_paste_text ?? false);
+          store.setAutoCopyToClipboard(false);
+          store.setAutoPasteText(false);
           store.setSelectedAudioDevice(appConfig.selected_audio_device ?? '');
+          store.setSelectedOutputAudioDevice(appConfig.selected_output_audio_device ?? '');
         } catch (err) {
           console.log('App config не загружен, используем значения по умолчанию');
         }
@@ -187,6 +197,14 @@ export function useSettings() {
         store.setAvailableAudioDevices(devices);
       } catch (err) {
         console.error('Ошибка загрузки аудио устройств:', err);
+      }
+
+      // Загружаем список output устройств (источники системного звука)
+      try {
+        const devices = await tauriSettingsService.getOutputAudioDevices();
+        store.setAvailableOutputAudioDevices(devices);
+      } catch (err) {
+        console.error('Ошибка загрузки output аудио устройств:', err);
       }
 
       // Проверяем Accessibility разрешение на macOS
@@ -258,9 +276,8 @@ export function useSettings() {
       // Остальные поля можно сохранить вторым вызовом.
       await tauriSettingsService.updateAppConfig({
         recording_hotkey: store.recordingHotkey,
-        auto_copy_to_clipboard: store.autoCopyToClipboard,
-        auto_paste_text: store.autoPasteText,
         selected_audio_device: store.selectedAudioDevice,
+        selected_output_audio_device: store.selectedOutputAudioDevice,
       });
 
       // Жёсткая проверка: иногда UI может думать что сохранили, но по факту snapshot остался старым.
@@ -391,6 +408,7 @@ export function useSettings() {
     recordingHotkey,
     microphoneSensitivity,
     selectedAudioDevice,
+    selectedOutputAudioDevice,
     autoCopyToClipboard,
     autoPasteText,
 
@@ -401,6 +419,7 @@ export function useSettings() {
     isLoading: computed(() => store.isLoading),
     errorMessage: computed(() => store.errorMessage),
     availableAudioDevices: computed(() => store.availableAudioDevices),
+    availableOutputAudioDevices: computed(() => store.availableOutputAudioDevices),
     hasAccessibilityPermission: computed(() => store.hasAccessibilityPermission),
 
     // Утилиты

@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { mdiApple, mdiMicrosoftWindows, mdiPenguin, mdiDownload, mdiCheckCircle } from '@mdi/js';
 import { downloadAssets } from "~/data/downloads";
 import type { DownloadArch } from "~/data/downloads";
 
@@ -12,9 +11,9 @@ const { trackDownloadClick } = useAnalytics();
 onMounted(() => downloadStore.init());
 
 const platformIcons: Record<string, string> = {
-  macos: mdiApple,
-  windows: mdiMicrosoftWindows,
-  linux: mdiPenguin,
+  macos: "mdi-apple",
+  windows: "mdi-microsoft-windows",
+  linux: "mdi-penguin",
 };
 
 const platformColors: Record<string, string> = {
@@ -72,6 +71,7 @@ const sortedAssets = computed(() => {
     <v-container>
       <!-- Header -->
       <div class="download-section__header">
+        <span class="download-section__badge">{{ t("nav.download") }}</span>
         <h2 class="download-section__title">{{ content.download.title }}</h2>
         <p class="download-section__subtitle">{{ content.download.note }}</p>
       </div>
@@ -94,7 +94,9 @@ const sortedAssets = computed(() => {
 
           <!-- Platform icon -->
           <div class="download-section__card-icon-wrap">
-            <v-icon size="28" class="download-section__card-icon" :icon="platformIcons[asset.os] || mdiDownload" />
+            <v-icon size="28" class="download-section__card-icon">
+              {{ platformIcons[asset.os] || "mdi-download" }}
+            </v-icon>
           </div>
 
           <!-- Platform info -->
@@ -112,7 +114,7 @@ const sortedAssets = computed(() => {
             :href="getDownloadUrl(asset)"
             @click.stop="trackDownloadClick({ os: asset.os, arch: asset.arch, version: getDownloadVersion(asset), source: 'download_section' }); downloadStore.setSelected(asset.id)"
           >
-            <v-icon size="18" class="download-section__btn-icon" :icon="mdiDownload" />
+            <v-icon size="18" class="download-section__btn-icon">mdi-download</v-icon>
             <span>{{ t("download.title") }}</span>
           </a>
 
@@ -121,7 +123,7 @@ const sortedAssets = computed(() => {
             v-if="downloadStore.selectedId === asset.id"
             class="download-section__card-indicator"
           >
-            <v-icon size="16" :icon="mdiCheckCircle" />
+            <v-icon size="16">mdi-check-circle</v-icon>
             <span>{{ t("download.detected") }}</span>
           </div>
         </div>

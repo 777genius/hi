@@ -144,8 +144,18 @@ pub struct AppConfig {
     /// Formula: gain = sensitivity/100 for 0-100%, gain = 1.0 + (sensitivity-100)/100*4.0 for 100-200%
     pub microphone_sensitivity: u8,
 
-    /// Selected audio input device name (None = use system default)
+    /// Selected microphone input device name (None = use system default)
+    #[serde(default)]
     pub selected_audio_device: Option<String>,
+
+    /// Selected system audio output device name (None = use system default).
+    ///
+    /// Note:
+    /// - Windows: applied via WASAPI loopback on the selected output endpoint.
+    /// - macOS: selection is currently ignored (system mix via ScreenCaptureKit).
+    /// - Linux: selection is currently ignored (PipeWire capture picks the default sink).
+    #[serde(default)]
+    pub selected_output_audio_device: Option<String>,
 
     /// Keep history of transcriptions
     pub keep_history: bool,
@@ -159,12 +169,13 @@ impl Default for AppConfig {
         Self {
             stt: SttConfig::default(),
             recording_hotkey: "CmdOrCtrl+Shift+X".to_string(), // Cmd на Mac, Ctrl на Win/Linux
-            auto_copy_to_clipboard: true,
-            auto_paste_text: false, // По умолчанию выключено (может раздражать)
-            auto_close_window: true,
+            auto_copy_to_clipboard: false,
+            auto_paste_text: false,
+            auto_close_window: false,
             vad_silence_timeout_ms: 3000, // 3 секунды тишины перед авто-остановкой
             microphone_sensitivity: 95, // Очень высокая чувствительность по умолчанию (порог ~1638)
             selected_audio_device: None, // По умолчанию используем системное устройство
+            selected_output_audio_device: None,
             keep_history: true,
             max_history_items: 20,
         }
@@ -252,8 +263,8 @@ mod tests {
     fn test_app_config_default() {
         let config = AppConfig::default();
         assert_eq!(config.recording_hotkey, "CmdOrCtrl+Shift+X");
-        assert!(config.auto_copy_to_clipboard);
-        assert!(config.auto_close_window);
+        assert!(!config.auto_copy_to_clipboard);
+        assert!(!config.auto_close_window);
         assert_eq!(config.vad_silence_timeout_ms, 3000);
         assert_eq!(config.microphone_sensitivity, 95);
         assert!(config.keep_history);

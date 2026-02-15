@@ -18,6 +18,7 @@ export interface Transcription {
 
 export interface PartialTranscriptionPayload {
   session_id: number;
+  source?: 'system' | 'microphone';
   text: string;
   timestamp: number;
   is_segment_final: boolean; // true когда сегмент финализирован (но речь продолжается)
@@ -27,6 +28,7 @@ export interface PartialTranscriptionPayload {
 
 export interface FinalTranscriptionPayload {
   session_id: number;
+  source?: 'system' | 'microphone';
   text: string;
   confidence?: number;
   language?: string;
@@ -84,12 +86,46 @@ export interface ConnectionQualityPayload {
   reason?: string;
 }
 
+export interface HaikuDeltaPayload {
+  request_id: string;
+  delta: string;
+}
+
+export interface HaikuDonePayload {
+  request_id: string;
+}
+
+export interface HaikuErrorPayload {
+  request_id: string;
+  error: string;
+}
+
+export interface CodeExplainDeltaPayload {
+  request_id: string;
+  delta: string;
+}
+
+export interface CodeExplainDonePayload {
+  request_id: string;
+}
+
+export interface CodeExplainErrorPayload {
+  request_id: string;
+  error: string;
+}
+
 // Event names (must match Rust backend)
 export const EVENT_TRANSCRIPTION_PARTIAL = 'transcription:partial';
 export const EVENT_TRANSCRIPTION_FINAL = 'transcription:final';
 export const EVENT_RECORDING_STATUS = 'recording:status';
 export const EVENT_TRANSCRIPTION_ERROR = 'transcription:error';
 export const EVENT_CONNECTION_QUALITY = 'connection:quality';
+export const EVENT_HAIKU_DELTA = 'haiku:delta';
+export const EVENT_HAIKU_DONE = 'haiku:done';
+export const EVENT_HAIKU_ERROR = 'haiku:error';
+export const EVENT_CODE_EXPLAIN_DELTA = 'code_explain:delta';
+export const EVENT_CODE_EXPLAIN_DONE = 'code_explain:done';
+export const EVENT_CODE_EXPLAIN_ERROR = 'code_explain:error';
 export const EVENT_ERROR = 'app:error';
 export const EVENT_RECORDING_WINDOW_SHOWN = 'recording:window-shown';
 

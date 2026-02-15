@@ -1,4 +1,4 @@
-# Итерация 0001 — Интеграция `state-sync` в VoicetextAI (@frontend) + полное удаление legacy cross-window sync
+# Итерация 0001 — Интеграция `state-sync` в HackInterviewAI (@frontend) + полное удаление legacy cross-window sync
 
 **Статус**: Draft  
 **Дата**: 2026-01-31  

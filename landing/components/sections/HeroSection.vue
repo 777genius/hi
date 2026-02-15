@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import { mdiLightningBolt, mdiTranslate, mdiMonitorMultiple } from '@mdi/js';
-
 const { content } = useLandingContent();
 const { t, locale } = useI18n();
 const { data: releaseData } = useReleaseDownloads();
@@ -58,17 +56,17 @@ const releaseDate = computed(() => {
           <!-- Trust indicators -->
           <div class="hero-section__trust">
             <div class="hero-section__trust-item">
-              <v-icon size="16" class="hero-section__trust-icon" :icon="mdiLightningBolt" />
+              <v-icon size="16" class="hero-section__trust-icon">mdi-lightning-bolt</v-icon>
               <span>{{ t("hero.trust.realtime") }}</span>
             </div>
             <div class="hero-section__trust-divider" />
             <div class="hero-section__trust-item">
-              <v-icon size="16" class="hero-section__trust-icon" :icon="mdiTranslate" />
+              <v-icon size="16" class="hero-section__trust-icon">mdi-translate</v-icon>
               <span>{{ t("hero.trust.multilingual") }}</span>
             </div>
             <div class="hero-section__trust-divider" />
             <div class="hero-section__trust-item">
-              <v-icon size="16" class="hero-section__trust-icon" :icon="mdiMonitorMultiple" />
+              <v-icon size="16" class="hero-section__trust-icon">mdi-monitor-multiple</v-icon>
               <span>{{ t("hero.trust.crossPlatform") }}</span>
             </div>
           </div>
@@ -79,12 +77,7 @@ const releaseDate = computed(() => {
           <div class="hero-section__preview">
             <div class="hero-section__preview-glow" />
             <ClientOnly>
-              <Suspense>
-                <LazyHeroDemo />
-                <template #fallback>
-                  <div class="hero-demo-fallback" />
-                </template>
-              </Suspense>
+              <LazyHeroDemo />
               <template #fallback>
                 <div class="hero-demo-fallback" />
               </template>
@@ -307,7 +300,6 @@ const releaseDate = computed(() => {
 /* ─── Preview Card ─── */
 .hero-section__preview {
   position: relative;
-  width: 100%;
   animation: heroSlideUp 0.9s ease both;
   animation-delay: 0.3s;
 }

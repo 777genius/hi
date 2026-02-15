@@ -197,8 +197,8 @@ function render() {
   const totalWidth = BAR_COUNT * barW + (BAR_COUNT - 1) * gap;
   const offsetX = (width - totalWidth) / 2;
 
-  const minAlpha = 0.08;
-  const maxAlpha = 0.55;
+  const minAlpha = 0.0035;
+  const maxAlpha = 0.025;
   const radius = 3;
 
   const visualBars = computeVisualBars(bars.value);

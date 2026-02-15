@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to VoicetextAI are documented in this file.
+All notable changes to HackInterviewAI are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
@@ -171,7 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Release process documentation (`docs/RELEASE.md`)
 
 ### Changed
-- Project rebranding: renamed to VoicetextAI throughout the project
+- Project rebranding: renamed to HackInterviewAI throughout the project
 - Redesigned landing page: new design for pricing, FAQ, footer sections
 - Updated `SupportedLanguages` component — switched to SVG flags
 - Improved `HotkeySection` in settings

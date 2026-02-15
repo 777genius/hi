@@ -16,7 +16,8 @@ import type { SettingsState } from '../../domain/types';
 import LanguageSection from './sections/LanguageSection.vue';
 import ThemeSection from './sections/ThemeSection.vue';
 import HotkeySection from './sections/HotkeySection.vue';
-import AutoActionsSection from './sections/AutoActionsSection.vue';
+import SystemAudioDeviceSection from './sections/SystemAudioDeviceSection.vue';
+import SystemAudioTestSection from './sections/SystemAudioTestSection.vue';
 import AudioDeviceSection from './sections/AudioDeviceSection.vue';
 import MicTestSection from './sections/MicTestSection.vue';
 import UpdatesSection from './sections/UpdatesSection.vue';
@@ -64,6 +65,7 @@ function snapshotSettingsState(): SettingsState {
     recordingHotkey: settingsStore.recordingHotkey,
     microphoneSensitivity: settingsStore.microphoneSensitivity,
     selectedAudioDevice: settingsStore.selectedAudioDevice,
+    selectedOutputAudioDevice: settingsStore.selectedOutputAudioDevice,
     autoCopyToClipboard: settingsStore.autoCopyToClipboard,
     autoPasteText: settingsStore.autoPasteText,
   };
@@ -143,8 +145,11 @@ async function handleSave() {
           <!-- Горячая клавиша -->
           <HotkeySection />
 
-          <!-- Автоматические действия -->
-          <AutoActionsSection />
+          <!-- Источник системного звука -->
+          <SystemAudioDeviceSection />
+
+          <!-- Тест системного звука -->
+          <SystemAudioTestSection />
 
           <!-- Выбор аудио устройства -->
           <AudioDeviceSection />

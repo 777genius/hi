@@ -127,7 +127,11 @@ impl ConfigStore {
         }
 
         let json = tokio::fs::read_to_string(path).await?;
-        let config: AppConfig = serde_json::from_str(&json)?;
+        let mut config: AppConfig = serde_json::from_str(&json)?;
+
+        // Автодействия принудительно выключены в этом форке.
+        config.auto_copy_to_clipboard = false;
+        config.auto_paste_text = false;
 
         log::info!("App config loaded from disk");
         Ok(config)
@@ -255,12 +259,15 @@ mod tests {
 
         let mut config = AppConfig::default();
         config.auto_copy_to_clipboard = true;
+        config.auto_paste_text = true;
         config.vad_silence_timeout_ms = 2500;
 
         ConfigStore::save_app_config(&config).await.unwrap();
         let loaded = ConfigStore::load_app_config().await.unwrap();
 
-        assert_eq!(loaded.auto_copy_to_clipboard, config.auto_copy_to_clipboard);
+        // Автодействия принудительно выключены при загрузке.
+        assert_eq!(loaded.auto_copy_to_clipboard, false);
+        assert_eq!(loaded.auto_paste_text, false);
         assert_eq!(loaded.vad_silence_timeout_ms, config.vad_silence_timeout_ms);
 
         ConfigStore::delete_app_config().await.unwrap();

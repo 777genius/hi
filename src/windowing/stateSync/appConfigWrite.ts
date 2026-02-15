@@ -19,6 +19,7 @@ export type UpdateAppConfigInvokeArgs = Partial<{
   autoCopyToClipboard: boolean;
   autoPasteText: boolean;
   selectedAudioDevice: string | null;
+  selectedOutputAudioDevice: string | null;
 }>;
 
 const ALLOWED_KEYS = new Set([
@@ -27,6 +28,7 @@ const ALLOWED_KEYS = new Set([
   'autoCopyToClipboard',
   'autoPasteText',
   'selectedAudioDevice',
+  'selectedOutputAudioDevice',
 ]);
 
 function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
@@ -61,6 +63,7 @@ function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
         }
         break;
       case 'selectedAudioDevice':
+      case 'selectedOutputAudioDevice':
         if (!(typeof v === 'string' || v === null)) {
           throw new Error(`[update_app_config] "${k}" должен быть string|null, получили: ${String(v)}`);
         }

@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { mdiCheckCircle, mdiShieldCheckOutline } from '@mdi/js'
 import { useI18n } from 'vue-i18n'
 import { useLandingContent } from '~/composables/useLandingContent'
 
@@ -128,6 +127,7 @@ function openCheckout() {
 
     <v-container>
       <div class="pricing-section__header">
+        <span class="pricing-section__badge">{{ t("nav.pricing") }}</span>
         <h2 class="pricing-section__title">
           {{ t("pricing.sectionTitle") }}
         </h2>
@@ -172,7 +172,9 @@ function openCheckout() {
                 :key="fIndex"
                 class="pricing-card__feature"
               >
-                <v-icon size="18" class="pricing-card__check" :icon="mdiCheckCircle" />
+                <v-icon size="18" class="pricing-card__check">
+                  mdi-check-circle
+                </v-icon>
                 {{ feature }}
               </li>
             </ul>
@@ -189,7 +191,7 @@ function openCheckout() {
       </v-row>
 
       <p class="pricing-section__refund-note">
-        <v-icon size="16" class="pricing-section__refund-icon" :icon="mdiShieldCheckOutline" />
+        <v-icon size="16" class="pricing-section__refund-icon">mdi-shield-check-outline</v-icon>
         {{ t("pricing.refundNote") }}
       </p>
 

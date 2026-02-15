@@ -47,6 +47,7 @@ export interface AppConfigData {
   auto_copy_to_clipboard: boolean;
   auto_paste_text: boolean;
   selected_audio_device: string | null;
+  selected_output_audio_device: string | null;
 }
 
 // Полная конфигурация настроек для UI
@@ -72,6 +73,9 @@ export interface SettingsState {
   // Микрофон
   microphoneSensitivity: number;
   selectedAudioDevice: string;
+
+  // Системный звук (источник)
+  selectedOutputAudioDevice: string;
 
   // Автоматические действия
   autoCopyToClipboard: boolean;

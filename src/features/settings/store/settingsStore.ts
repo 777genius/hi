@@ -33,7 +33,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const recordingHotkey = ref('CmdOrCtrl+Shift+X');
   const microphoneSensitivity = ref(95);
   const selectedAudioDevice = ref('');
-  const autoCopyToClipboard = ref(true);
+  const selectedOutputAudioDevice = ref('');
+  const autoCopyToClipboard = ref(false);
   const autoPasteText = ref(false);
 
   // Debounce для автосохранения чувствительности (иначе будем спамить invoke при перетаскивании слайдера)
@@ -46,6 +47,7 @@ export const useSettingsStore = defineStore('settings', () => {
 
   // Список доступных устройств
   const availableAudioDevices = ref<string[]>([]);
+  const availableOutputAudioDevices = ref<string[]>([]);
 
   // Разрешение Accessibility (macOS)
   const hasAccessibilityPermission = ref(true);
@@ -82,6 +84,7 @@ export const useSettingsStore = defineStore('settings', () => {
     recordingHotkey: recordingHotkey.value,
     microphoneSensitivity: microphoneSensitivity.value,
     selectedAudioDevice: selectedAudioDevice.value,
+    selectedOutputAudioDevice: selectedOutputAudioDevice.value,
     autoCopyToClipboard: autoCopyToClipboard.value,
     autoPasteText: autoPasteText.value,
   }));
@@ -276,16 +279,26 @@ export const useSettingsStore = defineStore('settings', () => {
     selectedAudioDevice.value = value;
   }
 
+  function setSelectedOutputAudioDevice(value: string) {
+    selectedOutputAudioDevice.value = value;
+  }
+
   function setAutoCopyToClipboard(value: boolean) {
-    autoCopyToClipboard.value = value;
+    void value;
+    autoCopyToClipboard.value = false;
   }
 
   function setAutoPasteText(value: boolean) {
-    autoPasteText.value = value;
+    void value;
+    autoPasteText.value = false;
   }
 
   function setAvailableAudioDevices(devices: string[]) {
     availableAudioDevices.value = devices;
+  }
+
+  function setAvailableOutputAudioDevices(devices: string[]) {
+    availableOutputAudioDevices.value = devices;
   }
 
   function setAccessibilityPermission(value: boolean) {
@@ -331,10 +344,11 @@ export const useSettingsStore = defineStore('settings', () => {
       setMicrophoneSensitivity(state.microphoneSensitivity, { persist: false });
     if (state.selectedAudioDevice !== undefined)
       selectedAudioDevice.value = state.selectedAudioDevice;
-    if (state.autoCopyToClipboard !== undefined)
-      autoCopyToClipboard.value = state.autoCopyToClipboard;
-    if (state.autoPasteText !== undefined)
-      autoPasteText.value = state.autoPasteText;
+    if (state.selectedOutputAudioDevice !== undefined)
+      selectedOutputAudioDevice.value = state.selectedOutputAudioDevice;
+    // auto-copy/auto-paste принудительно выключены
+    autoCopyToClipboard.value = false;
+    autoPasteText.value = false;
   }
 
   return {
@@ -349,9 +363,11 @@ export const useSettingsStore = defineStore('settings', () => {
     recordingHotkey,
     microphoneSensitivity,
     selectedAudioDevice,
+    selectedOutputAudioDevice,
     autoCopyToClipboard,
     autoPasteText,
     availableAudioDevices,
+    availableOutputAudioDevices,
     hasAccessibilityPermission,
     saveStatus,
     errorMessage,
@@ -376,9 +392,11 @@ export const useSettingsStore = defineStore('settings', () => {
     setMicrophoneSensitivity,
     flushMicrophoneSensitivityPersist,
     setSelectedAudioDevice,
+    setSelectedOutputAudioDevice,
     setAutoCopyToClipboard,
     setAutoPasteText,
     setAvailableAudioDevices,
+    setAvailableOutputAudioDevices,
     setAccessibilityPermission,
     setLoading,
     setSaveStatus,

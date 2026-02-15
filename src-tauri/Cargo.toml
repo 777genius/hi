@@ -2,7 +2,7 @@
 name = "voice-to-text"
 version = "0.9.4"
 description = "Privacy-focused voice-to-text application with offline support"
-authors = ["VoicetextAI Contributors"]
+authors = ["HackInterviewAI Contributors"]
 license = "MIT"
 repository = ""
 edition = "2021"
@@ -13,6 +13,12 @@ rust-version = "1.77.2"
 [lib]
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "voice-to-text"
+path = "src/main.rs"
+test = false
+bench = false
 
 [build-dependencies]
 tauri-build = { version = "2.4.1", features = [] }
@@ -92,6 +98,10 @@ tauri = { version = "2.8.5", features = ["tray-icon", "macos-private-api"] }
 cocoa = "0.25"  # macOS API для работы с окнами и Accessibility
 objc = "0.2"  # Objective-C runtime bindings
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }  # NSPanel для появления поверх fullscreen приложений
+screencapturekit = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = "0.9"
 
 [dev-dependencies]
 tokio-test = "0.4"  # Utilities for testing async code
@@ -115,4 +125,5 @@ name = "test_deepgram_connection"
 # Whisper Local support (requires cmake to build)
 # Enable with: cargo build --features whisper
 whisper = ["dep:whisper-rs", "dep:num_cpus"]
+integration-tests = []
 default = []

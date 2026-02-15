@@ -1,119 +1,119 @@
 {
-  "nav": {
-    "features": "Funktionen",
-    "providers": "Anbieter",
-    "screenshots": "Screenshots",
-    "download": "Download",
-    "openSource": "Open Source",
-    "viewOnGithub": "View on GitHub",
-    "faq": "FAQ",
-    "pricing": "Preise"
-  },
-  "hero": {
-    "badge": "VoicetextAI",
-    "ctaPrimary": "Download für {platform}",
-    "ctaSecondary": "Funktionen ansehen",
-    "preview": "Produktvorschau",
-    "trust": {
-      "realtime": "Echtzeit",
-      "multilingual": "40+ Sprachen",
-      "crossPlatform": "Plattformübergreifend"
+    "nav": {
+        "features": "Funktionen",
+        "providers": "Anbieter",
+        "screenshots": "Screenshots",
+        "download": "Download",
+        "openSource": "Open Source",
+        "viewOnGithub": "View on GitHub",
+        "faq": "FAQ",
+        "pricing": "Preise"
     },
-    "transcription": {
-      "sample": "Hallo, das ist eine Sprachnachricht..."
+    "hero": {
+        "badge": "HackInterviewAI",
+        "ctaPrimary": "Download für {platform}",
+        "ctaSecondary": "Funktionen ansehen",
+        "preview": "Produktvorschau",
+        "trust": {
+            "realtime": "Echtzeit",
+            "multilingual": "40+ Sprachen",
+            "crossPlatform": "Plattformübergreifend"
+        },
+        "transcription": {
+            "sample": "Hallo, das ist eine Sprachnachricht..."
+        },
+        "status": {
+            "recording": "Aufnahme"
+        }
     },
-    "status": {
-      "recording": "Aufnahme"
+    "download": {
+        "title": "Download",
+        "detected": "Erkannt",
+        "systemRequirements": "Systemanforderungen",
+        "version": "Version {version}"
+    },
+    "theme": {
+        "dark": "Dunkel",
+        "light": "Hell"
+    },
+    "language": {
+        "label": "Sprache"
+    },
+    "features": {
+        "sectionTitle": "Alles, was du für Spracheingabe brauchst",
+        "sectionSubtitle": "Leistungsstarke Funktionen für nahtlose, blitzschnelle Transkription."
+    },
+    "providers": {
+        "sectionTitle": "Angetrieben von Deepgram Nova-3",
+        "sectionSubtitle": "Branchenführende Sprach-zu-Text-Engine mit unerreichter Genauigkeit und mehrsprachiger Echtzeit-Unterstützung.",
+        "learnMoreBtn": "Deepgram Nova-3 Spracherkennung entdecken"
+    },
+    "pricing": {
+        "sectionTitle": "Einfache, transparente Preise",
+        "sectionSubtitle": "Starte kostenlos. Upgrade, wenn du mehr brauchst.",
+        "getStarted": "Loslegen",
+        "popular": "Beliebteste",
+        "refundNote": "14 Tage Geld-zurück-Garantie. Zahlungen über Paddle."
+    },
+    "faq": {
+        "sectionTitle": "Fragen? Wir haben Antworten",
+        "subtitle": "Antworten auf häufig gestellte Fragen"
+    },
+    "common": {
+        "learnMore": "Mehr erfahren"
+    },
+    "screenshots": {
+        "sectionTitle": "Erlebe es in Aktion",
+        "sectionSubtitle": "Entdecke die elegante Oberfläche für Produktivität und Komfort.",
+        "main": "Hauptbildschirm",
+        "mainDark": "Hauptoberfläche",
+        "recordDark": "Aufnahme",
+        "settingsDark": "Einstellungen",
+        "dark": "Dunkles Design",
+        "light": "Helles Design",
+        "settings": "Einstellungen",
+        "recording": "Aufnahme",
+        "toggleTheme": "Screenshot-Design umschalten"
+    },
+    "footer": {
+        "copyright": "© {year} HackInterviewAI",
+        "tagline": "Schnelle, präzise Sprache-zu-Text",
+        "links": {
+            "terms": "AGB",
+            "privacyPolicy": "Datenschutz",
+            "refundPolicy": "Rückerstattung"
+        }
+    },
+    "meta": {
+        "checkoutSuccessTitle": "Zahlung erfolgreich — HackInterviewAI",
+        "checkoutSuccessDescription": "Danke! Wir haben deine Zahlung erhalten. Die Freischaltung erfolgt über sichere Paddle-Webhooks und kann einen Moment dauern.",
+        "payTitle": "Sicherer Checkout — HackInterviewAI",
+        "payDescription": "Einstiegsseite für sicheren Checkout, genutzt von Paddle-Zahlungslinks und Links zur Aktualisierung der Zahlungsmethode.",
+        "homeTitle": "HackInterviewAI — kostenlose, einfache, schnelle Sprache-zu-Text in Echtzeit",
+        "homeDescription": "Moderne plattformübergreifende Desktop-App mit KI. 40 Sprachen. Kostenlos.",
+        "downloadTitle": "HackInterviewAI herunterladen",
+        "downloadDescription": "Builds für macOS, Windows und Linux.",
+        "privacyTitle": "Datenschutz bei HackInterviewAI",
+        "privacyDescription": "Wie wir deine Daten und Privatsphäre schützen.",
+        "privacyPolicyTitle": "Datenschutzrichtlinie — HackInterviewAI",
+        "privacyPolicyDescription": "Wie wir deine Daten erfassen, verwenden und schützen.",
+        "termsTitle": "Nutzungsbedingungen — HackInterviewAI",
+        "termsDescription": "Allgemeine Geschäftsbedingungen für die Nutzung von HackInterviewAI.",
+        "refundPolicyTitle": "Rückerstattungsrichtlinie — HackInterviewAI",
+        "refundPolicyDescription": "Rückerstattungen, Kündigungen und wie Sie eine Rückerstattung für HackInterviewAI Abos anfragen.",
+        "openSourceTitle": "Open Source — HackInterviewAI",
+        "openSourceDescription": "Entdecke den Open-Source-Code von HackInterviewAI auf GitHub."
+    },
+    "languages": {
+        "badge": "Sprachen",
+        "title": "40+ unterstützte Sprachen",
+        "subtitle": "Präzise Spracherkennung in Dutzenden von Sprachen und Dialekten weltweit."
+    },
+    "error": {
+        "notFoundTitle": "Seite nicht gefunden",
+        "notFoundDescription": "Die gesuchte Seite existiert nicht oder wurde verschoben.",
+        "genericTitle": "Etwas ist schiefgelaufen",
+        "genericDescription": "Ein unerwarteter Fehler ist aufgetreten. Bitte versuchen Sie es später erneut.",
+        "goHome": "Zur Startseite"
     }
-  },
-  "download": {
-    "title": "Download",
-    "detected": "Erkannt",
-    "systemRequirements": "Systemanforderungen",
-    "version": "Version {version}"
-  },
-  "theme": {
-    "dark": "Dunkel",
-    "light": "Hell"
-  },
-  "language": {
-    "label": "Sprache"
-  },
-  "features": {
-    "sectionTitle": "Alles, was du für Spracheingabe brauchst",
-    "sectionSubtitle": "Leistungsstarke Funktionen für nahtlose, blitzschnelle Transkription."
-  },
-  "providers": {
-    "sectionTitle": "Angetrieben von Deepgram Nova-3",
-    "sectionSubtitle": "Die schnellste und genaueste Sprach-KI auf dem Markt. Genutzt von NASA, Spotify und tausenden Unternehmen.",
-    "learnMoreBtn": "Deepgram Nova-3 Spracherkennung entdecken"
-  },
-  "pricing": {
-    "sectionTitle": "Einfache, transparente Preise",
-    "sectionSubtitle": "Starte kostenlos. Upgrade, wenn du mehr brauchst.",
-    "getStarted": "Loslegen",
-    "popular": "Beliebteste",
-    "refundNote": "14 Tage Geld-zurück-Garantie. Zahlungen über Paddle."
-  },
-  "faq": {
-    "sectionTitle": "Fragen? Wir haben Antworten",
-    "subtitle": "Antworten auf häufig gestellte Fragen"
-  },
-  "common": {
-    "learnMore": "Mehr erfahren"
-  },
-  "screenshots": {
-    "sectionTitle": "Erlebe es in Aktion",
-    "sectionSubtitle": "Entdecke die elegante Oberfläche für Produktivität und Komfort.",
-    "main": "Hauptbildschirm",
-    "mainDark": "Hauptoberfläche",
-    "recordDark": "Aufnahme",
-    "settingsDark": "Einstellungen",
-    "dark": "Dunkles Design",
-    "light": "Helles Design",
-    "settings": "Einstellungen",
-    "recording": "Aufnahme",
-    "toggleTheme": "Screenshot-Design umschalten"
-  },
-  "footer": {
-    "copyright": "© {year} VoicetextAI",
-    "tagline": "Schnelle, präzise Sprache-zu-Text",
-    "links": {
-      "terms": "AGB",
-      "privacyPolicy": "Datenschutz",
-      "refundPolicy": "Rückerstattung"
-    }
-  },
-  "meta": {
-    "checkoutSuccessTitle": "Zahlung erfolgreich — VoicetextAI",
-    "checkoutSuccessDescription": "Danke! Wir haben deine Zahlung erhalten. Die Freischaltung erfolgt über sichere Paddle-Webhooks und kann einen Moment dauern.",
-    "payTitle": "Sicherer Checkout — VoicetextAI",
-    "payDescription": "Einstiegsseite für sicheren Checkout, genutzt von Paddle-Zahlungslinks und Links zur Aktualisierung der Zahlungsmethode.",
-    "homeTitle": "VoicetextAI — kostenlose, einfache, schnelle Sprache-zu-Text in Echtzeit",
-    "homeDescription": "Moderne plattformübergreifende Desktop-App mit KI. 40 Sprachen. Kostenlos.",
-    "downloadTitle": "VoicetextAI herunterladen",
-    "downloadDescription": "Builds für macOS, Windows und Linux.",
-    "privacyTitle": "Datenschutz bei VoicetextAI",
-    "privacyDescription": "Wie wir deine Daten und Privatsphäre schützen.",
-    "privacyPolicyTitle": "Datenschutzrichtlinie — VoicetextAI",
-    "privacyPolicyDescription": "Wie wir deine Daten erfassen, verwenden und schützen.",
-    "termsTitle": "Nutzungsbedingungen — VoicetextAI",
-    "termsDescription": "Allgemeine Geschäftsbedingungen für die Nutzung von VoicetextAI.",
-    "refundPolicyTitle": "Rückerstattungsrichtlinie — VoicetextAI",
-    "refundPolicyDescription": "Rückerstattungen, Kündigungen und wie Sie eine Rückerstattung für VoicetextAI Abos anfragen.",
-    "openSourceTitle": "Open Source — VoicetextAI",
-    "openSourceDescription": "Entdecke den Open-Source-Code von VoicetextAI auf GitHub."
-  },
-  "languages": {
-    "badge": "Sprachen",
-    "title": "40+ unterstützte Sprachen",
-    "subtitle": "Präzise Spracherkennung in Dutzenden von Sprachen und Dialekten weltweit."
-  },
-  "error": {
-    "notFoundTitle": "Seite nicht gefunden",
-    "notFoundDescription": "Die gesuchte Seite existiert nicht oder wurde verschoben.",
-    "genericTitle": "Etwas ist schiefgelaufen",
-    "genericDescription": "Ein unerwarteter Fehler ist aufgetreten. Bitte versuchen Sie es später erneut.",
-    "goHome": "Zur Startseite"
-  }
 }

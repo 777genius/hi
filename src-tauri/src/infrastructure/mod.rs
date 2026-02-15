@@ -3,7 +3,10 @@
 
 pub mod stt;
 pub mod audio;
+pub mod ai;
+pub mod llm;
 pub mod factory;
+pub mod llm_factory;
 pub mod config_store;
 pub mod updater;
 pub mod models;
@@ -14,6 +17,7 @@ pub mod hotkey; // Нормализация/миграция хоткеев
 pub mod auth_store; // Auth session + device_id (Rust SoT)
 
 pub use factory::*;
+pub use llm_factory::DefaultLlmProviderFactory;
 pub use config_store::ConfigStore;
 pub use auth_store::{AuthSession, AuthStore, AuthStoreData, AuthUser};
 pub use clipboard::copy_to_clipboard;

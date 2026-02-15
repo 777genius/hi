@@ -1,12 +1,15 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use tokio::sync::RwLock;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::application::TranscriptionService;
 use crate::domain::{AppConfig, Transcription, AudioCapture, UiPreferences};
 use crate::infrastructure::{
-    audio::{SystemAudioCapture, VadCaptureWrapper, VadProcessor},
+    audio::{
+        create_default_output_audio_capture, create_output_audio_capture_for_device, VadCaptureWrapper,
+        VadProcessor,
+    },
     AuthSession, AuthStore, AuthStoreData, AuthUser, ConfigStore,
     DefaultSttProviderFactory,
 };
@@ -31,6 +34,26 @@ impl Default for MicrophoneTestState {
     }
 }
 
+/// State for system audio (output/loopback) testing
+pub struct SystemAudioTestState {
+    /// Audio capture instance for testing
+    pub capture: Option<Box<dyn AudioCapture>>,
+    /// Shared buffer of recorded samples during test
+    pub buffer: Arc<tokio::sync::Mutex<Vec<i16>>>,
+    /// Is test currently running
+    pub is_testing: bool,
+}
+
+impl Default for SystemAudioTestState {
+    fn default() -> Self {
+        Self {
+            capture: None,
+            buffer: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            is_testing: false,
+        }
+    }
+}
+
 /// Global application state managed by Tauri
 ///
 /// This state is shared across all Tauri commands and can be accessed
@@ -38,6 +61,9 @@ impl Default for MicrophoneTestState {
 pub struct AppState {
     /// Main transcription service
     pub transcription_service: Arc<TranscriptionService>,
+
+    /// Microphone transcription service (parallel input)
+    pub microphone_transcription_service: Arc<TranscriptionService>,
 
     /// Application configuration
     pub config: Arc<RwLock<AppConfig>>,
@@ -63,6 +89,9 @@ pub struct AppState {
     /// Microphone test state
     pub microphone_test: Arc<RwLock<MicrophoneTestState>>,
 
+    /// System audio test state
+    pub system_audio_test: Arc<RwLock<SystemAudioTestState>>,
+
     /// Receiver для VAD silence timeout событий
     /// Используется в setup для установки обработчика
     pub vad_timeout_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>>,
@@ -70,7 +99,7 @@ pub struct AppState {
     /// VAD timeout handler task (для перезапуска при смене устройства)
     vad_handler_task: Arc<RwLock<Option<tauri::async_runtime::JoinHandle<()>>>>,
 
-    /// Bundle ID последнего активного приложения (перед показом VoicetextAI окна)
+    /// Bundle ID последнего активного приложения (перед показом HackInterviewAI окна)
     /// Используется для автоматической вставки текста в правильное окно
     pub last_focused_app_bundle_id: Arc<RwLock<Option<String>>>,
 
@@ -99,25 +128,36 @@ pub struct AppState {
     /// Активная (последняя запущенная) сессия записи.
     /// Используется для маркировки статусов Idle/Error, которые эмитятся "в обход" start_recording callbacks.
     pub active_transcription_session_id: AtomicU64,
+
+    /// Включена ли параллельная транскрибация микрофона.
+    /// Управляется из UI (кнопкой рядом с Haiku).
+    pub microphone_transcription_enabled: AtomicBool,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        // Initialize real audio capture with VAD
-        let system_audio = match SystemAudioCapture::new() {
+        // Initialize audio capture (system output by default).
+        let capture_result: Result<Box<dyn AudioCapture>, _> = create_default_output_audio_capture();
+
+        let raw_capture = match capture_result {
             Ok(capture) => capture,
             Err(e) => {
-                log::error!("Failed to initialize system audio: {}. Using mock.", e);
+                log::error!("Failed to initialize audio capture: {}. Using mock.", e);
                 // Fallback to mock if no audio device
                 let mock = crate::infrastructure::audio::MockAudioCapture::new();
                 let stt_factory = Arc::new(DefaultSttProviderFactory::new());
-                let service = Arc::new(TranscriptionService::new(Box::new(mock), stt_factory));
+                let service = Arc::new(TranscriptionService::new(Box::new(mock), stt_factory.clone()));
+                let mic_service = Arc::new(TranscriptionService::new(
+                    Box::new(crate::infrastructure::audio::MockAudioCapture::new()),
+                    stt_factory,
+                ));
 
                 // Создаем dummy channel для VAD (не будет использоваться с mock)
                 let (_vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
 
                 return Self {
                     transcription_service: service,
+                    microphone_transcription_service: mic_service,
                     config: Arc::new(RwLock::new(AppConfig::default())),
                     app_config_revision: Arc::new(RwLock::new(0)),
                     stt_config_revision: Arc::new(RwLock::new(0)),
@@ -128,6 +168,7 @@ impl AppState {
                     partial_transcription: Arc::new(RwLock::new(None)),
                     final_transcription: Arc::new(RwLock::new(None)),
                     microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
+                    system_audio_test: Arc::new(RwLock::new(SystemAudioTestState::default())),
                     vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
                     vad_handler_task: Arc::new(RwLock::new(None)),
                     last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
@@ -141,6 +182,7 @@ impl AppState {
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
+                    microphone_transcription_enabled: AtomicBool::new(true),
                 };
             }
         };
@@ -153,13 +195,29 @@ impl AppState {
                 log::error!("Failed to initialize VAD: {}. Proceeding without VAD.", e);
                 // Fallback: use system audio without VAD
                 let stt_factory = Arc::new(DefaultSttProviderFactory::new());
-                let service = Arc::new(TranscriptionService::new(Box::new(system_audio), stt_factory));
+                let service = Arc::new(TranscriptionService::new(raw_capture, stt_factory.clone()));
+
+                let mic_capture: Box<dyn AudioCapture> =
+                    match crate::infrastructure::audio::SystemAudioCapture::new() {
+                        Ok(c) => Box::new(c),
+                        Err(e) => {
+                            log::error!(
+                                "Failed to initialize microphone capture: {}. Using mock.",
+                                e
+                            );
+                            Box::new(crate::infrastructure::audio::MockAudioCapture::new())
+                        }
+                    };
+
+                let mic_service =
+                    Arc::new(TranscriptionService::new(mic_capture, stt_factory));
 
                 // Создаем dummy channel для VAD (не будет использоваться без VAD)
                 let (_vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
 
                 return Self {
                     transcription_service: service,
+                    microphone_transcription_service: mic_service,
                     config: Arc::new(RwLock::new(app_config)),
                     app_config_revision: Arc::new(RwLock::new(0)),
                     stt_config_revision: Arc::new(RwLock::new(0)),
@@ -170,6 +228,7 @@ impl AppState {
                     partial_transcription: Arc::new(RwLock::new(None)),
                     final_transcription: Arc::new(RwLock::new(None)),
                     microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
+                    system_audio_test: Arc::new(RwLock::new(SystemAudioTestState::default())),
                     vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
                     vad_handler_task: Arc::new(RwLock::new(None)),
                     last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
@@ -183,6 +242,7 @@ impl AppState {
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
+                    microphone_transcription_enabled: AtomicBool::new(true),
                 };
             }
         };
@@ -191,7 +251,7 @@ impl AppState {
         let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Wrap system audio with VAD
-        let mut vad_wrapper = VadCaptureWrapper::new(Box::new(system_audio), vad);
+        let mut vad_wrapper = VadCaptureWrapper::new(raw_capture, vad);
 
         // Устанавливаем callback который отправляет событие в channel
         vad_wrapper.set_silence_timeout_callback(Arc::new(move || {
@@ -202,13 +262,27 @@ impl AppState {
         let audio_capture = Box::new(vad_wrapper);
         let stt_factory = Arc::new(DefaultSttProviderFactory::new());
 
-        let transcription_service = Arc::new(TranscriptionService::new(audio_capture, stt_factory));
+        let transcription_service =
+            Arc::new(TranscriptionService::new(audio_capture, stt_factory.clone()));
 
-        log::info!("AppState initialized with SystemAudioCapture + VAD (timeout: {}ms)",
+        let mic_capture: Box<dyn AudioCapture> =
+            match crate::infrastructure::audio::SystemAudioCapture::new() {
+                Ok(c) => Box::new(c),
+                Err(e) => {
+                    log::error!("Failed to initialize microphone capture: {}. Using mock.", e);
+                    Box::new(crate::infrastructure::audio::MockAudioCapture::new())
+                }
+            };
+
+        let microphone_transcription_service =
+            Arc::new(TranscriptionService::new(mic_capture, stt_factory));
+
+        log::info!("AppState initialized with audio capture + VAD (timeout: {}ms)",
             app_config.vad_silence_timeout_ms);
 
         Self {
             transcription_service,
+            microphone_transcription_service,
             config: Arc::new(RwLock::new(app_config)),
             app_config_revision: Arc::new(RwLock::new(0)),
             stt_config_revision: Arc::new(RwLock::new(0)),
@@ -219,6 +293,7 @@ impl AppState {
             partial_transcription: Arc::new(RwLock::new(None)),
             final_transcription: Arc::new(RwLock::new(None)),
             microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
+            system_audio_test: Arc::new(RwLock::new(SystemAudioTestState::default())),
             vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
             vad_handler_task: Arc::new(RwLock::new(None)),
             last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
@@ -232,6 +307,7 @@ impl AppState {
             last_recording_hotkey_ms: AtomicU64::new(0),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
+            microphone_transcription_enabled: AtomicBool::new(true),
         }
     }
 
@@ -260,8 +336,11 @@ impl AppState {
         if let Err(e) = ConfigStore::save_config(&config).await {
             log::warn!("Failed to persist STT config token: {}", e);
         }
-        if let Err(e) = self.transcription_service.update_config(config).await {
+        if let Err(e) = self.transcription_service.update_config(config.clone()).await {
             log::warn!("Failed to update transcription service config token: {}", e);
+        }
+        if let Err(e) = self.microphone_transcription_service.update_config(config).await {
+            log::warn!("Failed to update microphone transcription config token: {}", e);
         }
     }
 
@@ -570,51 +649,18 @@ impl AppState {
     }
 
     /// Запускает обработчик VAD timeout событий (вызывается из setup)
-    /// Слушает channel и автоматически останавливает запись
+    /// Слушает channel и уведомляет UI, не останавливая запись.
     pub fn start_vad_timeout_handler(&self, app_handle: tauri::AppHandle) {
-        let service = self.transcription_service.clone();
         let rx = self.vad_timeout_rx.clone();
 
         let handle = tauri::async_runtime::spawn(async move {
             let mut rx_guard = rx.lock().await;
 
             while let Some(_) = rx_guard.recv().await {
-                log::info!("VAD silence timeout detected - auto-stopping recording");
-
-                // Проверяем что действительно идет запись
-                let status = service.get_status().await;
-                if status != crate::domain::RecordingStatus::Recording {
-                    log::debug!("VAD timeout ignored - not recording (status: {:?})", status);
-                    continue;
-                }
-
-                // Останавливаем запись
-                match service.stop_recording().await {
-                    Ok(_) => {
-                        log::info!("Recording stopped successfully by VAD timeout");
-
-                        // Эмитим событие в UI
-                        use tauri::Emitter;
-                        let session_id = app_handle
-                            .try_state::<AppState>()
-                            .map(|s| s.active_transcription_session_id.load(Ordering::Relaxed))
-                            .unwrap_or(0);
-                        let _ = app_handle.emit(
-                            crate::presentation::events::EVENT_RECORDING_STATUS,
-                            crate::presentation::RecordingStatusPayload {
-                                session_id,
-                                status: crate::domain::RecordingStatus::Idle,
-                                stopped_via_hotkey: false,
-                            },
-                        );
-
-                        // Также эмитим специальное событие VAD timeout (для информирования)
-                        let _ = app_handle.emit("vad-silence-timeout", ());
-                    }
-                    Err(e) => {
-                        log::error!("Failed to stop recording on VAD timeout: {}", e);
-                    }
-                }
+                // В этом форке транскрибация должна работать непрерывно (например во время митинга),
+                // поэтому по тишине мы НЕ останавливаем запись — только уведомляем UI.
+                log::debug!("VAD silence timeout detected");
+                let _ = app_handle.emit("vad-silence-timeout", ());
             }
 
             log::warn!("VAD timeout handler exited");
@@ -655,8 +701,8 @@ impl AppState {
     ) -> Result<(), String> {
         log::info!("Recreating audio capture with device: {:?}", device_name);
 
-        // Создаем новый SystemAudioCapture с выбранным устройством
-        let system_audio = SystemAudioCapture::with_device(device_name.clone())
+        // Создаем новый audio capture (system output).
+        let base_capture: Box<dyn AudioCapture> = create_output_audio_capture_for_device(device_name.clone())
             .map_err(|e| format!("Failed to create audio capture with device {:?}: {}", device_name, e))?;
 
         // Получаем текущий VAD timeout из конфига
@@ -666,8 +712,8 @@ impl AppState {
         let vad = VadProcessor::new(Some(vad_timeout_ms), None)
             .map_err(|e| format!("Failed to create VAD processor: {}", e))?;
 
-        // Wrap system audio with VAD
-        let mut vad_wrapper = VadCaptureWrapper::new(Box::new(system_audio), vad);
+        // Wrap audio with VAD
+        let mut vad_wrapper = VadCaptureWrapper::new(base_capture, vad);
 
         // Копируем callback из текущего vad_timeout_rx (создаем новый channel)
         let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();

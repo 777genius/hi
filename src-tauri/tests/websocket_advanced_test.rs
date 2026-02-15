@@ -1,3 +1,5 @@
+#![cfg(feature = "integration-tests")]
+
 use std::sync::{Arc, Mutex, atomic::{AtomicUsize, AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;

@@ -2,12 +2,136 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
-use crate::domain::{AudioCapture, RecordingStatus, SttConnectionCategory, SttError};
+use crate::application::TranscriptionService;
+use crate::domain::{AudioCapture, LlmProviderFactory, RecordingStatus, SttConnectionCategory, SttError};
 use crate::infrastructure::{AuthSession, AuthStore, AuthUser, ConfigStore};
 use crate::presentation::{
     events::*, AppState, AudioLevelPayload, FinalTranscriptionPayload, PartialTranscriptionPayload,
     RecordingStatusPayload, MicrophoneTestLevelPayload, TranscriptionErrorPayload, ConnectionQualityPayload,
 };
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AudioPermissionStatus {
+    pub system_audio_granted: bool,
+    pub microphone_granted: bool,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+#[cfg(target_os = "macos")]
+fn is_system_audio_permission_granted_macos() -> bool {
+    // ScreenCaptureKit системного аудио зависит от Screen Recording permission.
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+#[cfg(target_os = "macos")]
+fn is_microphone_permission_granted_macos() -> bool {
+    use cocoa::base::nil;
+    use cocoa::foundation::NSString;
+
+    unsafe {
+        let cls = class!(AVCaptureDevice);
+        // AVMediaTypeAudio == "soun"
+        let media_type = NSString::alloc(nil).init_str("soun");
+        let status: i32 = msg_send![cls, authorizationStatusForMediaType: media_type];
+        // AVAuthorizationStatus: 3 = authorized
+        status == 3
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_system_audio_permission_granted_macos() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_microphone_permission_granted_macos() -> bool {
+    true
+}
+
+/// Возвращает статус OS-разрешений для захвата системного звука и микрофона.
+#[tauri::command]
+pub async fn get_audio_permission_status() -> Result<AudioPermissionStatus, String> {
+    Ok(AudioPermissionStatus {
+        system_audio_granted: is_system_audio_permission_granted_macos(),
+        microphone_granted: is_microphone_permission_granted_macos(),
+    })
+}
+
+/// Просим у macOS разрешение Screen Recording (для системного звука).
+#[tauri::command]
+pub async fn request_system_audio_permission() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(unsafe { CGRequestScreenCaptureAccess() })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(true)
+    }
+}
+
+fn spawn_microphone_transcription_start(
+    mic_service: Arc<TranscriptionService>,
+    app_handle: AppHandle,
+    session_id: u64,
+) {
+    let app_handle_partial = app_handle.clone();
+    let app_handle_final = app_handle.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let app_handle_mic_partial = app_handle_partial.clone();
+        let on_partial_mic = Arc::new(move |transcription: crate::domain::Transcription| {
+            let app_handle = app_handle_mic_partial.clone();
+            tokio::spawn(async move {
+                let payload =
+                    PartialTranscriptionPayload::from_transcription(transcription, session_id, "microphone");
+                let _ = app_handle.emit(EVENT_TRANSCRIPTION_PARTIAL, payload);
+            });
+        });
+
+        let on_final_mic = Arc::new(move |transcription: crate::domain::Transcription| {
+            let app_handle = app_handle_final.clone();
+            tokio::spawn(async move {
+                let payload =
+                    FinalTranscriptionPayload::from_transcription(transcription, session_id, "microphone");
+                let _ = app_handle.emit(EVENT_TRANSCRIPTION_FINAL, payload);
+            });
+        });
+
+        let app_handle_mic_level = app_handle_partial.clone();
+        let on_audio_level_mic = Arc::new(move |level: f32| {
+            let payload = AudioLevelPayload { level };
+            let _ = app_handle_mic_level.emit(EVENT_MICROPHONE_AUDIO_LEVEL, payload);
+        });
+
+        let on_audio_spectrum_noop = Arc::new(|_bars: [f32; 48]| {});
+        let on_error_log = Arc::new(|err: SttError| {
+            log::warn!("Microphone transcription error: {}", err);
+        });
+        let on_quality_noop = Arc::new(|_quality: String, _reason: Option<String>| {});
+
+        if let Err(e) = mic_service
+            .start_recording(
+                on_partial_mic,
+                on_final_mic,
+                on_audio_level_mic,
+                on_audio_spectrum_noop,
+                on_error_log,
+                on_quality_noop,
+            )
+            .await
+        {
+            log::warn!("Microphone transcription failed to start: {}", e);
+        }
+    });
+}
 
 fn classify_transcription_error_type_from_stt(err: &SttError) -> String {
     // ВАЖНО: во фронте error_type используется для connect-retry, поэтому
@@ -65,7 +189,8 @@ pub async fn start_recording(
             *state_partial.write().await = Some(text.clone());
 
             // Emit event to frontend
-            let payload = PartialTranscriptionPayload::from_transcription(transcription, session_id);
+            let payload =
+                PartialTranscriptionPayload::from_transcription(transcription, session_id, "system");
             if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_PARTIAL, payload) {
                 log::error!("Failed to emit partial transcription event: {}", e);
             }
@@ -102,7 +227,8 @@ pub async fn start_recording(
             drop(history);
 
             // Emit event to frontend
-            let payload = FinalTranscriptionPayload::from_transcription(transcription.clone(), session_id);
+            let payload =
+                FinalTranscriptionPayload::from_transcription(transcription.clone(), session_id, "system");
             if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_FINAL, payload) {
                 log::error!("Failed to emit final transcription event: {}", e);
             }
@@ -237,6 +363,16 @@ pub async fn start_recording(
         return Err(error);
     }
 
+    // Best-effort: параллельно запускаем транскрибацию с микрофона.
+    // Важно: микрофон можно отключить из UI; при этом системный звук продолжает работать.
+    if state.microphone_transcription_enabled.load(Ordering::Relaxed) {
+        spawn_microphone_transcription_start(
+            state.microphone_transcription_service.clone(),
+            app_handle.clone(),
+            session_id,
+        );
+    }
+
     // Emit Recording status after successful start
     log::debug!("Emitting status: Recording (stopped_via_hotkey: false)");
     let _ = app_handle.emit(
@@ -267,6 +403,11 @@ pub async fn stop_recording(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Best-effort: останавливаем микрофонную транскрибацию (если она была запущена).
+    if let Err(e) = state.microphone_transcription_service.stop_recording().await {
+        log::debug!("Microphone transcription stop skipped/failed: {}", e);
+    }
+
     // Emit status change
     log::debug!("Emitting status: Idle (stopped_via_hotkey: false)");
     let _ = app_handle.emit(
@@ -279,6 +420,45 @@ pub async fn stop_recording(
     );
 
     Ok(result)
+}
+
+/// Enable/disable parallel microphone transcription.
+/// When disabled: stops mic stream (best-effort).
+/// When enabled during an active recording session: starts mic stream (best-effort).
+#[tauri::command]
+pub async fn set_microphone_transcription_enabled(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    state
+        .microphone_transcription_enabled
+        .store(enabled, Ordering::Relaxed);
+
+    if !enabled {
+        if let Err(e) = state.microphone_transcription_service.stop_recording().await {
+            log::debug!("Microphone transcription stop skipped/failed: {}", e);
+        }
+        return Ok(());
+    }
+
+    // Если включили во время активной записи — стартуем микрофон сразу.
+    let status = state.transcription_service.get_status().await;
+    if matches!(
+        status,
+        RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Processing
+    ) {
+        let session_id = state.active_transcription_session_id.load(Ordering::Relaxed);
+        if session_id > 0 {
+            spawn_microphone_transcription_start(
+                state.microphone_transcription_service.clone(),
+                app_handle.clone(),
+                session_id,
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Get current recording status
@@ -395,6 +575,7 @@ mod snapshot_contract_tests {
                 auto_copy_to_clipboard: true,
                 auto_paste_text: false,
                 selected_audio_device: None,
+                selected_output_audio_device: None,
             },
         };
 
@@ -420,6 +601,7 @@ mod snapshot_contract_tests {
         assert!(data.contains_key("auto_copy_to_clipboard"));
         assert!(data.contains_key("auto_paste_text"));
         assert!(data.contains_key("selected_audio_device"));
+        assert!(data.contains_key("selected_output_audio_device"));
     }
 
     #[test]
@@ -720,6 +902,15 @@ pub async fn update_stt_config(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Микрофонная транскрибация использует тот же STT конфиг (best-effort).
+    if let Err(e) = state
+        .microphone_transcription_service
+        .update_config(config.clone())
+        .await
+    {
+        log::warn!("Failed to update microphone transcription config: {}", e);
+    }
+
     // ВАЖНО: синхронизируем STT конфигурацию в AppConfig чтобы при сохранении
     // app_config.json не перезаписывались старые значения
     {
@@ -772,6 +963,7 @@ pub struct AppConfigSnapshotData {
     pub auto_copy_to_clipboard: bool,
     pub auto_paste_text: bool,
     pub selected_audio_device: Option<String>,
+    pub selected_output_audio_device: Option<String>,
 }
 
 /// Get current application configuration + revision (for cross-window sync)
@@ -787,6 +979,7 @@ pub async fn get_app_config_snapshot(
         auto_copy_to_clipboard: config.auto_copy_to_clipboard,
         auto_paste_text: config.auto_paste_text,
         selected_audio_device: config.selected_audio_device,
+        selected_output_audio_device: config.selected_output_audio_device,
     };
     let revision = state.app_config_revision.read().await.to_string();
     Ok(SnapshotEnvelope { revision, data })
@@ -982,6 +1175,7 @@ pub async fn update_app_config(
     auto_copy_to_clipboard: Option<bool>,
     auto_paste_text: Option<bool>,
     selected_audio_device: Option<String>,
+    selected_output_audio_device: Option<String>,
 ) -> Result<(), String> {
     log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, device: {:?}",
         microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, selected_audio_device);
@@ -994,6 +1188,7 @@ pub async fn update_app_config(
         && auto_copy_to_clipboard.is_none()
         && auto_paste_text.is_none()
         && selected_audio_device.is_none()
+        && selected_output_audio_device.is_none()
     {
         return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, selectedAudioDevice).".to_string());
     }
@@ -1011,7 +1206,10 @@ pub async fn update_app_config(
         }
 
         // Обновляем также в TranscriptionService для применения в реальном времени
-        state.transcription_service.set_microphone_sensitivity(clamped).await;
+        state
+            .microphone_transcription_service
+            .set_microphone_sensitivity(clamped)
+            .await;
     }
 
     if let Some(new_hotkey) = recording_hotkey {
@@ -1029,23 +1227,20 @@ pub async fn update_app_config(
         }
     }
 
-    if let Some(auto_copy) = auto_copy_to_clipboard {
-        if config.auto_copy_to_clipboard != auto_copy {
-            log::info!("Updating auto_copy_to_clipboard: {} -> {}", config.auto_copy_to_clipboard, auto_copy);
-            config.auto_copy_to_clipboard = auto_copy;
+    // Автодействия принудительно выключены.
+    // Даже если фронт отправит true — игнорируем.
+    if auto_copy_to_clipboard.is_some() || auto_paste_text.is_some() {
+        if config.auto_copy_to_clipboard {
+            config.auto_copy_to_clipboard = false;
+            any_changed = true;
+        }
+        if config.auto_paste_text {
+            config.auto_paste_text = false;
             any_changed = true;
         }
     }
 
-    if let Some(auto_paste) = auto_paste_text {
-        if config.auto_paste_text != auto_paste {
-            log::info!("Updating auto_paste_text: {} -> {}", config.auto_paste_text, auto_paste);
-            config.auto_paste_text = auto_paste;
-            any_changed = true;
-        }
-    }
-
-    let mut device_changed = false;
+    let mut mic_device_changed = false;
     if let Some(device) = selected_audio_device {
         let device_opt = if device.is_empty() { None } else { Some(device.clone()) };
 
@@ -1053,7 +1248,22 @@ pub async fn update_app_config(
         if config.selected_audio_device != device_opt {
             log::info!("Updating selected_audio_device: {:?} -> {:?}", config.selected_audio_device, device_opt);
             config.selected_audio_device = device_opt;
-            device_changed = true;
+            mic_device_changed = true;
+            any_changed = true;
+        }
+    }
+
+    let mut output_device_changed = false;
+    if let Some(device) = selected_output_audio_device {
+        let device_opt = if device.is_empty() { None } else { Some(device.clone()) };
+        if config.selected_output_audio_device != device_opt {
+            log::info!(
+                "Updating selected_output_audio_device: {:?} -> {:?}",
+                config.selected_output_audio_device,
+                device_opt
+            );
+            config.selected_output_audio_device = device_opt;
+            output_device_changed = true;
             any_changed = true;
         }
     }
@@ -1068,12 +1278,9 @@ pub async fn update_app_config(
     log::info!("Saving app config to disk: sensitivity={}, hotkey={}, provider={:?}, language={}, device={:?}",
         config.microphone_sensitivity, config.recording_hotkey, config.stt.provider, config.stt.language, config.selected_audio_device);
 
-    // Запоминаем selected_audio_device для применения после сохранения
-    let device_to_apply = if device_changed {
-        Some(config.selected_audio_device.clone())
-    } else {
-        None
-    };
+    // Запоминаем устройства для применения после сохранения
+    let mic_device_to_apply = if mic_device_changed { Some(config.selected_audio_device.clone()) } else { None };
+    let output_device_to_apply = if output_device_changed { Some(config.selected_output_audio_device.clone()) } else { None };
 
     // Сохраняем конфигурацию на диск
     ConfigStore::save_app_config(&config)
@@ -1092,18 +1299,31 @@ pub async fn update_app_config(
         drop(config); // освобождаем lock если не было hotkey_changed
     }
 
-    // Если устройство изменилось - пересоздаем audio capture
-    if let Some(device_opt) = device_to_apply {
-        log::info!("Applying changed audio device: {:?}", device_opt);
-
-        state.recreate_audio_capture_with_device(device_opt.clone(), app_handle.clone())
+    // Если выбранный микрофон изменился - применяем в mic transcription service (best-effort).
+    if let Some(device_opt) = mic_device_to_apply {
+        log::info!("Applying changed microphone device: {:?}", device_opt);
+        let capture = crate::infrastructure::audio::SystemAudioCapture::with_device(device_opt.clone())
+            .map_err(|e| format!("Failed to create microphone capture: {}", e))?;
+        state
+            .microphone_transcription_service
+            .replace_audio_capture(Box::new(capture))
             .await
             .map_err(|e| {
-                log::error!("Failed to apply new audio device: {}", e);
-                format!("Настройки сохранены, но не удалось применить новое устройство записи: {}", e)
+                log::error!("Failed to apply new microphone device: {}", e);
+                format!("Настройки сохранены, но не удалось применить новое устройство микрофона: {}", e)
             })?;
+    }
 
-        log::info!("Audio device changed and applied successfully");
+    // Если выбранный выход (system audio) изменился - пересоздаем loopback/system capture.
+    if let Some(device_opt) = output_device_to_apply {
+        log::info!("Applying changed system output device: {:?}", device_opt);
+        state
+            .recreate_audio_capture_with_device(device_opt.clone(), app_handle.clone())
+            .await
+            .map_err(|e| {
+                log::error!("Failed to apply new system audio device: {}", e);
+                format!("Настройки сохранены, но не удалось применить новое устройство системного звука: {}", e)
+            })?;
     }
 
     // Синхронизация между окнами через state-sync
@@ -1127,6 +1347,7 @@ pub async fn update_app_config(
 //
 
 use crate::infrastructure::audio::SystemAudioCapture;
+use crate::infrastructure::audio::create_output_audio_capture_for_device;
 use crate::domain::AudioConfig;
 
 /// Start microphone test
@@ -1269,6 +1490,107 @@ pub async fn stop_microphone_test(
     drop(buffer_guard);
 
     log::info!("Microphone test stopped, buffer size: {} samples", buffer.len());
+    Ok(buffer)
+}
+
+//
+// System Audio (Output/Loopback) Test Commands
+//
+
+/// Start system audio test (captures what the user hears).
+#[tauri::command]
+pub async fn start_system_audio_test(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    device_name: Option<String>,
+) -> Result<(), String> {
+    log::info!("Command: start_system_audio_test - device: {:?}", device_name);
+
+    let mut test_state = state.system_audio_test.write().await;
+    if test_state.is_testing {
+        return Err("System audio test already running".to_string());
+    }
+
+    let device_to_use = device_name.filter(|s| !s.is_empty());
+
+    let mut capture = create_output_audio_capture_for_device(device_to_use.clone())
+        .map_err(|e| format!("Failed to create system audio capture: {}", e))?;
+
+    capture
+        .initialize(AudioConfig::default())
+        .await
+        .map_err(|e| format!("Failed to initialize audio capture: {}", e))?;
+
+    test_state.buffer.lock().await.clear();
+    let buffer_for_task = test_state.buffer.clone();
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let on_chunk = Arc::new(move |chunk: crate::domain::AudioChunk| {
+        let _ = tx.send(chunk);
+    });
+
+    let app_handle_clone = app_handle.clone();
+    tokio::spawn(async move {
+        while let Some(chunk) = rx.recv().await {
+            let max_amplitude = chunk.data.iter().map(|&s| s.abs()).max().unwrap_or(0);
+            let normalized_level = (max_amplitude as f32 / 32767.0).sqrt().min(1.0);
+
+            let _ = app_handle_clone.emit(
+                EVENT_SYSTEM_AUDIO_TEST_LEVEL,
+                SystemAudioTestLevelPayload { level: normalized_level },
+            );
+
+            let mut buffer = buffer_for_task.lock().await;
+            buffer.extend_from_slice(&chunk.data);
+
+            // Ограничиваем размер буфера (максимум 5 секунд = 80000 samples @ 16kHz)
+            let buffer_len = buffer.len();
+            if buffer_len > 80000 {
+                buffer.drain(0..buffer_len - 80000);
+            }
+        }
+    });
+
+    capture
+        .start_capture(on_chunk)
+        .await
+        .map_err(|e| format!("Failed to start audio capture: {}", e))?;
+
+    test_state.capture = Some(capture);
+    test_state.is_testing = true;
+
+    log::info!("System audio test started");
+    Ok(())
+}
+
+/// Stop system audio test and return recorded audio
+#[tauri::command]
+pub async fn stop_system_audio_test(state: State<'_, AppState>) -> Result<Vec<i16>, String> {
+    log::info!("Command: stop_system_audio_test");
+
+    let mut test_state = state.system_audio_test.write().await;
+    if !test_state.is_testing {
+        return Err("System audio test not running".to_string());
+    }
+
+    if let Some(mut capture) = test_state.capture.take() {
+        capture
+            .stop_capture()
+            .await
+            .map_err(|e| format!("Failed to stop audio capture: {}", e))?;
+    }
+
+    test_state.is_testing = false;
+
+    let mut buffer_guard = test_state.buffer.lock().await;
+    let buffer = buffer_guard.clone();
+    buffer_guard.clear();
+    drop(buffer_guard);
+
+    log::info!(
+        "System audio test stopped, buffer size: {} samples",
+        buffer.len()
+    );
     Ok(buffer)
 }
 
@@ -1614,6 +1936,769 @@ pub async fn get_audio_devices() -> Result<Vec<String>, String> {
     Ok(devices)
 }
 
+/// Get available audio output devices (system sound sources).
+#[tauri::command]
+pub async fn get_output_audio_devices() -> Result<Vec<String>, String> {
+    log::info!("Command: get_output_audio_devices");
+
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    let host = cpal::default_host();
+
+    let devices: Vec<String> = host
+        .output_devices()
+        .map_err(|e| format!("Failed to enumerate output devices: {}", e))?
+        .filter_map(|device| device.name().ok())
+        .collect();
+
+    log::info!("Found {} audio output devices", devices.len());
+
+    Ok(devices)
+}
+
+/// Запускает стриминг-ответ Haiku (Anthropic) по текущему тексту.
+///
+/// Возвращает `request_id`, а прогресс стриминга приходит через события:
+/// - `haiku:delta`
+/// - `haiku:done`
+/// - `haiku:error`
+#[tauri::command]
+pub async fn start_haiku_stream(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    text: String,
+    system_prompt: Option<String>,
+) -> Result<String, String> {
+    let prompt = text.trim();
+    if prompt.is_empty() {
+        return Err("Empty text".to_string());
+    }
+
+    let provider = match std::env::var("LLM_PROVIDER")
+        .ok()
+        .unwrap_or_else(|| "anthropic".to_string())
+        .to_lowercase()
+        .as_str()
+    {
+        "anthropic" => crate::domain::LlmProviderType::Anthropic,
+        "openai" | "openai_compatible" | "openrouter" => crate::domain::LlmProviderType::OpenAiCompatible,
+        "backend" => crate::domain::LlmProviderType::Backend,
+        other => {
+            log::warn!("Unknown LLM_PROVIDER='{}', falling back to anthropic", other);
+            crate::domain::LlmProviderType::Anthropic
+        }
+    };
+
+    let max_tokens: u32 = std::env::var("LLM_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| match provider {
+            crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_MAX_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1024),
+            crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_MAX_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1024),
+            crate::domain::LlmProviderType::Backend => 1024,
+        });
+
+    let temperature: f32 = std::env::var("LLM_TEMPERATURE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| match provider {
+            crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_TEMPERATURE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.2),
+            crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_TEMPERATURE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.2),
+            crate::domain::LlmProviderType::Backend => 0.2,
+        });
+
+    let default_system_prompt = r#"Ты — ассистент на техническом собеседовании. Отвечай по-русски.
+
+Контекст ниже — транскрипция, возможны ошибки распознавания. В нём есть строки:
+- "ОС:" — то, что я слышу (обычно реплики собеседника/вопросы).
+- "МИКРОФОН:" — то, что говорю я (мои ответы/мысли/иногда могу повторить вопрос).
+
+Твоя задача:
+1) Найти последний явный или неявный вопрос/задачу: в первую очередь из строк "ОС:". Если строк "ОС:" нет — используй строки "МИКРОФОН:".
+2) Дать лучший краткий ответ по делу (без воды), можно с короткими примерами/шагами.
+3) Если вопрос неясен из-за распознавания — задай 1 уточняющий вопрос и предложи 1-2 вероятные интерпретации.
+4) Возможно в вопросах не будет "?". Ты должен понимать где вопросы.
+
+Формат ответа:
+- Сначала 3–7 буллетов с ответом (каждый пункт начинай с "- ").
+- Затем (если нужно) короткий пример кода.
+- Не пересказывай весь контекст и не цитируй теги "ОС:"/"МИКРОФОН:".
+
+Правила для кода:
+- Если приводишь код, выводи его в Markdown fenced-блоке:
+  ```<language>
+  ...код...
+  ```
+- Вместо <language> подставляй реальный язык (например: dart, ts, js, python, go, rust, bash, sql).
+- Для упоминаний технических идентификаторов (имя переменной/класса/функции/пакета/файла/поля/метода) используй inline code в Markdown (одинарные обратные кавычки).
+- Если это именно код (даже короткий фрагмент/выражение) и важна подсветка — используй fenced-блок с языком.
+- Код должен быть ровно отформатирован: без нумерации строк, с корректными отступами, без мусорных префиксов.
+- Старайся давать минимально‑самодостаточный пример, который иллюстрирует главную идею (как на собеседовании).
+- Если полный код слишком длинный, допускается сокращать только с помощью комментариев соответствующего языка (например `// ...`, `# ...`, `/* ... */`) и после блока 1 строкой объяснить, что именно опущено. Не вставляй голые "..." как код."#;
+
+    let system_prompt = system_prompt
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("LLM_SYSTEM_PROMPT").ok())
+        .or_else(|| match provider {
+            crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_SYSTEM_PROMPT").ok(),
+            crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_SYSTEM_PROMPT").ok(),
+            crate::domain::LlmProviderType::Backend => std::env::var("BACKEND_LLM_SYSTEM_PROMPT").ok(),
+        })
+        .unwrap_or_else(|| default_system_prompt.to_string());
+
+    let model = match provider {
+        crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_MODEL")
+            .unwrap_or_else(|_| crate::domain::DEFAULT_ANTHROPIC_MODEL.to_string()),
+        crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_MODEL")
+            .or_else(|_| std::env::var("LLM_MODEL"))
+            .map_err(|_| "OPENAI_MODEL (or LLM_MODEL) is not set".to_string())?,
+        crate::domain::LlmProviderType::Backend => std::env::var("LLM_MODEL").unwrap_or_else(|_| "default".to_string()),
+    };
+
+    let api_key = match provider {
+        crate::domain::LlmProviderType::Anthropic => Some(
+            std::env::var("ANTHROPIC_API_KEY")
+                .map_err(|_| "ANTHROPIC_API_KEY is not set".to_string())?,
+        ),
+        crate::domain::LlmProviderType::OpenAiCompatible => Some(
+            std::env::var("OPENAI_API_KEY")
+                .map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
+        ),
+        crate::domain::LlmProviderType::Backend => None,
+    };
+
+    let backend_auth_token = if provider == crate::domain::LlmProviderType::Backend {
+        state
+            .auth_store
+            .read()
+            .await
+            .session
+            .as_ref()
+            .map(|s| s.access_token.clone())
+            .or_else(|| std::env::var("LLM_BACKEND_AUTH_TOKEN").ok())
+    } else {
+        None
+    };
+
+    let runtime_cfg = crate::domain::LlmRuntimeConfig {
+        provider,
+        api_key,
+        base_url: std::env::var("OPENAI_BASE_URL").ok(),
+        backend_url: std::env::var("LLM_BACKEND_URL").ok(),
+        backend_auth_token,
+    };
+
+    let llm_factory = crate::infrastructure::DefaultLlmProviderFactory::new();
+    let llm_provider = llm_factory.create(&runtime_cfg).map_err(|e| e.to_string())?;
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    log::info!(
+        "Command: start_haiku_stream request_id={} prompt_len={}",
+        request_id,
+        prompt.len()
+    );
+
+    let request_id_clone = request_id.clone();
+    let app_handle_clone = app_handle.clone();
+    let user_text = prompt.to_string();
+    let model_clone = model.clone();
+    let system_prompt_clone = system_prompt.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let app_handle_delta = app_handle_clone.clone();
+        let request_id_delta = request_id_clone.clone();
+
+        let request = crate::domain::LlmStreamRequest::new(
+            model_clone,
+            system_prompt_clone,
+            user_text,
+            max_tokens,
+            temperature,
+        );
+
+        let result = llm_provider
+            .stream_text(
+                &request,
+                Box::new(move |delta| {
+                    let _ = app_handle_delta.emit(
+                        EVENT_HAIKU_DELTA,
+                        HaikuDeltaPayload {
+                            request_id: request_id_delta.clone(),
+                            delta: delta.to_string(),
+                        },
+                    );
+                }),
+            )
+            .await;
+
+        match result {
+            Ok(()) => {
+                let _ = app_handle_clone.emit(
+                    EVENT_HAIKU_DONE,
+                    HaikuDonePayload {
+                        request_id: request_id_clone,
+                    },
+                );
+            }
+            Err(e) => {
+                let _ = app_handle_clone.emit(
+                    EVENT_HAIKU_ERROR,
+                    HaikuErrorPayload {
+                        request_id: request_id_clone,
+                        error: e.to_string(),
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(request_id)
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmImageInput {
+    pub media_type: String,
+    pub data_base64: String,
+}
+
+/// Стриминговый запрос в LLM из чата: контекст + явный вопрос + (опционально) изображения из clipboard.
+///
+/// Возвращает `request_id`, а прогресс стриминга приходит через события:
+/// - `haiku:delta`
+/// - `haiku:done`
+/// - `haiku:error`
+#[tauri::command]
+pub async fn start_haiku_chat_stream(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    context_text: String,
+    question_text: String,
+    images: Option<Vec<LlmImageInput>>,
+    system_prompt: Option<String>,
+) -> Result<String, String> {
+    let context = context_text.trim().to_string();
+    let question = question_text.trim().to_string();
+    let images = images.unwrap_or_default();
+
+    if context.is_empty() && question.is_empty() && images.is_empty() {
+        return Err("Empty input".to_string());
+    }
+
+    let provider = match std::env::var("LLM_PROVIDER")
+        .ok()
+        .unwrap_or_else(|| "anthropic".to_string())
+        .to_lowercase()
+        .as_str()
+    {
+        "anthropic" => crate::domain::LlmProviderType::Anthropic,
+        "openai" | "openai_compatible" | "openrouter" => crate::domain::LlmProviderType::OpenAiCompatible,
+        "backend" => crate::domain::LlmProviderType::Backend,
+        other => {
+            log::warn!("Unknown LLM_PROVIDER='{}', falling back to anthropic", other);
+            crate::domain::LlmProviderType::Anthropic
+        }
+    };
+
+    let max_tokens: u32 = std::env::var("LLM_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| match provider {
+            crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_MAX_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1024),
+            crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_MAX_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1024),
+            crate::domain::LlmProviderType::Backend => 1024,
+        });
+
+    let temperature: f32 = std::env::var("LLM_TEMPERATURE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| match provider {
+            crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_TEMPERATURE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.2),
+            crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_TEMPERATURE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.2),
+            crate::domain::LlmProviderType::Backend => 0.2,
+        });
+
+    let default_system_prompt = r#"Ты — ассистент на техническом собеседовании. Отвечай по-русски.
+
+Контекст ниже — транскрипция, возможны ошибки распознавания. В нём есть строки:
+- "ОС:" — то, что я слышу (обычно реплики собеседника/вопросы).
+- "МИКРОФОН:" — то, что говорю я (мои ответы/мысли/иногда могу повторить вопрос).
+- "ЗАПРОС:" — мой ручной вопрос/вставка.
+
+Твоя задача:
+1) Ответить на "ЗАПРОС:" с учётом контекста выше.
+2) Если "ЗАПРОС:" пустой, но есть изображения — объясни что на изображениях и ответь по ним, используя контекст.
+3) Если данных недостаточно — задай 1 уточняющий вопрос.
+
+Формат ответа:
+- Сначала 3–7 буллетов с ответом (каждый пункт начинай с "- ").
+- Затем (если нужно) короткий пример кода.
+
+Правила для кода:
+- Если приводишь код, выводи его в Markdown fenced-блоке:
+  ```<language>
+  ...код...
+  ```
+- Вместо <language> подставляй реальный язык (например: dart, ts, js, python, go, rust, bash, sql)."#;
+
+    let system_prompt = system_prompt
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("LLM_SYSTEM_PROMPT").ok())
+        .or_else(|| match provider {
+            crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_SYSTEM_PROMPT").ok(),
+            crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_SYSTEM_PROMPT").ok(),
+            crate::domain::LlmProviderType::Backend => std::env::var("BACKEND_LLM_SYSTEM_PROMPT").ok(),
+        })
+        .unwrap_or_else(|| default_system_prompt.to_string());
+
+    let model = match provider {
+        crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_MODEL")
+            .unwrap_or_else(|_| crate::domain::DEFAULT_ANTHROPIC_MODEL.to_string()),
+        crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_MODEL")
+            .or_else(|_| std::env::var("LLM_MODEL"))
+            .map_err(|_| "OPENAI_MODEL (or LLM_MODEL) is not set".to_string())?,
+        crate::domain::LlmProviderType::Backend => {
+            std::env::var("LLM_MODEL").unwrap_or_else(|_| "default".to_string())
+        }
+    };
+
+    let api_key = match provider {
+        crate::domain::LlmProviderType::Anthropic => Some(
+            std::env::var("ANTHROPIC_API_KEY")
+                .map_err(|_| "ANTHROPIC_API_KEY is not set".to_string())?,
+        ),
+        crate::domain::LlmProviderType::OpenAiCompatible => Some(
+            std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
+        ),
+        crate::domain::LlmProviderType::Backend => None,
+    };
+
+    let backend_auth_token = if provider == crate::domain::LlmProviderType::Backend {
+        state
+            .auth_store
+            .read()
+            .await
+            .session
+            .as_ref()
+            .map(|s| s.access_token.clone())
+            .or_else(|| std::env::var("LLM_BACKEND_AUTH_TOKEN").ok())
+    } else {
+        None
+    };
+
+    let runtime_cfg = crate::domain::LlmRuntimeConfig {
+        provider,
+        api_key: api_key.clone(),
+        base_url: std::env::var("OPENAI_BASE_URL").ok(),
+        backend_url: std::env::var("LLM_BACKEND_URL").ok(),
+        backend_auth_token,
+    };
+
+    let llm_factory = crate::infrastructure::DefaultLlmProviderFactory::new();
+    let llm_provider = llm_factory.create(&runtime_cfg).map_err(|e| e.to_string())?;
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    log::info!(
+        "Command: start_haiku_chat_stream request_id={} ctx_len={} q_len={} images={}",
+        request_id,
+        context.len(),
+        question.len(),
+        images.len()
+    );
+
+    let request_id_clone = request_id.clone();
+    let app_handle_clone = app_handle.clone();
+    let app_handle_delta = app_handle.clone();
+
+    let model_clone = model.clone();
+    let system_prompt_clone = system_prompt.clone();
+    let provider_clone = provider;
+    let api_key_clone = api_key.clone();
+    let images_clone = images.clone();
+    let context_clone = context.clone();
+    let question_clone = question.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let request_id_for_done = request_id_clone.clone();
+        let request_id_for_error = request_id_clone.clone();
+        let request_id_for_delta_anthropic = request_id_clone.clone();
+        let request_id_for_delta_openai = request_id_clone.clone();
+        let app_handle_delta_anthropic = app_handle_delta.clone();
+        let app_handle_delta_openai = app_handle_delta.clone();
+
+        let combined_text = if context_clone.is_empty() {
+            question_clone.clone()
+        } else if question_clone.is_empty() {
+            context_clone.clone()
+        } else {
+            format!("{context_clone}\n\nЗАПРОС: {question_clone}")
+        };
+
+        let combined_text_for_anthropic = combined_text.clone();
+
+        let result = if provider_clone == crate::domain::LlmProviderType::Anthropic {
+            let key: Result<&str, crate::domain::LlmError> = match api_key_clone.as_deref() {
+                Some(k) if !k.trim().is_empty() => Ok(k),
+                _ => Err(crate::domain::LlmError::Authentication(
+                    "Missing API key".to_string(),
+                )),
+            };
+
+            match key {
+                Ok(k) => {
+                    let mut parts: Vec<serde_json::Value> = vec![serde_json::json!({
+                        "type": "text",
+                        "text": combined_text_for_anthropic
+                    })];
+
+                    for img in images_clone.iter() {
+                        let mt = img.media_type.trim().to_string();
+                        let data = img.data_base64.trim().to_string();
+                        if mt.is_empty() || data.is_empty() {
+                            continue;
+                        }
+                        parts.push(serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mt,
+                                "data": data
+                            }
+                        }));
+                    }
+
+                    let user_content = if parts.len() == 1 {
+                        serde_json::json!(combined_text_for_anthropic)
+                    } else {
+                        serde_json::json!(parts)
+                    };
+
+                    crate::infrastructure::ai::anthropic::stream_user_content_deltas(
+                        crate::infrastructure::ai::anthropic::StreamUserContentOptions {
+                            api_key: k,
+                            model: &model_clone,
+                            system_prompt: &system_prompt_clone,
+                            user_content: &user_content,
+                            max_tokens,
+                            temperature,
+                        },
+                        move |delta| {
+                            let _ = app_handle_delta_anthropic.emit(
+                                EVENT_HAIKU_DELTA,
+                                HaikuDeltaPayload {
+                                    request_id: request_id_for_delta_anthropic.clone(),
+                                    delta: delta.to_string(),
+                                },
+                            );
+                        },
+                    )
+                    .await
+                    .map_err(|e| match e {
+                        crate::infrastructure::ai::anthropic::AnthropicError::MissingApiKey => {
+                            crate::domain::LlmError::Authentication("Missing API key".to_string())
+                        }
+                        crate::infrastructure::ai::anthropic::AnthropicError::Http { status, body } => {
+                            crate::domain::LlmError::Http { status, body }
+                        }
+                        crate::infrastructure::ai::anthropic::AnthropicError::Network(err) => {
+                            crate::domain::LlmError::Network(err.to_string())
+                        }
+                        crate::infrastructure::ai::anthropic::AnthropicError::InvalidResponse(err) => {
+                            crate::domain::LlmError::InvalidResponse(err)
+                        }
+                    })
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            if !images_clone.is_empty() {
+                log::warn!(
+                    "LLM provider '{}' does not support images in this request path; ignoring attachments",
+                    llm_provider.name()
+                );
+            }
+
+            let request = crate::domain::LlmStreamRequest::new(
+                model_clone.clone(),
+                system_prompt_clone.clone(),
+                combined_text,
+                max_tokens,
+                temperature,
+            );
+
+            llm_provider
+                .stream_text(
+                    &request,
+                    Box::new(move |delta| {
+                        let _ = app_handle_delta_openai.emit(
+                            EVENT_HAIKU_DELTA,
+                            HaikuDeltaPayload {
+                                request_id: request_id_for_delta_openai.clone(),
+                                delta: delta.to_string(),
+                            },
+                        );
+                    }),
+                )
+                .await
+        };
+
+        match result {
+            Ok(()) => {
+                let _ = app_handle_clone.emit(
+                    EVENT_HAIKU_DONE,
+                    HaikuDonePayload {
+                        request_id: request_id_for_done,
+                    },
+                );
+            }
+            Err(e) => {
+                let _ = app_handle_clone.emit(
+                    EVENT_HAIKU_ERROR,
+                    HaikuErrorPayload {
+                        request_id: request_id_for_error,
+                        error: e.to_string(),
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(request_id)
+}
+
+/// Стриминговое объяснение кода (отдельный канал событий, не попадает в чат).
+///
+/// Возвращает `request_id`, а прогресс стриминга приходит через события:
+/// - `code_explain:delta`
+/// - `code_explain:done`
+/// - `code_explain:error`
+#[tauri::command]
+pub async fn start_code_explain_stream(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    text: String,
+    system_prompt: Option<String>,
+    request_id: Option<String>,
+) -> Result<String, String> {
+    let prompt = text.trim();
+    if prompt.is_empty() {
+        return Err("Empty text".to_string());
+    }
+
+    let provider = match std::env::var("LLM_PROVIDER")
+        .ok()
+        .unwrap_or_else(|| "anthropic".to_string())
+        .to_lowercase()
+        .as_str()
+    {
+        "anthropic" => crate::domain::LlmProviderType::Anthropic,
+        "openai" | "openai_compatible" | "openrouter" => crate::domain::LlmProviderType::OpenAiCompatible,
+        "backend" => crate::domain::LlmProviderType::Backend,
+        other => {
+            log::warn!("Unknown LLM_PROVIDER='{}', falling back to anthropic", other);
+            crate::domain::LlmProviderType::Anthropic
+        }
+    };
+
+    let max_tokens: u32 = std::env::var("LLM_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| match provider {
+            crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_MAX_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1024),
+            crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_MAX_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1024),
+            crate::domain::LlmProviderType::Backend => 1024,
+        });
+
+    let temperature: f32 = std::env::var("LLM_TEMPERATURE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| match provider {
+            crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_TEMPERATURE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.2),
+            crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_TEMPERATURE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.2),
+            crate::domain::LlmProviderType::Backend => 0.2,
+        });
+
+    let default_system_prompt = r#"Ты — ассистент на техническом собеседовании. Отвечай по-русски.
+
+Тебе дают:
+- "Выделенный фрагмент" — текст или код, на который нужно ответить/объяснить.
+- "Контекст чата" — история сообщений ДО выбранного сообщения включительно.
+
+В контексте чата есть строки:
+- "ОС:" — то, что я слышу (обычно реплики собеседника/вопросы).
+- "МИКРОФОН:" — то, что говорю я (мои ответы/мысли/иногда могу повторить вопрос).
+- "ПОМОЩНИК:" — предыдущие ответы ассистента.
+
+Твоя задача:
+1) Понять, что пользователь хочет про выделенный фрагмент: объяснить, исправить, улучшить, ответить на вопрос, или дать краткий разбор.
+2) Дать лучший краткий ответ по делу (без воды), используя контекст чата, но не пересказывая его целиком.
+3) Если запрос неясен из-за распознавания/обрывков — задай 1 уточняющий вопрос и предложи 1–2 вероятные интерпретации.
+
+Формат ответа:
+- Сначала 3–7 буллетов (каждый пункт начинай с "- ").
+- Затем (если нужно) короткий пример кода (в fenced-блоке).
+
+Правила для кода:
+- Для упоминаний технических идентификаторов используй inline code (одинарные обратные кавычки).
+- Для кода/выражений (даже коротких), если важна подсветка, используй fenced-блок с языком.
+- Код — без нумерации строк, с корректными отступами."#;
+
+    let system_prompt = system_prompt
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("LLM_CODE_EXPLAIN_SYSTEM_PROMPT").ok())
+        .unwrap_or_else(|| default_system_prompt.to_string());
+
+    let model = match provider {
+        crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_MODEL")
+            .unwrap_or_else(|_| crate::domain::DEFAULT_ANTHROPIC_MODEL.to_string()),
+        crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_MODEL")
+            .or_else(|_| std::env::var("LLM_MODEL"))
+            .map_err(|_| "OPENAI_MODEL (or LLM_MODEL) is not set".to_string())?,
+        crate::domain::LlmProviderType::Backend => std::env::var("LLM_MODEL").unwrap_or_else(|_| "default".to_string()),
+    };
+
+    let api_key = match provider {
+        crate::domain::LlmProviderType::Anthropic => Some(
+            std::env::var("ANTHROPIC_API_KEY")
+                .map_err(|_| "ANTHROPIC_API_KEY is not set".to_string())?,
+        ),
+        crate::domain::LlmProviderType::OpenAiCompatible => Some(
+            std::env::var("OPENAI_API_KEY")
+                .map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
+        ),
+        crate::domain::LlmProviderType::Backend => None,
+    };
+
+    let backend_auth_token = if provider == crate::domain::LlmProviderType::Backend {
+        state
+            .auth_store
+            .read()
+            .await
+            .session
+            .as_ref()
+            .map(|s| s.access_token.clone())
+            .or_else(|| std::env::var("LLM_BACKEND_AUTH_TOKEN").ok())
+    } else {
+        None
+    };
+
+    let runtime_cfg = crate::domain::LlmRuntimeConfig {
+        provider,
+        api_key,
+        base_url: std::env::var("OPENAI_BASE_URL").ok(),
+        backend_url: std::env::var("LLM_BACKEND_URL").ok(),
+        backend_auth_token,
+    };
+
+    let llm_factory = crate::infrastructure::DefaultLlmProviderFactory::new();
+    let llm_provider = llm_factory.create(&runtime_cfg).map_err(|e| e.to_string())?;
+
+    let request_id = request_id
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    log::info!(
+        "Command: start_code_explain_stream request_id={} prompt_len={}",
+        request_id,
+        prompt.len()
+    );
+
+    let request_id_clone = request_id.clone();
+    let app_handle_clone = app_handle.clone();
+    let user_text = prompt.to_string();
+    let model_clone = model.clone();
+    let system_prompt_clone = system_prompt.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let app_handle_delta = app_handle_clone.clone();
+        let request_id_delta = request_id_clone.clone();
+
+        let request = crate::domain::LlmStreamRequest::new(
+            model_clone,
+            system_prompt_clone,
+            user_text,
+            max_tokens,
+            temperature,
+        );
+
+        let result = llm_provider
+            .stream_text(
+                &request,
+                Box::new(move |delta| {
+                    let _ = app_handle_delta.emit(
+                        EVENT_CODE_EXPLAIN_DELTA,
+                        CodeExplainDeltaPayload {
+                            request_id: request_id_delta.clone(),
+                            delta: delta.to_string(),
+                        },
+                    );
+                }),
+            )
+            .await;
+
+        match result {
+            Ok(()) => {
+                let _ = app_handle_clone.emit(
+                    EVENT_CODE_EXPLAIN_DONE,
+                    CodeExplainDonePayload {
+                        request_id: request_id_clone,
+                    },
+                );
+            }
+            Err(e) => {
+                let _ = app_handle_clone.emit(
+                    EVENT_CODE_EXPLAIN_ERROR,
+                    CodeExplainErrorPayload {
+                        request_id: request_id_clone,
+                        error: e.to_string(),
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(request_id)
+}
+
 fn format_size_human(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -1672,7 +2757,7 @@ pub async fn auto_paste_text(
     // Получаем bundle ID последнего активного окна
     let last_bundle_id = state.last_focused_app_bundle_id.read().await.clone();
 
-    // Не скрываем окно VoicetextAI - оставляем его видимым поверх всех
+    // Не скрываем окно HackInterviewAI - оставляем его видимым поверх всех
     // (оно уже настроено с alwaysOnTop: true в tauri.conf.json)
 
     // Если есть сохраненное окно - пытаемся активировать его
@@ -1706,10 +2791,10 @@ pub async fn auto_paste_text(
     .map_err(|e| format!("Failed to join blocking task: {}", e))?
     .map_err(|e| format!("Failed to paste text: {}", e))?;
 
-    // Возвращаем окно VoicetextAI поверх всех окон (но без фокуса)
+    // Возвращаем окно HackInterviewAI поверх всех окон (но без фокуса)
     if let Some(window) = app_handle.get_webview_window("main") {
         let _ = window.set_always_on_top(true);
-        log::debug!("VoicetextAI window kept on top");
+        log::debug!("HackInterviewAI window kept on top");
     }
 
     log::info!("Text auto-pasted successfully");
@@ -2007,8 +3092,11 @@ pub async fn set_auth_session(
     if let Err(e) = ConfigStore::save_config(&stt).await {
         log::warn!("Failed to persist STT config token: {}", e);
     }
-    if let Err(e) = state.transcription_service.update_config(stt).await {
+    if let Err(e) = state.transcription_service.update_config(stt.clone()).await {
         log::warn!("Failed to update transcription service config token: {}", e);
+    }
+    if let Err(e) = state.microphone_transcription_service.update_config(stt).await {
+        log::warn!("Failed to update microphone transcription config token: {}", e);
     }
 
     // 4) Bump revisions + invalidations
@@ -2060,7 +3148,8 @@ pub async fn set_authenticated(
                 if config.backend_auth_token.as_deref() != Some(t.as_str()) {
                     config.backend_auth_token = Some(t.clone());
                     let _ = ConfigStore::save_config(&config).await;
-                    let _ = state.transcription_service.update_config(config).await;
+                    let _ = state.transcription_service.update_config(config.clone()).await;
+                    let _ = state.microphone_transcription_service.update_config(config).await;
                 }
             }
         }
@@ -2089,7 +3178,8 @@ pub async fn set_authenticated(
     ConfigStore::save_config(&config)
         .await
         .map_err(|e| format!("Failed to save config: {}", e))?;
-    let _ = state.transcription_service.update_config(config).await;
+    let _ = state.transcription_service.update_config(config.clone()).await;
+    let _ = state.microphone_transcription_service.update_config(config).await;
 
     // Синхронизация между окнами через state-sync
     let revision = AppState::bump_revision(&state.auth_state_revision).await;

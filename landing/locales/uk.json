@@ -1,119 +1,119 @@
 {
-  "nav": {
-    "features": "Можливості",
-    "providers": "Провайдери",
-    "screenshots": "Скріншоти",
-    "download": "Завантажити",
-    "openSource": "Open Source",
-    "viewOnGithub": "View on GitHub",
-    "faq": "FAQ",
-    "pricing": "Ціни"
-  },
-  "hero": {
-    "badge": "VoicetextAI",
-    "ctaPrimary": "Завантажити для {platform}",
-    "ctaSecondary": "Переглянути можливості",
-    "preview": "Огляд продукту",
-    "trust": {
-      "realtime": "В реальному часі",
-      "multilingual": "40+ мов",
-      "crossPlatform": "Кросплатформність"
+    "nav": {
+        "features": "Можливості",
+        "providers": "Провайдери",
+        "screenshots": "Скріншоти",
+        "download": "Завантажити",
+        "openSource": "Open Source",
+        "viewOnGithub": "View on GitHub",
+        "faq": "FAQ",
+        "pricing": "Ціни"
     },
-    "transcription": {
-      "sample": "Привіт, це голосове повідомлення..."
+    "hero": {
+        "badge": "HackInterviewAI",
+        "ctaPrimary": "Завантажити для {platform}",
+        "ctaSecondary": "Переглянути можливості",
+        "preview": "Огляд продукту",
+        "trust": {
+            "realtime": "В реальному часі",
+            "multilingual": "40+ мов",
+            "crossPlatform": "Кросплатформність"
+        },
+        "transcription": {
+            "sample": "Привіт, це голосове повідомлення..."
+        },
+        "status": {
+            "recording": "Запис"
+        }
     },
-    "status": {
-      "recording": "Запис"
+    "download": {
+        "title": "Завантажити",
+        "detected": "Визначено",
+        "systemRequirements": "Системні вимоги",
+        "version": "Версія {version}"
+    },
+    "theme": {
+        "dark": "Темна",
+        "light": "Світла"
+    },
+    "language": {
+        "label": "Мова"
+    },
+    "features": {
+        "sectionTitle": "Все, що потрібно для голосового введення",
+        "sectionSubtitle": "Потужні функції для швидкої та зручної транскрипції голосу в текст."
+    },
+    "providers": {
+        "sectionTitle": "На базі Deepgram Nova-3",
+        "sectionSubtitle": "Провідний рушій розпізнавання мовлення з неперевершеною точністю та мультимовною підтримкою в реальному часі.",
+        "learnMoreBtn": "Дізнатися про Deepgram Nova-3"
+    },
+    "pricing": {
+        "sectionTitle": "Прості та прозорі ціни",
+        "sectionSubtitle": "Починайте безкоштовно. Оновіться, коли потрібно більше.",
+        "getStarted": "Почати",
+        "popular": "Популярний",
+        "refundNote": "Гарантія повернення 14 днів. Платежі обробляються Paddle."
+    },
+    "faq": {
+        "sectionTitle": "Маєте запитання? У нас є відповіді",
+        "subtitle": "Відповіді на поширені запитання"
+    },
+    "common": {
+        "learnMore": "Детальніше"
+    },
+    "screenshots": {
+        "sectionTitle": "Подивіться в дії",
+        "sectionSubtitle": "Ознайомтеся з елегантним інтерфейсом, створеним для продуктивності та зручності.",
+        "main": "Головний екран",
+        "mainDark": "Головний інтерфейс",
+        "recordDark": "Запис",
+        "settingsDark": "Налаштування",
+        "dark": "Темна тема",
+        "light": "Світла тема",
+        "settings": "Налаштування",
+        "recording": "Запис",
+        "toggleTheme": "Перемкнути тему скріншота"
+    },
+    "footer": {
+        "copyright": "© {year} HackInterviewAI",
+        "tagline": "Швидкий і точний голос у текст",
+        "links": {
+            "terms": "Умови",
+            "privacyPolicy": "Конфіденційність",
+            "refundPolicy": "Повернення"
+        }
+    },
+    "meta": {
+        "checkoutSuccessTitle": "Оплату успішно отримано — HackInterviewAI",
+        "checkoutSuccessDescription": "Дякуємо! Ми отримали оплату. Доступ надається через захищені Paddle webhooks і може зайняти трохи часу.",
+        "payTitle": "Безпечна оплата — HackInterviewAI",
+        "payDescription": "Сторінка входу в secure checkout, яку використовують Paddle payment links та посилання для оновлення платіжного методу.",
+        "homeTitle": "HackInterviewAI — безкоштовний, простий, швидкий голос-у-текст у реальному часі",
+        "homeDescription": "Сучасний кросплатформний десктопний застосунок на базі ШІ. 40 мов. Безкоштовно.",
+        "downloadTitle": "Завантажити HackInterviewAI",
+        "downloadDescription": "Збірки для macOS, Windows та Linux.",
+        "privacyTitle": "Приватність HackInterviewAI",
+        "privacyDescription": "Як ми захищаємо ваші дані та конфіденційність.",
+        "privacyPolicyTitle": "Політика конфіденційності — HackInterviewAI",
+        "privacyPolicyDescription": "Як ми збираємо, використовуємо та захищаємо ваші дані.",
+        "termsTitle": "Умови використання — HackInterviewAI",
+        "termsDescription": "Умови та положення використання застосунку HackInterviewAI.",
+        "refundPolicyTitle": "Політика повернень — HackInterviewAI",
+        "refundPolicyDescription": "Повернення коштів, скасування підписки та як запросити повернення для підписок HackInterviewAI.",
+        "openSourceTitle": "Open Source — HackInterviewAI",
+        "openSourceDescription": "Досліджуйте відкритий вихідний код HackInterviewAI на GitHub."
+    },
+    "languages": {
+        "badge": "Мови",
+        "title": "40+ підтримуваних мов",
+        "subtitle": "Точне розпізнавання мовлення десятками мов та діалектів по всьому світу."
+    },
+    "error": {
+        "notFoundTitle": "Сторінку не знайдено",
+        "notFoundDescription": "Сторінка, яку ви шукаєте, не існує або була переміщена.",
+        "genericTitle": "Щось пішло не так",
+        "genericDescription": "Сталася неочікувана помилка. Спробуйте пізніше.",
+        "goHome": "На головну"
     }
-  },
-  "download": {
-    "title": "Завантажити",
-    "detected": "Визначено",
-    "systemRequirements": "Системні вимоги",
-    "version": "Версія {version}"
-  },
-  "theme": {
-    "dark": "Темна",
-    "light": "Світла"
-  },
-  "language": {
-    "label": "Мова"
-  },
-  "features": {
-    "sectionTitle": "Все, що потрібно для голосового введення",
-    "sectionSubtitle": "Потужні функції для швидкої та зручної транскрипції голосу в текст."
-  },
-  "providers": {
-    "sectionTitle": "На базі Deepgram Nova-3",
-    "sectionSubtitle": "Найшвидший і найточніший мовленнєвий ШІ на ринку. Використовується NASA, Spotify та тисячами компаній.",
-    "learnMoreBtn": "Дізнатися про Deepgram Nova-3"
-  },
-  "pricing": {
-    "sectionTitle": "Прості та прозорі ціни",
-    "sectionSubtitle": "Починайте безкоштовно. Оновіться, коли потрібно більше.",
-    "getStarted": "Почати",
-    "popular": "Популярний",
-    "refundNote": "Гарантія повернення 14 днів. Платежі обробляються Paddle."
-  },
-  "faq": {
-    "sectionTitle": "Маєте запитання? У нас є відповіді",
-    "subtitle": "Відповіді на поширені запитання"
-  },
-  "common": {
-    "learnMore": "Детальніше"
-  },
-  "screenshots": {
-    "sectionTitle": "Подивіться в дії",
-    "sectionSubtitle": "Ознайомтеся з елегантним інтерфейсом, створеним для продуктивності та зручності.",
-    "main": "Головний екран",
-    "mainDark": "Головний інтерфейс",
-    "recordDark": "Запис",
-    "settingsDark": "Налаштування",
-    "dark": "Темна тема",
-    "light": "Світла тема",
-    "settings": "Налаштування",
-    "recording": "Запис",
-    "toggleTheme": "Перемкнути тему скріншота"
-  },
-  "footer": {
-    "copyright": "© {year} VoicetextAI",
-    "tagline": "Швидкий і точний голос у текст",
-    "links": {
-      "terms": "Умови",
-      "privacyPolicy": "Конфіденційність",
-      "refundPolicy": "Повернення"
-    }
-  },
-  "meta": {
-    "checkoutSuccessTitle": "Оплату успішно отримано — VoicetextAI",
-    "checkoutSuccessDescription": "Дякуємо! Ми отримали оплату. Доступ надається через захищені Paddle webhooks і може зайняти трохи часу.",
-    "payTitle": "Безпечна оплата — VoicetextAI",
-    "payDescription": "Сторінка входу в secure checkout, яку використовують Paddle payment links та посилання для оновлення платіжного методу.",
-    "homeTitle": "VoicetextAI — безкоштовний, простий, швидкий голос-у-текст у реальному часі",
-    "homeDescription": "Сучасний кросплатформний десктопний застосунок на базі ШІ. 40 мов. Безкоштовно.",
-    "downloadTitle": "Завантажити VoicetextAI",
-    "downloadDescription": "Збірки для macOS, Windows та Linux.",
-    "privacyTitle": "Приватність VoicetextAI",
-    "privacyDescription": "Як ми захищаємо ваші дані та конфіденційність.",
-    "privacyPolicyTitle": "Політика конфіденційності — VoicetextAI",
-    "privacyPolicyDescription": "Як ми збираємо, використовуємо та захищаємо ваші дані.",
-    "termsTitle": "Умови використання — VoicetextAI",
-    "termsDescription": "Умови та положення використання застосунку VoicetextAI.",
-    "refundPolicyTitle": "Політика повернень — VoicetextAI",
-    "refundPolicyDescription": "Повернення коштів, скасування підписки та як запросити повернення для підписок VoicetextAI.",
-    "openSourceTitle": "Open Source — VoicetextAI",
-    "openSourceDescription": "Досліджуйте відкритий вихідний код VoicetextAI на GitHub."
-  },
-  "languages": {
-    "badge": "Мови",
-    "title": "40+ підтримуваних мов",
-    "subtitle": "Точне розпізнавання мовлення десятками мов та діалектів по всьому світу."
-  },
-  "error": {
-    "notFoundTitle": "Сторінку не знайдено",
-    "notFoundDescription": "Сторінка, яку ви шукаєте, не існує або була переміщена.",
-    "genericTitle": "Щось пішло не так",
-    "genericDescription": "Сталася неочікувана помилка. Спробуйте пізніше.",
-    "goHome": "На головну"
-  }
 }

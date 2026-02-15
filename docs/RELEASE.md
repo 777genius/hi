@@ -1,4 +1,4 @@
-# Гайд по релизу VoicetextAI
+# Гайд по релизу HackInterviewAI
 
 Пошаговая инструкция по выпуску новой версии приложения.
 
@@ -186,7 +186,7 @@ gh release edit v0.9.4 \
 - Скачать `.msi` и запустить установщик
 
 **Linux:**
-- `.deb` для Debian/Ubuntu: `sudo dpkg -i voicetextai_*.deb`
+- `.deb` для Debian/Ubuntu: `sudo dpkg -i hackinterviewai_*.deb`
 - `.AppImage` для остальных: сделать исполняемым и запустить
 
 ---
@@ -225,7 +225,7 @@ EOF
 - Скачать `.msi` и запустить установщик
 
 **Linux:**
-- `.deb` для Debian/Ubuntu: `sudo dpkg -i voicetextai_*.deb`
+- `.deb` для Debian/Ubuntu: `sudo dpkg -i hackinterviewai_*.deb`
 - `.AppImage` для остальных: сделать исполняемым и запустить
 
 ---

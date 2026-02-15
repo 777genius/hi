@@ -22,6 +22,7 @@ describe('useAppConfigStore sync', () => {
       auto_paste_text: false,
       microphone_sensitivity: 95,
       selected_audio_device: null,
+      selected_output_audio_device: null,
       ...overrides,
     };
   }
@@ -44,6 +45,7 @@ describe('useAppConfigStore sync', () => {
         auto_paste_text: true,
         microphone_sensitivity: 120,
         selected_audio_device: 'Mic A',
+        selected_output_audio_device: 'Speakers A',
       }),
     });
 
@@ -60,6 +62,7 @@ describe('useAppConfigStore sync', () => {
     expect(store.autoPasteText).toBe(true);
     expect(store.microphoneSensitivity).toBe(120);
     expect(store.selectedAudioDevice).toBe('Mic A');
+    expect(store.selectedOutputAudioDevice).toBe('Speakers A');
   });
 
   it('applySnapshot обновляет значения из SnapshotEnvelope', () => {
@@ -72,6 +75,7 @@ describe('useAppConfigStore sync', () => {
         auto_paste_text: false,
         microphone_sensitivity: 50,
         selected_audio_device: 'Mic B',
+        selected_output_audio_device: 'Speakers B',
       },
       '42',
     );
@@ -82,6 +86,7 @@ describe('useAppConfigStore sync', () => {
     expect(store.autoPasteText).toBe(false);
     expect(store.microphoneSensitivity).toBe(50);
     expect(store.selectedAudioDevice).toBe('Mic B');
+    expect(store.selectedOutputAudioDevice).toBe('Speakers B');
     expect(store.isLoaded).toBe(true);
   });
 

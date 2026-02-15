@@ -4,8 +4,8 @@ import logoImg from '~/assets/logo-128.webp';
 
 <template>
   <NuxtLink to="/" class="app-logo">
-    <img :src="logoImg" alt="VoicetextAI" class="app-logo__icon" width="48" height="48" />
-    VoicetextAI
+    <img :src="logoImg" alt="HackInterviewAI" class="app-logo__icon" width="48" height="48" />
+    HackInterviewAI
   </NuxtLink>
 </template>
 

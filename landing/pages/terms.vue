@@ -9,9 +9,9 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
 
     <div class="legal-content">
       <section class="legal-section">
-        <h2 class="text-h6">1. About VoicetextAI</h2>
+        <h2 class="text-h6">1. About HackInterviewAI</h2>
         <p>
-          VoicetextAI is developed and operated by Iliya Zelenko ("Developer", "we", "us").
+          HackInterviewAI is developed and operated by Iliya Zelenko ("Developer", "we", "us").
           All payments are processed by
           <a href="https://www.paddle.com" target="_blank" rel="noopener">Paddle.com</a>,
           which acts as the Merchant of Record for all transactions. Your purchase is also governed by
@@ -22,7 +22,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       <section class="legal-section">
         <h2 class="text-h6">2. Acceptance of Terms</h2>
         <p>
-          By accessing or using VoicetextAI (the "Service"), you agree to be bound by these Terms
+          By accessing or using HackInterviewAI (the "Service"), you agree to be bound by these Terms
           of Service ("Terms"). If you do not agree to these Terms, do not use the Service.
         </p>
         <p>
@@ -35,7 +35,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       <section class="legal-section">
         <h2 class="text-h6">3. Description of Service</h2>
         <p>
-          VoicetextAI is a desktop application that provides real-time voice-to-text transcription
+          HackInterviewAI is a desktop application that provides real-time voice-to-text transcription
           powered by Deepgram Nova-3. Key features include:
         </p>
         <ul>
@@ -128,7 +128,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
         <h2 class="text-h6">8. Intellectual Property</h2>
         <p>
           The Service, including its design, code, graphics, logos, and trademarks, is the property
-          of VoicetextAI and is protected by intellectual property laws. You are granted a limited,
+          of HackInterviewAI and is protected by intellectual property laws. You are granted a limited,
           non-exclusive, non-transferable license to use the Service in accordance with these Terms.
         </p>
         <p>
@@ -164,7 +164,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       <section class="legal-section">
         <h2 class="text-h6">11. Limitation of Liability</h2>
         <p>
-          TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL VOICETEXTAI, ITS
+          TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL HACKINTERVIEWAI, ITS
           OFFICERS, DIRECTORS, EMPLOYEES, OR AGENTS BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL,
           CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR ANY LOSS OF PROFITS OR REVENUES, WHETHER INCURRED
           DIRECTLY OR INDIRECTLY, OR ANY LOSS OF DATA, USE, GOODWILL, OR OTHER INTANGIBLE LOSSES,
@@ -181,7 +181,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       <section class="legal-section">
         <h2 class="text-h6">12. Indemnification</h2>
         <p>
-          You agree to indemnify and hold harmless VoicetextAI and its affiliates, officers,
+          You agree to indemnify and hold harmless HackInterviewAI and its affiliates, officers,
           agents, and employees from any claim, liability, damage, loss, or expense (including
           reasonable attorneys' fees) arising from your use of the Service, your violation of these
           Terms, or your violation of any rights of a third party.

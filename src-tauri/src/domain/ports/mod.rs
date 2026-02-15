@@ -3,6 +3,8 @@
 
 mod stt_provider;
 mod audio_capture;
+mod llm_provider;
 
 pub use stt_provider::*;
 pub use audio_capture::*;
+pub use llm_provider::*;

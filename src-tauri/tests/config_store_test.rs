@@ -1,3 +1,5 @@
+#![cfg(feature = "integration-tests")]
+
 use app_lib::infrastructure::ConfigStore;
 use app_lib::domain::{SttConfig, SttProviderType, AppConfig};
 use std::fs;

@@ -1,3 +1,5 @@
+#![cfg(feature = "integration-tests")]
+
 use app_lib::infrastructure::audio::MockAudioCapture;
 use app_lib::domain::{AudioCapture, AudioConfig, AudioChunk};
 use std::sync::Arc;

@@ -4,9 +4,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { isTauriAvailable } from '../utils/tauri';
 import { i18n } from '../i18n';
+import { mergeTranscriptText } from '../utils/transcriptionText';
 import { api } from '../features/auth/infrastructure/api/apiClient';
 import { useAuthStore } from '../features/auth/store/authStore';
-import { useAppConfigStore } from './appConfig';
 import { getTokenRepository } from '../features/auth/infrastructure/repositories/TokenRepository';
 import { getAuthContainer } from '../features/auth/infrastructure/di/authContainer';
 import { canRefreshSession, isAccessTokenExpired } from '../features/auth/domain/entities/Session';
@@ -43,9 +43,94 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const partialText = ref<string>(''); // текущий промежуточный сегмент
   const accumulatedText = ref<string>(''); // накопленные финализированные сегменты
   const finalText = ref<string>(''); // полный финальный результат (для копирования)
+  type FinalUtterance = { id: string; sessionId: number; text: string; timestamp: number };
+  const finalUtterances = ref<FinalUtterance[]>([]);
+  const UTTERANCE_MERGE_GAP_MS = 2500;
+  let utteranceIdSeq = 0;
+
+  function newUtteranceId(sessionIdValue: number, timestampValue: number): string {
+    utteranceIdSeq += 1;
+    // Нужен стабильный id (нельзя завязываться на индекс — он меняется при удалении).
+    return `stt:${sessionIdValue}:${timestampValue}:${utteranceIdSeq}`;
+  }
+
+  function rebuildFinalTextFromUtterances(): void {
+    finalText.value = finalUtterances.value.map((u) => u.text).filter(Boolean).join(' ').trim();
+  }
+
+  function normalizeForDedup(v: string): string {
+    return String(v ?? '')
+      .toLowerCase()
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/[.,!?;:"'`(){}\[\]<>\-–—_\\/|@#$%^&*+=~]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function editFinalUtterance(utteranceId: string, nextText: string): void {
+    const list = finalUtterances.value;
+    const idx = list.findIndex((u) => u.id === utteranceId);
+    if (idx < 0) return;
+    const t = String(nextText ?? '').trim();
+    if (!t) return;
+    list[idx] = { ...list[idx], text: t };
+    rebuildFinalTextFromUtterances();
+  }
+
+  function deleteFinalUtterance(utteranceId: string): void {
+    const list = finalUtterances.value;
+    const idx = list.findIndex((u) => u.id === utteranceId);
+    if (idx < 0) return;
+    list.splice(idx, 1);
+    rebuildFinalTextFromUtterances();
+  }
+
+  function pushFinalUtterance(sessionIdValue: number, textValue: string, timestampValue: number): void {
+    const t = String(textValue ?? '').trim();
+    if (!t) return;
+
+    const last = finalUtterances.value.length > 0 ? finalUtterances.value[finalUtterances.value.length - 1] : null;
+    // Защита от дублей (например, при повторной обработке одного и того же события).
+    if (last && last.sessionId === sessionIdValue) {
+      const nl = normalizeForDedup(last.text);
+      const nt = normalizeForDedup(t);
+      if (nl && nt && nl === nt) {
+        // timestamp обновим, чтобы merge-gap логика оставалась корректной.
+        last.timestamp = timestampValue;
+        rebuildFinalTextFromUtterances();
+        return;
+      }
+    }
+
+    const gapOk =
+      last &&
+      last.sessionId === sessionIdValue &&
+      Number.isFinite(timestampValue) &&
+      Number.isFinite(last.timestamp) &&
+      timestampValue - last.timestamp >= 0 &&
+      timestampValue - last.timestamp <= UTTERANCE_MERGE_GAP_MS;
+
+    if (gapOk) {
+      last!.text = mergeTranscriptText(last!.text, t);
+      last!.timestamp = timestampValue;
+      rebuildFinalTextFromUtterances();
+      return;
+    }
+
+    finalUtterances.value.push({
+      id: newUtteranceId(sessionIdValue, timestampValue),
+      sessionId: sessionIdValue,
+      text: t,
+      timestamp: timestampValue,
+    });
+
+    // finalText используется как агрегат (например, в иных частях UI) — держим в согласованном виде.
+    rebuildFinalTextFromUtterances();
+  }
   const error = ref<string | null>(null);
   const errorType = ref<TranscriptionErrorPayload['error_type'] | null>(null);
-  const lastFinalizedText = ref<string>(''); // последний финализированный текст (для дедупликации)
+  const lastFinalizedSegmentKey = ref<string>(''); // для дедупликации повторных is_final сегментов
+  const lastFinalizedSegmentTextNorm = ref<string>(''); // помогает не "съедать" повторяющиеся короткие сегменты
   const connectionQuality = ref<ConnectionQuality>(ConnectionQuality.Good);
 
   // Retry логика подключения (когда запись ещё не стартанула и мы пытаемся подключиться к STT)
@@ -65,11 +150,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const RATE_LIMIT_MAX_RETRIES = 2;
   let isForcingLogout = false;
   let refreshAuthForSttPromise: Promise<boolean> | null = null;
-
-  // Config flags — берём из appConfig store (единый источник правды)
-  const appConfig = useAppConfigStore();
-  const autoCopyEnabled = computed(() => appConfig.autoCopyToClipboard);
-  const autoPasteEnabled = computed(() => appConfig.autoPasteText);
 
   // Auth store — нужен, чтобы корректно сбрасывать ошибки записи после успешной авторизации,
   // если ошибка относилась к предыдущему пользователю/токену.
@@ -497,6 +577,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenPartial = await listen<PartialTranscriptionPayload>(
         EVENT_TRANSCRIPTION_PARTIAL,
         async (event) => {
+          const source = event.payload.source ?? 'system';
+          if (source !== 'system') return;
+
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:partial')) {
             return;
           }
@@ -507,19 +590,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             is_segment_final: event.payload.is_segment_final,
             start: event.payload.start,
             duration: event.payload.duration,
-            timestamp: event.payload.timestamp,
+            timestamp: Date.now(),
             current_utterance_start: currentUtteranceStart.value,
             current_accumulated: accumulatedText.value,
             current_partial: partialText.value,
-            last_finalized: lastFinalizedText.value
+            last_finalized: lastFinalizedSegmentKey.value
           });
 
           // Если сегмент финализирован (is_final=true, но не speech_final)
           if (event.payload.is_segment_final) {
             const newText = event.payload.text;
+            const newNorm = normalizeForDedup(newText);
+            const segKey = `${event.payload.start}|${event.payload.duration}|${newNorm}`;
 
             // Проверка на точный дубликат (защита от повторной отправки того же сегмента)
-            if (newText === lastFinalizedText.value) {
+            if (segKey === lastFinalizedSegmentKey.value) {
               console.log('⚠️ Exact duplicate segment detected, skipping:', newText);
               return;
             }
@@ -529,11 +614,23 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             console.log('🔒 [BEFORE ACCUMULATE] accumulated:', oldAccumulated);
             console.log('🔒 [BEFORE ACCUMULATE] newText:', newText);
 
-            accumulatedText.value = accumulatedText.value
-              ? `${accumulatedText.value} ${newText}`
-              : newText;
+            const isRepeatCandidate =
+              !!newNorm &&
+              newNorm === lastFinalizedSegmentTextNorm.value &&
+              (newNorm.length <= 12 || newNorm.split(' ').length <= 2);
 
-            lastFinalizedText.value = newText;
+            if (isRepeatCandidate) {
+              // Важно: одинаковый короткий текст может быть реально произнесён дважды подряд (например "да да").
+              // При этом start/duration будут отличаться, а segKey — другой. Не "съедаем" повтор.
+              accumulatedText.value = accumulatedText.value
+                ? `${accumulatedText.value} ${String(newText ?? '').trim()}`.trim()
+                : String(newText ?? '').trim();
+            } else {
+              accumulatedText.value = mergeTranscriptText(accumulatedText.value, newText);
+            }
+
+            lastFinalizedSegmentKey.value = segKey;
+            lastFinalizedSegmentTextNorm.value = newNorm;
 
             console.log('🔒 [AFTER ACCUMULATE] accumulated:', accumulatedText.value);
             console.log('🔒 Utterance finalized and accumulated:', {
@@ -583,27 +680,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 accumulated_text: accumulatedText.value
               });
 
-              // Сохраняем accumulated текст от предыдущей utterance если он есть
-              if (accumulatedText.value) {
-                const oldFinalText = finalText.value;
-                console.log('💾 [BEFORE SAVE] finalText:', oldFinalText);
-                console.log('💾 [BEFORE SAVE] accumulated:', accumulatedText.value);
-
-                finalText.value = finalText.value
-                  ? `${finalText.value} ${accumulatedText.value}`
-                  : accumulatedText.value;
-
-                console.log('💾 [AFTER SAVE] finalText:', finalText.value);
-                console.log('💾 Successfully saved accumulated text to finalText');
-
-                accumulatedText.value = '';
-                animatedAccumulatedText.value = '';
-                lastFinalizedText.value = '';
-              } else {
-                console.log('💾 [SKIP] No accumulated text to save (already empty)');
+              // Не создаём новый bubble только из-за смены start:
+              // Deepgram может менять start в ходе одной "фразы" без паузы.
+              // Чтобы не терять текст, аккуратно добавляем прошлый partial в accumulated.
+              if (partialText.value) {
+                accumulatedText.value = mergeTranscriptText(accumulatedText.value, partialText.value);
+                animateAccumulatedText(accumulatedText.value);
               }
 
-              // Начинаем новую utterance
+              // Начинаем новый сегмент: обновляем start и partial текст.
               currentUtteranceStart.value = event.payload.start;
               partialText.value = event.payload.text;
 
@@ -618,6 +703,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenFinal = await listen<FinalTranscriptionPayload>(
         EVENT_TRANSCRIPTION_FINAL,
         async (event) => {
+          const source = event.payload.source ?? 'system';
+          if (source !== 'system') return;
+
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:final')) {
             return;
           }
@@ -627,7 +715,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             text: event.payload.text,
             confidence: event.payload.confidence,
             language: event.payload.language,
-            timestamp: event.payload.timestamp,
+            timestamp: Date.now(),
             current_accumulated: accumulatedText.value,
             current_final: finalText.value,
             current_partial: partialText.value
@@ -649,10 +737,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // РЕШЕНИЕ: ВСЕГДА добавляем accumulated к FINAL тексту (если есть).
           // Дублирования не будет, т.к. accumulated очищается только при сохранении в finalText.
           if (event.payload.text || accumulatedText.value || partialText.value) {
-            const currentUtteranceText = [accumulatedText.value, event.payload.text || partialText.value]
-              .filter(Boolean)
-              .join(' ')
-              .trim();
+            const ts = Number(event.payload.timestamp);
+            const timestampMs = Number.isFinite(ts) && ts > 0 ? ts : Date.now();
+
+            const tail = event.payload.text || partialText.value;
+            const currentUtteranceText = mergeTranscriptText(accumulatedText.value, tail).trim();
 
             console.log('🔗 [SPEECH_FINAL] Combining utterance:', {
               accumulated: accumulatedText.value,
@@ -662,9 +751,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               combined: currentUtteranceText
             });
 
-            const oldFinalText = finalText.value;
-            console.log('📋 [BEFORE ADD] finalText:', oldFinalText);
-            console.log('📋 [BEFORE ADD] currentUtteranceText:', currentUtteranceText);
+            if (currentUtteranceText) {
+              pushFinalUtterance(event.payload.session_id, currentUtteranceText, timestampMs);
+            }
 
             console.log('🧹 [CLEANUP] Clearing all temporary data BEFORE updating finalText');
             console.log('🧹 [CLEANUP] Before: accumulated=', accumulatedText.value, 'partial=', partialText.value);
@@ -673,7 +762,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             // чтобы избежать дублирования в UI
             partialText.value = '';
             accumulatedText.value = '';
-            lastFinalizedText.value = '';
+            lastFinalizedSegmentKey.value = '';
+            lastFinalizedSegmentTextNorm.value = '';
             currentUtteranceStart.value = -1;
 
             // Очищаем анимированные тексты
@@ -692,55 +782,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               accumulatedAnimationTimer = null;
             }
 
-            // Добавляем к финальному тексту
-            finalText.value = finalText.value
-              ? `${finalText.value} ${currentUtteranceText}`
-              : currentUtteranceText;
-
-            console.log('📋 [AFTER ADD] finalText:', finalText.value);
-            console.log('📋 Successfully added utterance to finalText');
-
-            // Auto-paste финальной фразы (вся utterance целиком)
-            if (autoPasteEnabled.value && currentUtteranceText.trim()) {
-              // Защита от дубликатов: проверяем что мы еще не вставляли эту версию finalText
-              if (finalText.value !== lastPastedFinalText.value) {
-                try {
-                  // Добавляем пробел перед фразой если это не первая фраза
-                  const needsSpace = oldFinalText.length > 0;
-                  const textToInsert = needsSpace ? ` ${currentUtteranceText}` : currentUtteranceText;
-                  console.log('📝 Auto-pasting final utterance:', textToInsert);
-                  await invoke('auto_paste_text', { text: textToInsert });
-                  console.log('✅ Auto-pasted successfully');
-
-                  // ВАЖНО: Обновляем флаг ПОСЛЕ успешной вставки
-                  lastPastedFinalText.value = finalText.value;
-                } catch (err) {
-                  console.error('❌ Failed to auto-paste:', err);
-
-                  // Fallback: копируем в clipboard
-                  try {
-                    await invoke('copy_to_clipboard_native', { text: currentUtteranceText });
-                    console.log('📋 Fallback: copied to clipboard');
-                  } catch (copyErr) {
-                    console.error('❌ Failed to copy to clipboard:', copyErr);
-                  }
-                }
-              } else {
-                console.log('⏭️ Skipping auto-paste: already pasted this version of finalText');
-              }
-            }
-
-            // Auto-copy to clipboard с накопленным текстом (если включено)
-            if (autoCopyEnabled.value) {
-              try {
-                await invoke('copy_to_clipboard_native', { text: finalText.value });
-                console.log('📋 Auto-copied to clipboard:', finalText.value);
-              } catch (err) {
-                console.error('Failed to copy to clipboard:', err);
-              }
-            } else {
-              console.log('📋 Auto-copy disabled, skipping clipboard');
-            }
           } else {
             console.warn('⚠️ [SPEECH_FINAL] event.payload.text is empty, skipping');
             console.log('⚠️ [SPEECH_FINAL] Event payload:', event.payload);
@@ -822,7 +863,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             partialText.value = '';
             accumulatedText.value = '';
             finalText.value = '';
-            lastFinalizedText.value = '';
+            lastFinalizedSegmentKey.value = '';
+            lastFinalizedSegmentTextNorm.value = '';
             currentUtteranceStart.value = -1;
             error.value = null;
             errorType.value = null;
@@ -870,49 +912,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
             if (currentText) {
               console.log('📝 Текущий текст для обработки:', currentText);
-
-              // Auto-copy: копируем ВЕСЬ текст в clipboard
-              if (autoCopyEnabled.value) {
-                try {
-                  await invoke('copy_to_clipboard_native', { text: currentText });
-                  console.log('📋 Весь текст скопирован в clipboard');
-                } catch (err) {
-                  console.error('❌ Ошибка копирования:', err);
-                }
-              }
-
-              // Auto-paste: вставляем только НОВУЮ часть
-              if (autoPasteEnabled.value) {
-                // Определяем что нужно вставить (только новое)
-                let textToInsert = currentText;
-
-                if (lastPastedFinalText.value) {
-                  // Если уже что-то вставляли, вставляем только новую часть
-                  if (currentText.startsWith(lastPastedFinalText.value)) {
-                    textToInsert = currentText.slice(lastPastedFinalText.value.length).trim();
-
-                    // Добавляем пробел если нужно
-                    if (textToInsert && lastPastedFinalText.value) {
-                      textToInsert = ' ' + textToInsert;
-                    }
-                  }
-                }
-
-                if (textToInsert.trim()) {
-                  try {
-                    console.log('📝 Auto-paste: вставляем новую часть:', textToInsert);
-                    await invoke('auto_paste_text', { text: textToInsert });
-                    console.log('✅ Новая часть вставлена через auto-paste');
-
-                    // Обновляем lastPastedFinalText
-                    lastPastedFinalText.value = currentText;
-                  } catch (err) {
-                    console.error('❌ Ошибка auto-paste:', err);
-                  }
-                } else {
-                  console.log('⏭️ Нечего вставлять - весь текст уже был вставлен');
-                }
-              }
             }
 
             // UX: после остановки через hotkey окно сразу скрывается.
@@ -1488,7 +1487,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     partialText.value = '';
     accumulatedText.value = '';
     finalText.value = '';
-    lastFinalizedText.value = '';
+    finalUtterances.value = [];
+    lastFinalizedSegmentKey.value = '';
+    lastFinalizedSegmentTextNorm.value = '';
     currentUtteranceStart.value = -1;
 
     // Сбрасываем флаг auto-paste
@@ -1715,6 +1716,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     resetTextStateBeforeStart();
   }
 
+  function clearHistoryUiOnly(): void {
+    // Очищаем историю/текущие буферы, но НЕ трогаем sessionId — запись может продолжаться.
+    resetTextStateBeforeStart();
+  }
+
   async function toggleRecording() {
     if (isRecording.value) {
       await stopRecording();
@@ -1762,6 +1768,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     partialText,
     accumulatedText,
     finalText,
+    finalUtterances,
     error,
     errorType,
     connectionQuality,
@@ -1790,7 +1797,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     reconnect,
     openLicenseActivation,
     stopRecording,
+    editFinalUtterance,
+    deleteFinalUtterance,
     clearText,
+    clearHistoryUiOnly,
     toggleRecording,
     reconcileBackendStatus,
     cleanup,

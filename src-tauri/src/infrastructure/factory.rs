@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn test_factory_new() {
-        let factory = DefaultSttProviderFactory::new();
+        let _ = DefaultSttProviderFactory::new();
         // Просто проверяем что создается
         assert!(true);
     }

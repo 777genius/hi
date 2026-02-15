@@ -11,7 +11,7 @@ usePageSeo("meta.privacyPolicyTitle", "meta.privacyPolicyDescription");
       <section class="legal-section">
         <h2 class="text-h6">1. Introduction</h2>
         <p>
-          Welcome to VoicetextAI ("we," "our," or "us"). We are committed to protecting your
+          Welcome to HackInterviewAI ("we," "our," or "us"). We are committed to protecting your
           privacy. This Privacy Policy explains how we collect, use, and safeguard your information
           when you use our desktop application and related services (collectively, the "Service").
         </p>

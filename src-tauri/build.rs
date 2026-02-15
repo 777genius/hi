@@ -6,6 +6,56 @@ fn main() {
     // Сначала запускаем стандартный билд Tauri
     tauri_build::build();
 
+    // macOS: ScreenCaptureKit (Swift) требует Swift runtime dylibs.
+    // В dev-режиме (tauri dev) приложение запускается как бинарник из target/,
+    // поэтому добавляем rpath на директории Swift stdlib из Xcode/CommandLineTools.
+    #[cfg(target_os = "macos")]
+    {
+        fn add_rpath_if_exists(p: &str) {
+            if Path::new(p).exists() {
+                println!("cargo:rustc-link-arg=-Wl,-rpath,{}", p);
+            }
+        }
+
+        // Prefer system Swift runtime (dyld shared cache).
+        add_rpath_if_exists("/usr/lib/swift");
+
+        // Legacy locations (older toolchains).
+        add_rpath_if_exists("/Library/Developer/CommandLineTools/usr/lib/swift/macosx");
+        add_rpath_if_exists(
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx",
+        );
+
+        // Newer Xcode/CLT locations: swift runtime dylibs live under swift-*/macosx.
+        fn add_swift_versioned_rpaths(toolchain_root: &str) {
+            let lib_root = format!("{}/usr/lib", toolchain_root.trim_end_matches('/'));
+            let Ok(entries) = fs::read_dir(&lib_root) else {
+                return;
+            };
+
+            for entry in entries.flatten() {
+                let Ok(ft) = entry.file_type() else { continue };
+                if !ft.is_dir() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !name.starts_with("swift-") {
+                    continue;
+                }
+
+                let candidate = format!("{}/{}/macosx", lib_root, name);
+                let dylib = format!("{}/libswift_Concurrency.dylib", candidate);
+                if Path::new(&dylib).exists() {
+                    add_rpath_if_exists(&candidate);
+                }
+            }
+        }
+
+        add_swift_versioned_rpaths("/Library/Developer/CommandLineTools");
+        add_swift_versioned_rpaths("/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain");
+    }
+
     // Загружаем .env файл если он существует
     if let Err(e) = dotenv::dotenv() {
         println!("cargo:warning=No .env file found: {}", e);

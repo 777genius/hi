@@ -35,7 +35,7 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let _tray = TrayIconBuilder::new()
         .menu(&menu)
         .icon(app.default_window_icon().unwrap().clone())
-        .tooltip("VoicetextAI")
+        .tooltip("HackInterviewAI")
         .on_menu_event(move |app, event| {
             // Обрабатываем клики по меню
             match event.id.as_ref() {

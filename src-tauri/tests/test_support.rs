@@ -1,3 +1,5 @@
+#![cfg(feature = "integration-tests")]
+
 use std::sync::Arc;
 
 use app_lib::domain::{
