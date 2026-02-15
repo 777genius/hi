@@ -40,6 +40,9 @@ const transcriptionState = {
   finalUtterances: [] as Array<{ id: string; sessionId: number; text: string; timestamp: number }>,
   accumulatedText: '',
   partialText: '',
+  isRecording: true,
+  isStarting: false,
+  isProcessing: false,
   editFinalUtterance: () => {},
   deleteFinalUtterance: () => {},
 };
@@ -255,6 +258,53 @@ describe('chat store (selection + context)', () => {
     });
 
     expect(store.haikuMessages[0]?.insertAfterId).toBe('stt:1:2:b');
+  });
+
+  it('filters system STT utterance when it duplicates microphone utterance', async () => {
+    const store = useChatStore();
+    await store.initialize();
+
+    const micLevelCb = listenMock.mock.calls.find((c) => c[0] === 'microphone:level')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const sysLevelCb = listenMock.mock.calls.find((c) => c[0] === 'audio:level')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const finalCb = listenMock.mock.calls.find((c) => c[0] === 'transcription:final')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+
+    expect(micLevelCb).toBeTypeOf('function');
+    expect(sysLevelCb).toBeTypeOf('function');
+    expect(finalCb).toBeTypeOf('function');
+
+    // Микрофон явно доминирует (иначе микрофонные события не попадут в чат).
+    sysLevelCb?.({ payload: { level: 0 } });
+    micLevelCb?.({ payload: { level: 0.6 } });
+
+    const t0 = Date.now();
+    finalCb?.({
+      payload: {
+        session_id: 1,
+        source: 'microphone',
+        text: 'привет мир',
+        timestamp: t0,
+      },
+    });
+
+    // Почти сразу приходит тот же текст по системному каналу (типичный симптом "микрофон попал в системный звук").
+    transcriptionProxy.finalUtterances.push({
+      id: 'stt:1:1:x',
+      sessionId: 1,
+      text: 'привет мир',
+      timestamp: t0 + 300,
+    });
+
+    expect(store.sttMessages.length).toBe(0);
+    const hasMicFinal = store.messages.some((m) => m.kind === 'mic' && m.status === 'final' && m.text === 'привет мир');
+    const hasSttFinal = store.messages.some((m) => m.kind === 'stt' && m.status === 'final');
+    expect(hasMicFinal).toBe(true);
+    expect(hasSttFinal).toBe(false);
   });
 });
 

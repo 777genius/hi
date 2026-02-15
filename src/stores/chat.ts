@@ -139,17 +139,73 @@ export const useChatStore = defineStore('chat', () => {
   const isHaikuStreaming = computed(() => Object.keys(activeHaikuRequests.value).length > 0);
   const ignoredHaikuRequestIds = ref<Record<string, true>>({});
 
+  const CROSS_STREAM_DEDUP_WINDOW_MS = 8000;
+  const CROSS_STREAM_DEDUP_RECENT_LIMIT = 6;
+
+  /**
+   * Проверка "системный STT повторяет микрофон".
+   *
+   * Зачем: в реальности бывает loopback/monitoring, когда микрофонный сигнал попадает в системный звук.
+   * Тогда одна и та же фраза распознаётся двумя потоками (source=system и source=microphone) и в UI
+   * выглядит как дублирование.
+   *
+   * Почему фильтруем здесь (а не в `transcription`):
+   * - `transcription` — это "источник правды" по системному каналу и используется в других местах,
+   *   там нежелательно терять данные.
+   * - чат/контекст для LLM — слой представления: можно безопасно скрывать очевидные дубли,
+   *   сохранив оригинальные utterances в сторе транскрипции.
+   *
+   * Как работает:
+   * - сравниваем candidate с несколькими последними финальными микрофонными сообщениями (`micMessages`)
+   *   в небольшом временном окне (`CROSS_STREAM_DEDUP_WINDOW_MS`).
+   * - дополнительно сравниваем с live микрофонным текстом, но только для "свежих" системных событий,
+   *   чтобы не влиять на историю при отложенных апдейтах.
+   *
+   * Ограничения:
+   * - если пользователь дословно повторил фразу собеседника (и микрофон доминировал), системная реплика
+   *   может быть скрыта как дубль. При этом данные в `transcription.finalUtterances` остаются.
+   */
+  function isSystemTextDuplicateOfMic(text: string, systemTimestampMs: number): boolean {
+    const candidate = String(text ?? '').trim();
+    if (!candidate) return false;
+
+    const ts = Number.isFinite(systemTimestampMs) ? systemTimestampMs : Date.now();
+
+    // Сравниваем с последними микрофонными utterances (они появляются только когда микрофон доминирует).
+    for (
+      let i = micMessages.value.length - 1;
+      i >= 0 && micMessages.value.length - i <= CROSS_STREAM_DEDUP_RECENT_LIMIT;
+      i--
+    ) {
+      const m = micMessages.value[i];
+      if (!m?.text) continue;
+      if (!Number.isFinite(m.createdAtMs)) continue;
+      if (Math.abs(ts - m.createdAtMs) > CROSS_STREAM_DEDUP_WINDOW_MS) continue;
+      if (isNearDuplicateText(candidate, m.text)) return true;
+    }
+
+    // И с текущим live mic (только если событие "свежее", чтобы не влиять на историю).
+    const liveMic = liveMicText.value;
+    if (liveMic && Math.abs(Date.now() - ts) <= 2500 && isMicDominantNow()) {
+      if (isNearDuplicateText(candidate, liveMic)) return true;
+    }
+
+    return false;
+  }
+
   const sttMessages = computed<ChatMessage[]>(() =>
-    transcription.finalUtterances.map((u, idx) => ({
-      id: u.id,
-      kind: 'stt',
-      role: 'incoming',
-      status: 'final',
-      text: u.text,
-      createdAtMs: u.timestamp,
-      seq: idx,
-      sttIndex: idx,
-    }))
+    transcription.finalUtterances
+      .map((u, idx) => ({
+        id: u.id,
+        kind: 'stt' as const,
+        role: 'incoming' as const,
+        status: 'final' as const,
+        text: u.text,
+        createdAtMs: u.timestamp,
+        seq: idx,
+        sttIndex: idx,
+      }))
+      .filter((m) => !isSystemTextDuplicateOfMic(m.text, m.createdAtMs))
   );
 
   const messages = computed<ChatMessage[]>(() => {
@@ -210,6 +266,7 @@ export const useChatStore = defineStore('chat', () => {
   const liveSttMessage = computed<ChatMessage | null>(() => {
     const t = livePartialText.value.trim();
     if (!t) return null;
+    if (isSystemTextDuplicateOfMic(t, Date.now())) return null;
     return {
       id: LIVE_STT_MESSAGE_ID,
       kind: 'stt',
