@@ -72,7 +72,7 @@ pub fn get_models_dir() -> anyhow::Result<PathBuf> {
     let app_data_dir = dirs::data_dir()
         .ok_or_else(|| anyhow::anyhow!("Cannot determine app data directory"))?;
 
-    let models_dir = app_data_dir.join("voice-to-text").join("models");
+    let models_dir = app_data_dir.join("HackInterview").join("models");
 
     // Создаем директорию если не существует
     if !models_dir.exists() {

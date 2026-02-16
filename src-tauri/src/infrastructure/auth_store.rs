@@ -43,7 +43,7 @@ impl AuthStore {
     fn config_dir() -> Result<PathBuf> {
         let config_dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
-        let app_config_dir = config_dir.join("voice-to-text");
+        let app_config_dir = config_dir.join("HackInterview");
 
         // Важно: create_dir_all идемпотентен и надёжнее, чем exists() (race).
         std::fs::create_dir_all(&app_config_dir)?;

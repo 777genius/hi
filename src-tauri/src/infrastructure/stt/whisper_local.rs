@@ -35,7 +35,7 @@ mod whisper_impl {
             let app_data_dir = dirs::data_dir()
                 .ok_or_else(|| SttError::Configuration("Cannot determine app data directory".to_string()))?;
 
-            let models_dir = app_data_dir.join("voice-to-text").join("models");
+            let models_dir = app_data_dir.join("HackInterview").join("models");
             let model_file = models_dir.join(format!("ggml-{}.bin", model_name));
 
             if !model_file.exists() {

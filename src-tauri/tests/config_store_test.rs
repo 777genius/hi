@@ -9,7 +9,7 @@ use serial_test::serial;
 /// Хелпер для получения временной директории для тестов
 fn get_test_config_dir() -> PathBuf {
     let temp_dir = std::env::temp_dir();
-    temp_dir.join(format!("voice-to-text-test-{}", std::process::id()))
+    temp_dir.join(format!("HackInterview-test-{}", std::process::id()))
 }
 
 /// Очистка тестовой директории после теста
