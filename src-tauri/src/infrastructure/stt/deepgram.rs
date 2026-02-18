@@ -33,6 +33,21 @@ const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen";
 // Поднимаем порог, чтобы "конец фразы" определялся по более заметной паузе.
 const DEEPGRAM_ENDPOINTING_MS: u32 = 1000;
 
+/// Парсит строку keyterms (через запятую) и возвращает URL query-суффикс вида "&keywords=term1&keywords=term2"
+fn build_keywords_query(keyterms: &Option<String>) -> String {
+    let Some(raw) = keyterms.as_deref() else {
+        return String::new();
+    };
+    raw.split(',')
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .map(|term| {
+            let encoded = urlencoding::encode(term);
+            format!("&keywords={encoded}")
+        })
+        .collect()
+}
+
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub struct DeepgramProvider {
@@ -159,12 +174,16 @@ impl SttProvider for DeepgramProvider {
         log::info!("Using Deepgram model '{}' for language '{}'", model, language);
 
         // Собираем URL с параметрами (добавляем channels=1 для mono)
+        let keywords_query = build_keywords_query(
+            &self.config.as_ref().and_then(|c| c.deepgram_keyterms.clone()),
+        );
         let url = format!(
-            "{}?encoding=linear16&sample_rate=16000&channels=1&model={}&language={}&punctuate=true&interim_results=true&endpointing={}",
+            "{}?encoding=linear16&sample_rate=16000&channels=1&model={}&language={}&punctuate=true&interim_results=true&endpointing={}{}",
             DEEPGRAM_WS_URL,
             model,
             language,
-            DEEPGRAM_ENDPOINTING_MS
+            DEEPGRAM_ENDPOINTING_MS,
+            keywords_query
         );
 
         log::debug!("Connecting to Deepgram: {}", url);
@@ -981,11 +1000,13 @@ impl DeepgramProvider {
             }
 
             // Пытаемся создать новое WebSocket соединение
+            let keywords_query = build_keywords_query(&config.deepgram_keyterms);
             let url = format!(
-                "{}?encoding=linear16&sample_rate=16000&channels=1&language={}&model={}",
+                "{}?encoding=linear16&sample_rate=16000&channels=1&language={}&model={}{}",
                 DEEPGRAM_WS_URL,
                 config.language,
-                config.model.as_deref().unwrap_or("nova-3")
+                config.model.as_deref().unwrap_or("nova-3"),
+                keywords_query
             );
 
             let request = match Request::builder()

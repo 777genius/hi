@@ -65,6 +65,11 @@ pub struct SttConfig {
     /// AssemblyAI: dangerous (bills by connection time)
     pub keep_connection_alive: bool,
 
+    /// Ключевые термины для улучшения распознавания (через запятую).
+    /// Передаются в Deepgram как keywords / keyterms.
+    #[serde(default)]
+    pub deepgram_keyterms: Option<String>,
+
     /// Сколько держать соединение живым после остановки записи (если keep_connection_alive=true).
     ///
     /// Важно: keep-alive удерживает streaming соединение на стороне провайдера (Deepgram) и занимает слот
@@ -90,6 +95,7 @@ impl Default for SttConfig {
             model: None,
             backend_auth_token: None,
             backend_url: None,
+            deepgram_keyterms: None,
             keep_connection_alive: false, // Безопасно по умолчанию для всех провайдеров
             keep_alive_ttl_secs: default_keep_alive_ttl_secs(),
         }
@@ -223,6 +229,7 @@ mod tests {
         assert!(config.model.is_none());
         assert!(config.backend_auth_token.is_none());
         assert!(config.backend_url.is_none());
+        assert!(config.deepgram_keyterms.is_none());
         assert!(!config.keep_connection_alive);
         assert_eq!(config.keep_alive_ttl_secs, 300);
     }

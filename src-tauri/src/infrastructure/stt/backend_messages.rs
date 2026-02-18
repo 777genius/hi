@@ -22,6 +22,9 @@ pub enum ClientMessage {
         channels: u8,
         /// Кодировка: pcm_s16le
         encoding: String,
+        /// Ключевые термины для улучшения распознавания
+        #[serde(skip_serializing_if = "Option::is_none")]
+        keyterms: Option<Vec<String>>,
     },
 
     /// Клиент закрывает сессию
@@ -102,6 +105,7 @@ mod tests {
             sample_rate: 16000,
             channels: 1,
             encoding: "pcm_s16le".to_string(),
+            keyterms: None,
         };
 
         let json = serde_json::to_string(&msg).unwrap();

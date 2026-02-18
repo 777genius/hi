@@ -72,6 +72,7 @@ base64 = "0.22"  # Base64 encoding for audio data
 
 # URL encoding
 serde_urlencoded = "0.7"
+urlencoding = "2"
 
 # System directories
 dirs = "5.0"  # User directories (config, data, cache)

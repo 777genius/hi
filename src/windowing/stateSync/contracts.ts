@@ -40,6 +40,8 @@ export type SttConfigSnapshotData = {
   model: string | null;
 
   keep_connection_alive: boolean;
+
+  deepgram_keyterms: string | null;
 };
 
 /** Соответствует Rust `AuthStateData`. */

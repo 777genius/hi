@@ -41,6 +41,7 @@ class TauriSettingsService {
       deepgramApiKey: config.deepgramApiKey,
       assemblyaiApiKey: config.assemblyaiApiKey,
       model: config.model,
+      deepgramKeyterms: config.deepgramKeyterms,
     };
 
     await invokeUpdateSttConfig(args);

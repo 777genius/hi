@@ -84,6 +84,11 @@ export function useSettings() {
     set: (value: boolean) => store.setAutoPasteText(value),
   });
 
+  const deepgramKeyterms = computed({
+    get: () => store.deepgramKeyterms,
+    set: (value: string) => store.setDeepgramKeyterms(value),
+  });
+
   /**
    * Загрузить все настройки из бэкенда
    */
@@ -137,6 +142,7 @@ export function useSettings() {
         if (sttConfigStoreInstance.isLoaded) {
           const sttLang = normalizeSttLanguage(sttConfigStoreInstance.language);
           store.setLanguage(sttLang, { persist: false });
+          store.setDeepgramKeyterms(sttConfigStoreInstance.deepgramKeyterms ?? '');
           const fallbackLocale = sttLangToUiLocale(sttLang);
           locale.value = fallbackLocale;
           localStorage.setItem('uiLocale', fallbackLocale);
@@ -151,10 +157,12 @@ export function useSettings() {
       if (sttConfigStoreInstance.isLoaded) {
         store.setProvider(SttProviderType.Backend);
         store.setLanguage(sttConfigStoreInstance.language, { persist: false });
+        store.setDeepgramKeyterms(sttConfigStoreInstance.deepgramKeyterms ?? '');
       } else {
         const sttConfig = await tauriSettingsService.getSttConfig();
         store.setProvider(SttProviderType.Backend);
         store.setLanguage(sttConfig.language, { persist: false });
+        store.setDeepgramKeyterms(sttConfig.deepgram_keyterms ?? '');
       }
       // API ключи и whisper-модель больше не используются в настройках (backend-only).
       store.setDeepgramApiKey('');
@@ -245,6 +253,7 @@ export function useSettings() {
         deepgramApiKey: null,
         assemblyaiApiKey: null,
         model: null,
+        deepgramKeyterms: store.deepgramKeyterms || null,
       };
 
       await tauriSettingsService.updateSttConfig(sttConfigData);
@@ -411,6 +420,7 @@ export function useSettings() {
     selectedOutputAudioDevice,
     autoCopyToClipboard,
     autoPasteText,
+    deepgramKeyterms,
 
     // Store state (через computed для корректной реактивности)
     isWhisperProvider: computed(() => store.isWhisperProvider),

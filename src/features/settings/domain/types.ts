@@ -38,6 +38,7 @@ export interface SttConfigData {
   deepgramApiKey: string | null;
   assemblyaiApiKey: string | null;
   model: string | null;
+  deepgramKeyterms: string | null;
 }
 
 // Конфигурация приложения (соответствует бэкенду)
@@ -80,6 +81,9 @@ export interface SettingsState {
   // Автоматические действия
   autoCopyToClipboard: boolean;
   autoPasteText: boolean;
+
+  // Deepgram keyterms
+  deepgramKeyterms: string;
 }
 
 // Статус сохранения

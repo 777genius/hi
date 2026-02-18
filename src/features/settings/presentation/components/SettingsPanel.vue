@@ -21,6 +21,7 @@ import SystemAudioTestSection from './sections/SystemAudioTestSection.vue';
 import AudioDeviceSection from './sections/AudioDeviceSection.vue';
 import MicTestSection from './sections/MicTestSection.vue';
 import UpdatesSection from './sections/UpdatesSection.vue';
+import KeytermsSection from './sections/KeytermsSection.vue';
 
 const emit = defineEmits<{
   close: [];
@@ -68,6 +69,7 @@ function snapshotSettingsState(): SettingsState {
     selectedOutputAudioDevice: settingsStore.selectedOutputAudioDevice,
     autoCopyToClipboard: settingsStore.autoCopyToClipboard,
     autoPasteText: settingsStore.autoPasteText,
+    deepgramKeyterms: settingsStore.deepgramKeyterms,
   };
 }
 
@@ -141,6 +143,9 @@ async function handleSave() {
             <LanguageSection />
             <ThemeSection />
           </div>
+
+          <!-- Ключевые термины -->
+          <KeytermsSection />
 
           <!-- Горячая клавиша -->
           <HotkeySection />

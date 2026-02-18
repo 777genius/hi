@@ -36,6 +36,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const selectedOutputAudioDevice = ref('');
   const autoCopyToClipboard = ref(false);
   const autoPasteText = ref(false);
+  const deepgramKeyterms = ref('');
 
   // Debounce для автосохранения чувствительности (иначе будем спамить invoke при перетаскивании слайдера)
   let micSensitivityPersistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -87,6 +88,7 @@ export const useSettingsStore = defineStore('settings', () => {
     selectedOutputAudioDevice: selectedOutputAudioDevice.value,
     autoCopyToClipboard: autoCopyToClipboard.value,
     autoPasteText: autoPasteText.value,
+    deepgramKeyterms: deepgramKeyterms.value,
   }));
 
   // Действия
@@ -154,6 +156,10 @@ export const useSettingsStore = defineStore('settings', () => {
 
   function setAssemblyaiApiKey(value: string) {
     assemblyaiApiKey.value = value;
+  }
+
+  function setDeepgramKeyterms(value: string) {
+    deepgramKeyterms.value = value;
   }
 
   function setWhisperModel(value: string) {
@@ -346,6 +352,8 @@ export const useSettingsStore = defineStore('settings', () => {
       selectedAudioDevice.value = state.selectedAudioDevice;
     if (state.selectedOutputAudioDevice !== undefined)
       selectedOutputAudioDevice.value = state.selectedOutputAudioDevice;
+    if (state.deepgramKeyterms !== undefined)
+      deepgramKeyterms.value = state.deepgramKeyterms;
     // auto-copy/auto-paste принудительно выключены
     autoCopyToClipboard.value = false;
     autoPasteText.value = false;
@@ -366,6 +374,7 @@ export const useSettingsStore = defineStore('settings', () => {
     selectedOutputAudioDevice,
     autoCopyToClipboard,
     autoPasteText,
+    deepgramKeyterms,
     availableAudioDevices,
     availableOutputAudioDevices,
     hasAccessibilityPermission,
@@ -385,6 +394,7 @@ export const useSettingsStore = defineStore('settings', () => {
     flushSttLanguagePersist,
     setDeepgramApiKey,
     setAssemblyaiApiKey,
+    setDeepgramKeyterms,
     setWhisperModel,
     setTheme,
     setUseSystemTheme,

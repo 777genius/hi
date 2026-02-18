@@ -39,6 +39,7 @@ describe('useSttConfigStore sync', () => {
         assemblyai_api_key: null,
         model: 'large',
         keep_connection_alive: true,
+        deepgram_keyterms: null,
       },
     });
 
@@ -72,6 +73,7 @@ describe('useSttConfigStore sync', () => {
         assemblyai_api_key: null,
         model: null,
         keep_connection_alive: false,
+        deepgram_keyterms: null,
       },
       '15',
     );
@@ -105,6 +107,7 @@ describe('useSttConfigStore sync', () => {
         assemblyai_api_key: null,
         model: null,
         keep_connection_alive: false,
+        deepgram_keyterms: null,
       },
     });
 
@@ -130,6 +133,7 @@ describe('useSttConfigStore sync', () => {
         assemblyai_api_key: null,
         model: null,
         keep_connection_alive: false,
+        deepgram_keyterms: null,
       },
     });
 
@@ -149,6 +153,7 @@ describe('useSttConfigStore sync', () => {
         assemblyai_api_key: null,
         model: null,
         keep_connection_alive: false,
+        deepgram_keyterms: null,
       },
     });
 
