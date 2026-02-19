@@ -509,6 +509,19 @@ async function addAskImageFromFile(file: File): Promise<void> {
 }
 
 async function onPaste(e: ClipboardEvent): Promise<void> {
+  // Не перехватываем paste, если фокус в текстовом поле (textarea, input, contenteditable).
+  const active = document.activeElement;
+  if (active) {
+    const tag = active.tagName?.toLowerCase();
+    if (
+      tag === 'textarea' ||
+      tag === 'input' ||
+      (active as HTMLElement).isContentEditable
+    ) {
+      return;
+    }
+  }
+
   const cd = e.clipboardData;
   if (!cd) return;
 
@@ -703,9 +716,8 @@ onMounted(async () => {
   // Очищаем UI при фактическом показе окна (НЕ через focus: main может быть nonactivating NSPanel).
   // Важно: не очищаем посреди активной записи — иначе можно потерять текст если пользователь скрыл и снова показал окно.
   unlistenWindowShown = await listen(EVENT_RECORDING_WINDOW_SHOWN, async () => {
-    // Подтягиваем актуальную auth session из Rust SoT (important when WebView was "frozen").
-    // Best-effort: не блокируем UI на сетевых/IPC проблемах.
     void auth.initialize({ silent: true });
+    void appConfigStore.refresh();
 
     // Если UI рассинхронизировался (например окно было скрыто и JS "заморозили"),
     // сначала сверяемся с backend: он источник правды по статусу записи.
