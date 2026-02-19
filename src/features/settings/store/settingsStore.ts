@@ -18,6 +18,12 @@ import {
 import { normalizeUiLocale, normalizeUiTheme } from '@/i18n.locales';
 import type { AppTheme, SaveStatus, SettingsState } from '../domain/types';
 
+function trimKeyterms(input: string, maxTerms: number): string {
+  const terms = input.split(',').map((t) => t.trim()).filter(Boolean);
+  if (terms.length <= maxTerms) return input;
+  return terms.slice(0, maxTerms).join(', ');
+}
+
 export const useSettingsStore = defineStore('settings', () => {
   // Состояние настроек
   // По умолчанию используем только наш Backend. Выбор провайдера в UI скрыт.
@@ -159,7 +165,7 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   function setDeepgramKeyterms(value: string) {
-    deepgramKeyterms.value = value;
+    deepgramKeyterms.value = trimKeyterms(value, 100);
   }
 
   function setWhisperModel(value: string) {
@@ -353,7 +359,7 @@ export const useSettingsStore = defineStore('settings', () => {
     if (state.selectedOutputAudioDevice !== undefined)
       selectedOutputAudioDevice.value = state.selectedOutputAudioDevice;
     if (state.deepgramKeyterms !== undefined)
-      deepgramKeyterms.value = state.deepgramKeyterms;
+      setDeepgramKeyterms(state.deepgramKeyterms);
     // auto-copy/auto-paste принудительно выключены
     autoCopyToClipboard.value = false;
     autoPasteText.value = false;

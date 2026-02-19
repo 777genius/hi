@@ -8,6 +8,7 @@ const { t } = useI18n();
 const { deepgramKeyterms } = useSettings();
 
 const TOKEN_LIMIT = 500;
+const TERM_LIMIT = 100;
 
 function countKeytermsTokens(input: string): number {
   return input
@@ -17,8 +18,22 @@ function countKeytermsTokens(input: string): number {
     .reduce((sum, term) => sum + term.split(/\s+/).length, 0);
 }
 
+function countTerms(input: string): number {
+  return input.split(',').map(t => t.trim()).filter(Boolean).length;
+}
+
 const tokenCount = computed(() => countKeytermsTokens(deepgramKeyterms.value));
-const isOverLimit = computed(() => tokenCount.value > TOKEN_LIMIT);
+const termCount = computed(() => countTerms(deepgramKeyterms.value));
+const isOverTokenLimit = computed(() => tokenCount.value > TOKEN_LIMIT);
+const isOverTermLimit = computed(() => termCount.value > TERM_LIMIT);
+const hasError = computed(() => isOverTokenLimit.value || isOverTermLimit.value);
+
+const errorMessages = computed(() => {
+  const msgs: string[] = [];
+  if (isOverTermLimit.value) msgs.push(t('settings.keyterms.termLimitExceeded'));
+  if (isOverTokenLimit.value) msgs.push(t('settings.keyterms.limitExceeded'));
+  return msgs;
+});
 </script>
 
 <template>
@@ -29,8 +44,9 @@ const isOverLimit = computed(() => tokenCount.value > TOKEN_LIMIT);
       rows="2"
       auto-grow
       density="comfortable"
-      hide-details
       variant="outlined"
+      :error="hasError"
+      :error-messages="errorMessages"
     />
     <div class="d-flex justify-space-between align-center mt-1">
       <span class="text-caption text-medium-emphasis">
@@ -38,13 +54,10 @@ const isOverLimit = computed(() => tokenCount.value > TOKEN_LIMIT);
       </span>
       <span
         class="text-caption"
-        :class="isOverLimit ? 'text-error' : 'text-medium-emphasis'"
+        :class="hasError ? 'text-error' : 'text-medium-emphasis'"
       >
-        {{ t('settings.keyterms.tokenCount', { count: tokenCount }) }}
+        {{ t('settings.keyterms.termCount', { count: termCount }) }}
       </span>
-    </div>
-    <div v-if="isOverLimit" class="text-caption text-error mt-1">
-      {{ t('settings.keyterms.limitExceeded') }}
     </div>
   </SettingGroup>
 </template>
