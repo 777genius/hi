@@ -4,13 +4,15 @@
  * Объединяет все секции и управляет загрузкой/сохранением
  */
 
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import UpdateDialog from '@/presentation/components/UpdateDialog.vue';
 import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
 import { useSettingsStore } from '../../store/settingsStore';
 import type { SettingsState } from '../../domain/types';
+import { isTauriAvailable } from '@/utils/tauri';
+import { invokeUpdateAppConfig } from '@/windowing/stateSync';
 
 // Секции
 import LanguageSection from './sections/LanguageSection.vue';
@@ -44,15 +46,20 @@ const { initializeTheme } = useSettingsTheme();
 const showUpdateDialog = ref(false);
 const settingsStore = useSettingsStore();
 
-// Загрузка конфигурации при монтировании
 onMounted(async () => {
   initializeTheme();
   await loadConfig();
   captureBaseline();
+  armLiveApply();
 });
 
 const baselineState = ref<SettingsState | null>(null);
 const baselineUiLocale = ref<string>('');
+
+const liveApplyArmed = ref(false);
+let lastAppliedAudioDevice = '';
+let lastAppliedOutputDevice = '';
+let liveApplySeq = 0;
 
 function snapshotSettingsState(): SettingsState {
   return {
@@ -76,6 +83,35 @@ function snapshotSettingsState(): SettingsState {
 function captureBaseline(): void {
   baselineState.value = snapshotSettingsState();
   baselineUiLocale.value = String(locale.value ?? '');
+}
+
+function armLiveApply(): void {
+  if (!isTauriAvailable()) {
+    liveApplyArmed.value = false;
+    return;
+  }
+  lastAppliedAudioDevice = settingsStore.selectedAudioDevice;
+  lastAppliedOutputDevice = settingsStore.selectedOutputAudioDevice;
+  liveApplyArmed.value = true;
+}
+
+async function applyAudioDevice(field: 'selectedAudioDevice' | 'selectedOutputAudioDevice', value: string): Promise<void> {
+  if (!isTauriAvailable()) return;
+  const seq = ++liveApplySeq;
+  try {
+    await invokeUpdateAppConfig({ [field]: value });
+    if (seq !== liveApplySeq) return;
+    if (field === 'selectedAudioDevice') {
+      lastAppliedAudioDevice = value;
+    } else {
+      lastAppliedOutputDevice = value;
+    }
+    if (baselineState.value) {
+      baselineState.value[field] = value;
+    }
+  } catch (err) {
+    console.error('Не удалось применить аудиоустройство:', err);
+  }
 }
 
 function discardDraftChanges(): void {
@@ -105,13 +141,32 @@ function handleClose(arg?: unknown): void {
   emit('close');
 }
 
-// Сохранение и закрытие
 async function handleSave() {
   const success = await saveConfig();
   if (success) {
     handleClose({ discard: false });
   }
 }
+
+watch(
+  () => settingsStore.selectedAudioDevice,
+  (next, prev) => {
+    if (!isTauriAvailable()) return;
+    if (!liveApplyArmed.value) return;
+    if (next === prev || next === lastAppliedAudioDevice) return;
+    void applyAudioDevice('selectedAudioDevice', next);
+  },
+);
+
+watch(
+  () => settingsStore.selectedOutputAudioDevice,
+  (next, prev) => {
+    if (!isTauriAvailable()) return;
+    if (!liveApplyArmed.value) return;
+    if (next === prev || next === lastAppliedOutputDevice) return;
+    void applyAudioDevice('selectedOutputAudioDevice', next);
+  },
+);
 </script>
 
 <template>
