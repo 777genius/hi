@@ -22,6 +22,12 @@ type ChatMessageKind = 'stt' | 'haiku' | 'mic' | 'prompt';
 type ChatMessageRole = 'incoming' | 'outgoing';
 type ChatMessageStatus = 'final' | 'streaming' | 'error';
 
+type LlmConfigStatus = {
+  configured: boolean;
+  provider: string;
+  missing_env?: string | null;
+};
+
 export type ChatAttachment =
   | {
       id: string;
@@ -120,6 +126,9 @@ export const useChatStore = defineStore('chat', () => {
   const haikuMessages = ref<ChatMessage[]>([]);
   const activeHaikuRequests = ref<Record<string, true>>({});
   const lastHoverTriggerAtMs = ref<number>(0);
+  const llmConfigured = ref<boolean>(true);
+  const llmProvider = ref<string>('');
+  const llmMissingEnv = ref<string | null>(null);
 
   const liveSttSinceMs = ref<number>(0);
   const liveMicSinceMs = ref<number>(0);
@@ -706,7 +715,7 @@ export const useChatStore = defineStore('chat', () => {
     return lastBaseId;
   }
 
-  const canRequestHaiku = computed(() => buildHaikuContextText().length > 0);
+  const canRequestHaiku = computed(() => llmConfigured.value && buildHaikuContextText().length > 0);
 
   function markRequestActive(requestId: string): void {
     activeHaikuRequests.value = { ...activeHaikuRequests.value, [requestId]: true };
@@ -747,6 +756,7 @@ export const useChatStore = defineStore('chat', () => {
 
   async function requestHaikuFromAnchor(): Promise<void> {
     if (!isTauriAvailable()) return;
+    if (!llmConfigured.value) return;
 
     const now = Date.now();
     if (now - lastHoverTriggerAtMs.value < MIN_HOVER_TRIGGER_MS) return;
@@ -820,6 +830,24 @@ export const useChatStore = defineStore('chat', () => {
       })),
     });
 
+    if (!llmConfigured.value) {
+      const missing =
+        llmMissingEnv.value && typeof llmMissingEnv.value === 'string' && llmMissingEnv.value.trim()
+          ? ` (${llmMissingEnv.value})`
+          : '';
+      haikuMessages.value.push({
+        id: createLocalId('haiku_error'),
+        kind: 'haiku',
+        role: 'outgoing',
+        status: 'error',
+        text: `AI не настроен${missing}. Добавь ключ в .env и перезапусти приложение.`,
+        createdAtMs: Date.now(),
+        seq: 2_000_000 + haikuMessages.value.length + 1,
+        insertAfterId: promptMessageId,
+      });
+      return;
+    }
+
     try {
       const requestId = await invoke<string>('start_haiku_chat_stream', {
         contextText: contextText,
@@ -863,6 +891,24 @@ export const useChatStore = defineStore('chat', () => {
 
     const contextText = buildHaikuContextTextFullHistory();
     const createdAtMs = Date.now();
+
+    if (!llmConfigured.value) {
+      const missing =
+        llmMissingEnv.value && typeof llmMissingEnv.value === 'string' && llmMissingEnv.value.trim()
+          ? ` (${llmMissingEnv.value})`
+          : '';
+      haikuMessages.value.push({
+        id: createLocalId('haiku_error'),
+        kind: 'haiku',
+        role: 'outgoing',
+        status: 'error',
+        text: `AI не настроен${missing}. Добавь ключ в .env и перезапусти приложение.`,
+        createdAtMs: Date.now(),
+        seq: 2_000_000 + haikuMessages.value.length + 1,
+        insertAfterId: messageId,
+      });
+      return;
+    }
 
     try {
       const requestId = await invoke<string>('start_haiku_chat_stream', {
@@ -970,6 +1016,17 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     type AudioLevelPayload = { level: number };
+
+    try {
+      const status = await invoke<LlmConfigStatus>('get_llm_config_status');
+      llmConfigured.value = !!status?.configured;
+      llmProvider.value = String(status?.provider ?? '');
+      llmMissingEnv.value = status?.missing_env ?? null;
+    } catch {
+      llmConfigured.value = true;
+      llmProvider.value = '';
+      llmMissingEnv.value = null;
+    }
 
     // System audio level (from main transcription service)
     unlistenSystemLevel = await listen<AudioLevelPayload>('audio:level', (event) => {

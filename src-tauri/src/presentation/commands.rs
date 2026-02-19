@@ -16,6 +16,24 @@ pub struct AudioPermissionStatus {
     pub microphone_granted: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LlmConfigStatus {
+    pub configured: bool,
+    pub provider: String,
+    pub missing_env: Option<String>,
+}
+
+#[cfg(debug_assertions)]
+fn load_root_dotenv() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(".env");
+    let _ = dotenv::from_path(path);
+}
+
+#[cfg(not(debug_assertions))]
+fn load_root_dotenv() {}
+
 #[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -61,6 +79,61 @@ pub async fn get_audio_permission_status() -> Result<AudioPermissionStatus, Stri
         system_audio_granted: is_system_audio_permission_granted_macos(),
         microphone_granted: is_microphone_permission_granted_macos(),
     })
+}
+
+#[tauri::command]
+pub fn get_llm_config_status() -> Result<LlmConfigStatus, String> {
+    load_root_dotenv();
+
+    let provider = std::env::var("LLM_PROVIDER")
+        .ok()
+        .unwrap_or_else(|| "anthropic".to_string())
+        .to_lowercase();
+
+    let status = match provider.as_str() {
+        "anthropic" => {
+            let configured = std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+            LlmConfigStatus {
+                configured,
+                provider: "anthropic".to_string(),
+                missing_env: if configured {
+                    None
+                } else {
+                    Some("ANTHROPIC_API_KEY".to_string())
+                },
+            }
+        }
+        "openai" | "openai_compatible" | "openrouter" => {
+            let configured = std::env::var("OPENAI_API_KEY")
+                .ok()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+            LlmConfigStatus {
+                configured,
+                provider: "openai_compatible".to_string(),
+                missing_env: if configured {
+                    None
+                } else {
+                    Some("OPENAI_API_KEY".to_string())
+                },
+            }
+        }
+        "backend" => LlmConfigStatus {
+            configured: false,
+            provider: "backend".to_string(),
+            missing_env: None,
+        },
+        other => LlmConfigStatus {
+            configured: false,
+            provider: other.to_string(),
+            missing_env: None,
+        },
+    };
+
+    Ok(status)
 }
 
 /// Просим у macOS разрешение Screen Recording (для системного звука).
@@ -639,7 +712,7 @@ mod snapshot_contract_tests {
 /// Toggle window visibility
 #[tauri::command]
 pub async fn toggle_window(
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     window: Window,
 ) -> Result<(), String> {
     log::info!("Command: toggle_window");
@@ -652,7 +725,7 @@ pub async fn toggle_window(
         #[cfg(target_os = "macos")]
         {
             if let Some(bundle_id) = crate::infrastructure::auto_paste::get_active_app_bundle_id() {
-                *state.last_focused_app_bundle_id.write().await = Some(bundle_id.clone());
+                *_state.last_focused_app_bundle_id.write().await = Some(bundle_id.clone());
                 log::info!("Saved last focused app bundle ID: {}", bundle_id);
             }
         }
@@ -1982,6 +2055,8 @@ pub async fn start_haiku_stream(
         return Err("Empty text".to_string());
     }
 
+    load_root_dotenv();
+
     let provider = match std::env::var("LLM_PROVIDER")
         .ok()
         .unwrap_or_else(|| "anthropic".to_string())
@@ -2205,6 +2280,8 @@ pub async fn start_haiku_chat_stream(
     if context.is_empty() && question.is_empty() && images.is_empty() {
         return Err("Empty input".to_string());
     }
+
+    load_root_dotenv();
 
     let provider = match std::env::var("LLM_PROVIDER")
         .ok()
@@ -2518,6 +2595,8 @@ pub async fn start_code_explain_stream(
     if prompt.is_empty() {
         return Err("Empty text".to_string());
     }
+
+    load_root_dotenv();
 
     let provider = match std::env::var("LLM_PROVIDER")
         .ok()

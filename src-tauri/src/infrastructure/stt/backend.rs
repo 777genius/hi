@@ -25,9 +25,6 @@ use super::backend_messages::{ClientMessage, ServerMessage};
 /// URL бэкенда для production
 const PROD_BACKEND_URL: &str = "wss://api.voicetext.site";
 
-/// URL бэкенда для development (localhost)
-const DEV_BACKEND_URL: &str = "ws://localhost:8080";
-
 // Таймауты: критичны для стабильности при плохом интернете.
 // Без них connect/send могут "подвиснуть" и UI будет бесконечно ждать.
 const WS_CONNECT_TIMEOUT_SECS: u64 = 8;
@@ -62,8 +59,8 @@ fn get_default_backend_url() -> String {
 
     // 2. Auto-detect по типу сборки
     if cfg!(debug_assertions) {
-        log::info!("Debug build: using dev backend {}", DEV_BACKEND_URL);
-        DEV_BACKEND_URL.to_string()
+        log::info!("Debug build: using prod backend by default {}", PROD_BACKEND_URL);
+        PROD_BACKEND_URL.to_string()
     } else {
         log::info!("Release build: using prod backend {}", PROD_BACKEND_URL);
         PROD_BACKEND_URL.to_string()

@@ -45,7 +45,7 @@ pub fn run() {
         Err(e) => println!("ℹ️  No .env file loaded: {}", e),
     }
 
-    let mut builder = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -55,9 +55,7 @@ pub fn run() {
 
     // Добавляем NSPanel плагин на macOS для появления поверх fullscreen приложений
     #[cfg(target_os = "macos")]
-    {
-        builder = builder.plugin(tauri_nspanel::init());
-    }
+    let builder = builder.plugin(tauri_nspanel::init());
 
     builder
         .plugin(
@@ -134,6 +132,7 @@ pub fn run() {
             commands::get_audio_devices,
             commands::get_output_audio_devices,
             commands::get_audio_permission_status,
+            commands::get_llm_config_status,
             commands::request_system_audio_permission,
             commands::start_haiku_stream,
             commands::start_haiku_chat_stream,
