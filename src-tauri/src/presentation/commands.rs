@@ -1,13 +1,16 @@
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
 use crate::application::TranscriptionService;
-use crate::domain::{AudioCapture, LlmProviderFactory, RecordingStatus, SttConnectionCategory, SttError};
+use crate::domain::{
+    AudioCapture, LlmProviderFactory, RecordingStatus, SttConnectionCategory, SttError,
+};
 use crate::infrastructure::{AuthSession, AuthStore, AuthUser, ConfigStore};
 use crate::presentation::{
-    events::*, AppState, AudioLevelPayload, FinalTranscriptionPayload, PartialTranscriptionPayload,
-    RecordingStatusPayload, MicrophoneTestLevelPayload, TranscriptionErrorPayload, ConnectionQualityPayload,
+    events::*, AppState, AudioLevelPayload, ConnectionQualityPayload, FinalTranscriptionPayload,
+    MicrophoneMuteStatePayload, MicrophoneTestLevelPayload, PartialTranscriptionPayload,
+    RecordingStatusPayload, TranscriptionErrorPayload,
 };
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -15,6 +18,8 @@ pub struct AudioPermissionStatus {
     pub system_audio_granted: bool,
     pub microphone_granted: bool,
 }
+
+const DEFAULT_MICROPHONE_MUTE_HOTKEY: &str = "CmdOrCtrl+Shift+M";
 
 #[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -77,21 +82,209 @@ pub async fn request_system_audio_permission() -> Result<bool, String> {
     }
 }
 
+fn to_microphone_mute_state_payload(
+    status: crate::infrastructure::microphone_mute::MicrophoneMuteStatus,
+    detail: Option<String>,
+) -> MicrophoneMuteStatePayload {
+    MicrophoneMuteStatePayload {
+        muted: status.muted,
+        supported: status.supported,
+        source: status.source,
+        detail,
+    }
+}
+
+async fn emit_microphone_mute_state(app_handle: &AppHandle, payload: &MicrophoneMuteStatePayload) {
+    let _ = app_handle.emit(EVENT_MICROPHONE_MUTE_STATE, payload.clone());
+}
+
+async fn sync_microphone_transcription_enabled_internal(
+    state: &AppState,
+    app_handle: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    state
+        .microphone_transcription_enabled
+        .store(enabled, Ordering::Relaxed);
+
+    if !enabled {
+        if let Err(e) = state
+            .microphone_transcription_service
+            .stop_recording()
+            .await
+        {
+            log::debug!("Microphone transcription stop skipped/failed: {}", e);
+        }
+        return Ok(());
+    }
+
+    let status = state.transcription_service.get_status().await;
+    if matches!(
+        status,
+        RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Processing
+    ) {
+        let session_id = state
+            .active_transcription_session_id
+            .load(Ordering::Relaxed);
+        if session_id > 0 {
+            let microphone_device = state.config.read().await.selected_audio_device.clone();
+            spawn_microphone_transcription_start(
+                state.microphone_transcription_service.clone(),
+                app_handle.clone(),
+                session_id,
+                microphone_device,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn toggle_microphone_muted_internal(
+    state: &AppState,
+    app_handle: AppHandle,
+) -> Result<MicrophoneMuteStatePayload, String> {
+    let current = crate::infrastructure::microphone_mute::get_microphone_mute_status()
+        .map_err(|e| format!("Не удалось получить статус микрофона: {}", e))?;
+    let target_muted = !current.muted;
+    let restore_hint = *state.microphone_restore_input_volume.read().await;
+
+    let outcome =
+        crate::infrastructure::microphone_mute::set_microphone_muted(target_muted, restore_hint)
+            .map_err(|e| format!("Не удалось переключить mute микрофона: {}", e))?;
+
+    {
+        let mut restore = state.microphone_restore_input_volume.write().await;
+        if target_muted {
+            *restore = outcome.restore_input_volume;
+        } else if outcome.status.muted {
+            *restore = outcome.restore_input_volume.or(*restore);
+        }
+    }
+
+    sync_microphone_transcription_enabled_internal(
+        state,
+        app_handle.clone(),
+        !outcome.status.muted,
+    )
+    .await?;
+
+    let payload = to_microphone_mute_state_payload(
+        outcome.status,
+        if outcome.applied_methods.is_empty() {
+            None
+        } else {
+            Some(outcome.applied_methods.join(","))
+        },
+    );
+    emit_microphone_mute_state(&app_handle, &payload).await;
+    Ok(payload)
+}
+
+#[tauri::command]
+pub async fn get_microphone_mute_state() -> Result<MicrophoneMuteStatePayload, String> {
+    let status = crate::infrastructure::microphone_mute::get_microphone_mute_status()
+        .map_err(|e| format!("Не удалось получить статус микрофона: {}", e))?;
+    Ok(to_microphone_mute_state_payload(status, None))
+}
+
+#[tauri::command]
+pub async fn set_microphone_muted(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    muted: bool,
+) -> Result<MicrophoneMuteStatePayload, String> {
+    let current = crate::infrastructure::microphone_mute::get_microphone_mute_status()
+        .map_err(|e| format!("Не удалось получить статус микрофона: {}", e))?;
+    if current.muted == muted {
+        let payload = to_microphone_mute_state_payload(current, None);
+        emit_microphone_mute_state(&app_handle, &payload).await;
+        sync_microphone_transcription_enabled_internal(
+            state.inner(),
+            app_handle.clone(),
+            !payload.muted,
+        )
+        .await?;
+        return Ok(payload);
+    }
+
+    let restore_hint = *state.microphone_restore_input_volume.read().await;
+    let outcome = crate::infrastructure::microphone_mute::set_microphone_muted(muted, restore_hint)
+        .map_err(|e| format!("Не удалось переключить mute микрофона: {}", e))?;
+
+    {
+        let mut restore = state.microphone_restore_input_volume.write().await;
+        if muted {
+            *restore = outcome.restore_input_volume;
+        } else if !outcome.status.muted {
+            *restore = outcome.restore_input_volume.or(*restore);
+        }
+    }
+
+    sync_microphone_transcription_enabled_internal(
+        state.inner(),
+        app_handle.clone(),
+        !outcome.status.muted,
+    )
+    .await?;
+
+    let payload = to_microphone_mute_state_payload(
+        outcome.status,
+        if outcome.applied_methods.is_empty() {
+            None
+        } else {
+            Some(outcome.applied_methods.join(","))
+        },
+    );
+    emit_microphone_mute_state(&app_handle, &payload).await;
+    Ok(payload)
+}
+
+#[tauri::command]
+pub async fn toggle_microphone_muted(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<MicrophoneMuteStatePayload, String> {
+    toggle_microphone_muted_internal(state.inner(), app_handle).await
+}
+
 fn spawn_microphone_transcription_start(
     mic_service: Arc<TranscriptionService>,
     app_handle: AppHandle,
     session_id: u64,
+    device_name: Option<String>,
 ) {
     let app_handle_partial = app_handle.clone();
     let app_handle_final = app_handle.clone();
 
     tauri::async_runtime::spawn(async move {
+        // Важно: если выбран "Default" (device_name=None), то при подключении/смене микрофона
+        // системное устройство по умолчанию может измениться во время работы приложения.
+        // Поэтому перед стартом микрофонной транскрибации пересоздаём захват.
+        match crate::infrastructure::audio::SystemAudioCapture::with_device(device_name.clone()) {
+            Ok(capture) => {
+                if let Err(e) = mic_service.replace_audio_capture(Box::new(capture)).await {
+                    log::warn!("Failed to replace microphone capture before start: {}", e);
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to create microphone capture for {:?}: {}",
+                    device_name,
+                    e
+                );
+            }
+        }
+
         let app_handle_mic_partial = app_handle_partial.clone();
         let on_partial_mic = Arc::new(move |transcription: crate::domain::Transcription| {
             let app_handle = app_handle_mic_partial.clone();
             tokio::spawn(async move {
-                let payload =
-                    PartialTranscriptionPayload::from_transcription(transcription, session_id, "microphone");
+                let payload = PartialTranscriptionPayload::from_transcription(
+                    transcription,
+                    session_id,
+                    "microphone",
+                );
                 let _ = app_handle.emit(EVENT_TRANSCRIPTION_PARTIAL, payload);
             });
         });
@@ -99,8 +292,11 @@ fn spawn_microphone_transcription_start(
         let on_final_mic = Arc::new(move |transcription: crate::domain::Transcription| {
             let app_handle = app_handle_final.clone();
             tokio::spawn(async move {
-                let payload =
-                    FinalTranscriptionPayload::from_transcription(transcription, session_id, "microphone");
+                let payload = FinalTranscriptionPayload::from_transcription(
+                    transcription,
+                    session_id,
+                    "microphone",
+                );
                 let _ = app_handle.emit(EVENT_TRANSCRIPTION_FINAL, payload);
             });
         });
@@ -148,7 +344,9 @@ fn classify_transcription_error_type_from_stt(err: &SttError) -> String {
                 "connection".to_string()
             }
         }
-        SttError::Processing(_) | SttError::Unsupported(_) | SttError::Internal(_) => "processing".to_string(),
+        SttError::Processing(_) | SttError::Unsupported(_) | SttError::Internal(_) => {
+            "processing".to_string()
+        }
     }
 }
 
@@ -169,7 +367,10 @@ pub async fn start_recording(
 
     // Новый идентификатор сессии записи. Маркируем им все события transcription:* и recording:status,
     // чтобы frontend мог игнорировать "поздние" сообщения от предыдущей сессии.
-    let session_id = state.transcription_session_seq.fetch_add(1, Ordering::Relaxed) + 1;
+    let session_id = state
+        .transcription_session_seq
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
     state
         .active_transcription_session_id
         .store(session_id, Ordering::Relaxed);
@@ -189,8 +390,11 @@ pub async fn start_recording(
             *state_partial.write().await = Some(text.clone());
 
             // Emit event to frontend
-            let payload =
-                PartialTranscriptionPayload::from_transcription(transcription, session_id, "system");
+            let payload = PartialTranscriptionPayload::from_transcription(
+                transcription,
+                session_id,
+                "system",
+            );
             if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_PARTIAL, payload) {
                 log::error!("Failed to emit partial transcription event: {}", e);
             }
@@ -227,8 +431,11 @@ pub async fn start_recording(
             drop(history);
 
             // Emit event to frontend
-            let payload =
-                FinalTranscriptionPayload::from_transcription(transcription.clone(), session_id, "system");
+            let payload = FinalTranscriptionPayload::from_transcription(
+                transcription.clone(),
+                session_id,
+                "system",
+            );
             if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_FINAL, payload) {
                 log::error!("Failed to emit final transcription event: {}", e);
             }
@@ -300,7 +507,11 @@ pub async fn start_recording(
         let app_handle = app_handle_quality.clone();
 
         tokio::spawn(async move {
-            log::info!("Connection quality changed: {} (reason: {:?})", quality, reason);
+            log::info!(
+                "Connection quality changed: {} (reason: {:?})",
+                quality,
+                reason
+            );
 
             // Emit connection quality event to frontend
             let payload = ConnectionQualityPayload {
@@ -331,6 +542,20 @@ pub async fn start_recording(
         },
     );
 
+    // Перед стартом записи пересоздаём audio capture по текущему конфигу.
+    // Это критично для кейса "Default" → пользователь подключил новое устройство, и default сменился.
+    let (output_device, microphone_device) = {
+        let cfg = state.config.read().await;
+        (
+            cfg.selected_output_audio_device.clone(),
+            cfg.selected_audio_device.clone(),
+        )
+    };
+    state
+        .recreate_audio_capture_with_device(output_device, app_handle.clone())
+        .await
+        .map_err(|e| format!("Не удалось инициализировать устройство записи: {}", e))?;
+
     // Start recording (async - WebSocket connect, audio capture start)
     let start_result = state
         .transcription_service
@@ -349,13 +574,18 @@ pub async fn start_recording(
     // Поэтому здесь явно отправляем error + status=Error тем же контрактом, что и в runtime-ошибках.
     if let Err(e) = start_result {
         // Стараемся извлечь исходную причину максимально надёжно (без парсинга строки).
-        let stt = e.downcast_ref::<SttError>().cloned().unwrap_or_else(|| {
-            SttError::Internal(e.to_string())
-        });
+        let stt = e
+            .downcast_ref::<SttError>()
+            .cloned()
+            .unwrap_or_else(|| SttError::Internal(e.to_string()));
         let error = stt.to_string();
         let error_type = classify_transcription_error_type_from_stt(&stt);
 
-        log::error!("Failed to start recording: {} (type: {})", error, error_type);
+        log::error!(
+            "Failed to start recording: {} (type: {})",
+            error,
+            error_type
+        );
 
         // Сначала transcription:error, потом recording:status=Error (во фронте есть логика suppression/retry).
         on_error(stt);
@@ -365,11 +595,15 @@ pub async fn start_recording(
 
     // Best-effort: параллельно запускаем транскрибацию с микрофона.
     // Важно: микрофон можно отключить из UI; при этом системный звук продолжает работать.
-    if state.microphone_transcription_enabled.load(Ordering::Relaxed) {
+    if state
+        .microphone_transcription_enabled
+        .load(Ordering::Relaxed)
+    {
         spawn_microphone_transcription_start(
             state.microphone_transcription_service.clone(),
             app_handle.clone(),
             session_id,
+            microphone_device,
         );
     }
 
@@ -395,7 +629,9 @@ pub async fn stop_recording(
 ) -> Result<String, String> {
     log::info!("Command: stop_recording");
 
-    let session_id = state.active_transcription_session_id.load(Ordering::Relaxed);
+    let session_id = state
+        .active_transcription_session_id
+        .load(Ordering::Relaxed);
 
     let result = state
         .transcription_service
@@ -404,7 +640,11 @@ pub async fn stop_recording(
         .map_err(|e| e.to_string())?;
 
     // Best-effort: останавливаем микрофонную транскрибацию (если она была запущена).
-    if let Err(e) = state.microphone_transcription_service.stop_recording().await {
+    if let Err(e) = state
+        .microphone_transcription_service
+        .stop_recording()
+        .await
+    {
         log::debug!("Microphone transcription stop skipped/failed: {}", e);
     }
 
@@ -431,34 +671,7 @@ pub async fn set_microphone_transcription_enabled(
     app_handle: AppHandle,
     enabled: bool,
 ) -> Result<(), String> {
-    state
-        .microphone_transcription_enabled
-        .store(enabled, Ordering::Relaxed);
-
-    if !enabled {
-        if let Err(e) = state.microphone_transcription_service.stop_recording().await {
-            log::debug!("Microphone transcription stop skipped/failed: {}", e);
-        }
-        return Ok(());
-    }
-
-    // Если включили во время активной записи — стартуем микрофон сразу.
-    let status = state.transcription_service.get_status().await;
-    if matches!(
-        status,
-        RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Processing
-    ) {
-        let session_id = state.active_transcription_session_id.load(Ordering::Relaxed);
-        if session_id > 0 {
-            spawn_microphone_transcription_start(
-                state.microphone_transcription_service.clone(),
-                app_handle.clone(),
-                session_id,
-            );
-        }
-    }
-
-    Ok(())
+    sync_microphone_transcription_enabled_internal(state.inner(), app_handle, enabled).await
 }
 
 /// Get current recording status
@@ -482,7 +695,9 @@ pub fn show_window_on_active_monitor(window: &Window) -> Result<(), String> {
 }
 
 /// Показывает окно на активном мониторе (где находится курсор мыши) - для WebviewWindow
-pub fn show_webview_window_on_active_monitor<R: tauri::Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
+pub fn show_webview_window_on_active_monitor<R: tauri::Runtime>(
+    window: &WebviewWindow<R>,
+) -> Result<(), String> {
     show_window_on_active_monitor_impl(
         || window.current_monitor(),
         || window.primary_monitor(),
@@ -522,14 +737,16 @@ where
     let monitor_size = current_monitor.size();
     let monitor_position = current_monitor.position();
 
-    log::debug!("Монитор: позиция ({}, {}), размер {}x{}",
-        monitor_position.x, monitor_position.y,
-        monitor_size.width, monitor_size.height
+    log::debug!(
+        "Монитор: позиция ({}, {}), размер {}x{}",
+        monitor_position.x,
+        monitor_position.y,
+        monitor_size.width,
+        monitor_size.height
     );
 
     // Получаем размеры окна
-    let window_size = get_outer_size()
-        .map_err(|e| format!("Failed to get window size: {}", e))?;
+    let window_size = get_outer_size().map_err(|e| format!("Failed to get window size: {}", e))?;
 
     // Вычисляем центральную позицию на мониторе
     let x = monitor_position.x + (monitor_size.width as i32 - window_size.width as i32) / 2;
@@ -595,7 +812,10 @@ mod snapshot_contract_tests {
 
         // И базовая проверка наличия ожидаемых ключей.
         let v: serde_json::Value = serde_json::from_str(&json).expect("must parse json");
-        let data = v.get("data").and_then(|x| x.as_object()).expect("data object");
+        let data = v
+            .get("data")
+            .and_then(|x| x.as_object())
+            .expect("data object");
         assert!(data.contains_key("microphone_sensitivity"));
         assert!(data.contains_key("recording_hotkey"));
         assert!(data.contains_key("auto_copy_to_clipboard"));
@@ -625,12 +845,20 @@ mod snapshot_contract_tests {
         let json = serde_json::to_string(&env).expect("must serialize");
         assert_absent(
             &json,
-            &["backend_auth_token", "backend_url", "refresh_token", "access_token"],
+            &[
+                "backend_auth_token",
+                "backend_url",
+                "refresh_token",
+                "access_token",
+            ],
         );
 
         // Проверяем, что JSON-форма стабильная (ожидаемые ключи присутствуют).
         let v: serde_json::Value = serde_json::from_str(&json).expect("must parse json");
-        let data = v.get("data").and_then(|x| x.as_object()).expect("data object");
+        let data = v
+            .get("data")
+            .and_then(|x| x.as_object())
+            .expect("data object");
         assert!(data.contains_key("provider"));
         assert!(data.contains_key("language"));
         assert!(data.contains_key("keep_connection_alive"));
@@ -638,10 +866,7 @@ mod snapshot_contract_tests {
 }
 /// Toggle window visibility
 #[tauri::command]
-pub async fn toggle_window(
-    state: State<'_, AppState>,
-    window: Window,
-) -> Result<(), String> {
+pub async fn toggle_window(state: State<'_, AppState>, window: Window) -> Result<(), String> {
     log::info!("Command: toggle_window");
 
     if window.is_visible().map_err(|e| e.to_string())? {
@@ -680,7 +905,9 @@ pub async fn toggle_recording_with_window(
     // Иначе получается странное поведение: окно может получить фокус, но UI в нём "none" (скрыт правилами windowMode).
     let is_authenticated = *state.is_authenticated.read().await;
     if !is_authenticated {
-        log::info!("toggle_recording_with_window: user not authenticated -> redirect to auth window");
+        log::info!(
+            "toggle_recording_with_window: user not authenticated -> redirect to auth window"
+        );
         show_auth_window(app_handle).await?;
         return Ok(());
     }
@@ -695,7 +922,9 @@ pub async fn toggle_recording_with_window(
                 // Перед показом окна сохраняем bundle ID текущего активного приложения
                 #[cfg(target_os = "macos")]
                 {
-                    if let Some(bundle_id) = crate::infrastructure::auto_paste::get_active_app_bundle_id() {
+                    if let Some(bundle_id) =
+                        crate::infrastructure::auto_paste::get_active_app_bundle_id()
+                    {
                         *state.last_focused_app_bundle_id.write().await = Some(bundle_id.clone());
                         log::info!("Saved last focused app bundle ID: {}", bundle_id);
                     }
@@ -727,7 +956,9 @@ pub async fn toggle_recording_with_window(
 
             // Эмитируем статус Idle с флагом stopped_via_hotkey
             // Frontend скроет окно когда получит этот статус
-            let session_id = state.active_transcription_session_id.load(Ordering::Relaxed);
+            let session_id = state
+                .active_transcription_session_id
+                .load(Ordering::Relaxed);
             log::info!("Emitting status: Idle (stopped_via_hotkey: TRUE) - window will auto-hide");
             let _ = app_handle.emit(
                 EVENT_RECORDING_STATUS,
@@ -777,7 +1008,9 @@ pub async fn toggle_recording_with_window_internal(
             if !window.is_visible().map_err(|e| e.to_string())? {
                 #[cfg(target_os = "macos")]
                 {
-                    if let Some(bundle_id) = crate::infrastructure::auto_paste::get_active_app_bundle_id() {
+                    if let Some(bundle_id) =
+                        crate::infrastructure::auto_paste::get_active_app_bundle_id()
+                    {
                         *state.last_focused_app_bundle_id.write().await = Some(bundle_id.clone());
                         log::info!("Saved last focused app bundle ID: {}", bundle_id);
                     }
@@ -808,7 +1041,9 @@ pub async fn toggle_recording_with_window_internal(
                 .map_err(|e| e.to_string())?;
 
             log::info!("Recording stopped via hotkey");
-            let session_id = state.active_transcription_session_id.load(Ordering::Relaxed);
+            let session_id = state
+                .active_transcription_session_id
+                .load(Ordering::Relaxed);
             let _ = app_handle.emit(
                 EVENT_RECORDING_STATUS,
                 RecordingStatusPayload {
@@ -856,7 +1091,12 @@ pub async fn update_stt_config(
     model: Option<String>,
     deepgram_keyterms: Option<String>,
 ) -> Result<(), String> {
-    log::info!("Command: update_stt_config - provider: {}, language: {}, model: {:?}", provider, language, model);
+    log::info!(
+        "Command: update_stt_config - provider: {}, language: {}, model: {:?}",
+        provider,
+        language,
+        model
+    );
 
     // Выбор провайдера отключён — всегда используем Backend.
     // Параметр provider оставлен, чтобы не ломать совместимость API.
@@ -866,7 +1106,10 @@ pub async fn update_stt_config(
     // Запоминаем текущие значения для проверки изменений
     let (old_language, old_keyterms) = {
         let config = state.config.read().await;
-        (config.stt.language.clone(), config.stt.deepgram_keyterms.clone())
+        (
+            config.stt.language.clone(),
+            config.stt.deepgram_keyterms.clone(),
+        )
     };
 
     // Загружаем существующую конфигурацию из файла (если есть)
@@ -888,8 +1131,11 @@ pub async fn update_stt_config(
     // Поэтому по умолчанию держим включенным, но TTL оставляем коротким (см. stt_config.keep_alive_ttl_secs).
     config.keep_connection_alive = true;
 
-    log::debug!("Setting keep_connection_alive={} for provider {:?}",
-        config.keep_connection_alive, provider_type);
+    log::debug!(
+        "Setting keep_connection_alive={} for provider {:?}",
+        config.keep_connection_alive,
+        provider_type
+    );
 
     // API ключи больше не используем в настройках (backend-only).
     let _ = deepgram_api_key;
@@ -1039,7 +1285,9 @@ pub struct AuthStateData {
 
 /// Get current auth state snapshot
 #[tauri::command]
-pub async fn get_auth_state_snapshot(state: State<'_, AppState>) -> Result<SnapshotEnvelope<AuthStateData>, String> {
+pub async fn get_auth_state_snapshot(
+    state: State<'_, AppState>,
+) -> Result<SnapshotEnvelope<AuthStateData>, String> {
     log::trace!("Command: get_auth_state_snapshot");
     let is_authenticated = *state.is_authenticated.read().await;
     let revision = state.auth_state_revision.read().await.to_string();
@@ -1111,7 +1359,9 @@ pub async fn get_auth_session_snapshot(
 
 /// Get current UI preferences snapshot
 #[tauri::command]
-pub async fn get_ui_preferences_snapshot(state: State<'_, AppState>) -> Result<SnapshotEnvelope<crate::domain::UiPreferences>, String> {
+pub async fn get_ui_preferences_snapshot(
+    state: State<'_, AppState>,
+) -> Result<SnapshotEnvelope<crate::domain::UiPreferences>, String> {
     log::debug!("Command: get_ui_preferences_snapshot");
     let data = state.ui_preferences.read().await.clone();
     let revision = state.ui_preferences_revision.read().await.to_string();
@@ -1138,7 +1388,10 @@ pub async fn update_ui_preferences(
 
     {
         let current = state.ui_preferences.read().await;
-        if current.theme == theme && current.locale == locale && current.use_system_theme == use_system_theme {
+        if current.theme == theme
+            && current.locale == locale
+            && current.use_system_theme == use_system_theme
+        {
             return Ok(());
         }
     }
@@ -1208,7 +1461,11 @@ pub async fn update_app_config(
     if let Some(sensitivity) = microphone_sensitivity {
         let clamped = sensitivity.min(200); // Ensure 0-200 range
         if config.microphone_sensitivity != clamped {
-            log::info!("Updating microphone sensitivity: {} -> {}", config.microphone_sensitivity, clamped);
+            log::info!(
+                "Updating microphone sensitivity: {} -> {}",
+                config.microphone_sensitivity,
+                clamped
+            );
             config.microphone_sensitivity = clamped;
             any_changed = true;
         }
@@ -1228,7 +1485,11 @@ pub async fn update_app_config(
                 return Err(format!("Неверный формат горячей клавиши: {}", new_hotkey));
             }
 
-            log::info!("Updating recording hotkey: {} -> {}", config.recording_hotkey, new_hotkey);
+            log::info!(
+                "Updating recording hotkey: {} -> {}",
+                config.recording_hotkey,
+                new_hotkey
+            );
             config.recording_hotkey = new_hotkey;
             hotkey_changed = true;
             any_changed = true;
@@ -1250,11 +1511,19 @@ pub async fn update_app_config(
 
     let mut mic_device_changed = false;
     if let Some(device) = selected_audio_device {
-        let device_opt = if device.is_empty() { None } else { Some(device.clone()) };
+        let device_opt = if device.is_empty() {
+            None
+        } else {
+            Some(device.clone())
+        };
 
         // Проверяем изменилось ли устройство
         if config.selected_audio_device != device_opt {
-            log::info!("Updating selected_audio_device: {:?} -> {:?}", config.selected_audio_device, device_opt);
+            log::info!(
+                "Updating selected_audio_device: {:?} -> {:?}",
+                config.selected_audio_device,
+                device_opt
+            );
             config.selected_audio_device = device_opt;
             mic_device_changed = true;
             any_changed = true;
@@ -1263,7 +1532,11 @@ pub async fn update_app_config(
 
     let mut output_device_changed = false;
     if let Some(device) = selected_output_audio_device {
-        let device_opt = if device.is_empty() { None } else { Some(device.clone()) };
+        let device_opt = if device.is_empty() {
+            None
+        } else {
+            Some(device.clone())
+        };
         if config.selected_output_audio_device != device_opt {
             log::info!(
                 "Updating selected_output_audio_device: {:?} -> {:?}",
@@ -1287,8 +1560,16 @@ pub async fn update_app_config(
         config.microphone_sensitivity, config.recording_hotkey, config.stt.provider, config.stt.language, config.selected_audio_device);
 
     // Запоминаем устройства для применения после сохранения
-    let mic_device_to_apply = if mic_device_changed { Some(config.selected_audio_device.clone()) } else { None };
-    let output_device_to_apply = if output_device_changed { Some(config.selected_output_audio_device.clone()) } else { None };
+    let mic_device_to_apply = if mic_device_changed {
+        Some(config.selected_audio_device.clone())
+    } else {
+        None
+    };
+    let output_device_to_apply = if output_device_changed {
+        Some(config.selected_output_audio_device.clone())
+    } else {
+        None
+    };
 
     // Сохраняем конфигурацию на диск
     ConfigStore::save_app_config(&config)
@@ -1310,15 +1591,19 @@ pub async fn update_app_config(
     // Если выбранный микрофон изменился - применяем в mic transcription service (best-effort).
     if let Some(device_opt) = mic_device_to_apply {
         log::info!("Applying changed microphone device: {:?}", device_opt);
-        let capture = crate::infrastructure::audio::SystemAudioCapture::with_device(device_opt.clone())
-            .map_err(|e| format!("Failed to create microphone capture: {}", e))?;
+        let capture =
+            crate::infrastructure::audio::SystemAudioCapture::with_device(device_opt.clone())
+                .map_err(|e| format!("Failed to create microphone capture: {}", e))?;
         state
             .microphone_transcription_service
             .replace_audio_capture(Box::new(capture))
             .await
             .map_err(|e| {
                 log::error!("Failed to apply new microphone device: {}", e);
-                format!("Настройки сохранены, но не удалось применить новое устройство микрофона: {}", e)
+                format!(
+                    "Настройки сохранены, но не удалось применить новое устройство микрофона: {}",
+                    e
+                )
             })?;
     }
 
@@ -1354,9 +1639,9 @@ pub async fn update_app_config(
 // Microphone Test Commands
 //
 
-use crate::infrastructure::audio::SystemAudioCapture;
-use crate::infrastructure::audio::create_output_audio_capture_for_device;
 use crate::domain::AudioConfig;
+use crate::infrastructure::audio::create_output_audio_capture_for_device;
+use crate::infrastructure::audio::SystemAudioCapture;
 
 /// Start microphone test
 #[tauri::command]
@@ -1399,7 +1684,10 @@ pub async fn start_microphone_test(
         None => state.config.read().await.microphone_sensitivity,
     };
 
-    log::info!("Starting microphone test with sensitivity: {}%", sensitivity);
+    log::info!(
+        "Starting microphone test with sensitivity: {}%",
+        sensitivity
+    );
 
     // Создаем канал для передачи данных из callback
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1421,7 +1709,11 @@ pub async fn start_microphone_test(
             1.0 + (sensitivity - 100) as f32 / 100.0 * 4.0
         };
 
-        log::info!("Microphone test: sensitivity={}%, gain={:.2}x", sensitivity, gain);
+        log::info!(
+            "Microphone test: sensitivity={}%, gain={:.2}x",
+            sensitivity,
+            gain
+        );
 
         while let Some(chunk) = rx.recv().await {
             // Вычисляем уровень громкости ДО усиления
@@ -1437,7 +1729,9 @@ pub async fn start_microphone_test(
             );
 
             // Применяем gain к каждому сэмплу с защитой от clipping
-            let amplified_data: Vec<i16> = chunk.data.iter()
+            let amplified_data: Vec<i16> = chunk
+                .data
+                .iter()
                 .map(|&sample| {
                     let amplified = (sample as f32 * gain).clamp(-32767.0, 32767.0);
                     amplified as i16
@@ -1470,9 +1764,7 @@ pub async fn start_microphone_test(
 
 /// Stop microphone test and return recorded audio
 #[tauri::command]
-pub async fn stop_microphone_test(
-    state: State<'_, AppState>,
-) -> Result<Vec<i16>, String> {
+pub async fn stop_microphone_test(state: State<'_, AppState>) -> Result<Vec<i16>, String> {
     log::info!("Command: stop_microphone_test");
 
     let mut test_state = state.microphone_test.write().await;
@@ -1497,7 +1789,10 @@ pub async fn stop_microphone_test(
     buffer_guard.clear();
     drop(buffer_guard);
 
-    log::info!("Microphone test stopped, buffer size: {} samples", buffer.len());
+    log::info!(
+        "Microphone test stopped, buffer size: {} samples",
+        buffer.len()
+    );
     Ok(buffer)
 }
 
@@ -1512,7 +1807,10 @@ pub async fn start_system_audio_test(
     app_handle: AppHandle,
     device_name: Option<String>,
 ) -> Result<(), String> {
-    log::info!("Command: start_system_audio_test - device: {:?}", device_name);
+    log::info!(
+        "Command: start_system_audio_test - device: {:?}",
+        device_name
+    );
 
     let mut test_state = state.system_audio_test.write().await;
     if test_state.is_testing {
@@ -1545,7 +1843,9 @@ pub async fn start_system_audio_test(
 
             let _ = app_handle_clone.emit(
                 EVENT_SYSTEM_AUDIO_TEST_LEVEL,
-                SystemAudioTestLevelPayload { level: normalized_level },
+                SystemAudioTestLevelPayload {
+                    level: normalized_level,
+                },
             );
 
             let mut buffer = buffer_for_task.lock().await;
@@ -1612,8 +1912,8 @@ pub async fn register_recording_hotkey(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
-    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
     use std::sync::atomic::Ordering;
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
     let hotkey = state.config.read().await.recording_hotkey.clone();
     log::info!("Command: register_recording_hotkey - hotkey: {}", hotkey);
@@ -1624,7 +1924,9 @@ pub async fn register_recording_hotkey(
         Ok(sc) => (hotkey.clone(), sc),
         Err(parse_err) => {
             // Пытаемся нормализовать строку (например Backquote -> `).
-            if let Some(normalized) = crate::infrastructure::hotkey::normalize_recording_hotkey(&hotkey) {
+            if let Some(normalized) =
+                crate::infrastructure::hotkey::normalize_recording_hotkey(&hotkey)
+            {
                 match normalized.parse::<Shortcut>() {
                     Ok(sc) => {
                         log::warn!(
@@ -1645,7 +1947,11 @@ pub async fn register_recording_hotkey(
                                 (changed, cfg.clone())
                             };
                             if should_save {
-                                if let Err(e) = crate::infrastructure::ConfigStore::save_app_config(&config_snapshot).await {
+                                if let Err(e) = crate::infrastructure::ConfigStore::save_app_config(
+                                    &config_snapshot,
+                                )
+                                .await
+                                {
                                     log::warn!("Failed to persist normalized hotkey to app_config.json: {}", e);
                                 }
                             }
@@ -1654,10 +1960,11 @@ pub async fn register_recording_hotkey(
                     }
                     Err(_) => {
                         // Фоллбек на дефолт: всегда должен работать.
-                        let fallback = crate::infrastructure::hotkey::DEFAULT_RECORDING_HOTKEY.to_string();
-                        let sc = fallback
-                            .parse::<Shortcut>()
-                            .map_err(|e| format!("Failed to parse fallback hotkey '{}': {}", fallback, e))?;
+                        let fallback =
+                            crate::infrastructure::hotkey::DEFAULT_RECORDING_HOTKEY.to_string();
+                        let sc = fallback.parse::<Shortcut>().map_err(|e| {
+                            format!("Failed to parse fallback hotkey '{}': {}", fallback, e)
+                        })?;
                         log::error!(
                             "Failed to parse hotkey '{}' ({}). Falling back to '{}'",
                             hotkey,
@@ -1671,8 +1978,14 @@ pub async fn register_recording_hotkey(
                             cfg.recording_hotkey = fallback.clone();
                             cfg.clone()
                         };
-                        if let Err(e) = crate::infrastructure::ConfigStore::save_app_config(&config_snapshot).await {
-                            log::warn!("Failed to persist fallback hotkey to app_config.json: {}", e);
+                        if let Err(e) =
+                            crate::infrastructure::ConfigStore::save_app_config(&config_snapshot)
+                                .await
+                        {
+                            log::warn!(
+                                "Failed to persist fallback hotkey to app_config.json: {}",
+                                e
+                            );
                         }
 
                         // Пинаем invalidation, чтобы UI получил реальный (рабочий) хоткей.
@@ -1692,9 +2005,9 @@ pub async fn register_recording_hotkey(
                 }
             } else {
                 let fallback = crate::infrastructure::hotkey::DEFAULT_RECORDING_HOTKEY.to_string();
-                let sc = fallback
-                    .parse::<Shortcut>()
-                    .map_err(|e| format!("Failed to parse fallback hotkey '{}': {}", fallback, e))?;
+                let sc = fallback.parse::<Shortcut>().map_err(|e| {
+                    format!("Failed to parse fallback hotkey '{}': {}", fallback, e)
+                })?;
                 log::error!(
                     "Failed to parse hotkey '{}' ({}). Falling back to '{}'",
                     hotkey,
@@ -1707,8 +2020,13 @@ pub async fn register_recording_hotkey(
                     cfg.recording_hotkey = fallback.clone();
                     cfg.clone()
                 };
-                if let Err(e) = crate::infrastructure::ConfigStore::save_app_config(&config_snapshot).await {
-                    log::warn!("Failed to persist fallback hotkey to app_config.json: {}", e);
+                if let Err(e) =
+                    crate::infrastructure::ConfigStore::save_app_config(&config_snapshot).await
+                {
+                    log::warn!(
+                        "Failed to persist fallback hotkey to app_config.json: {}",
+                        e
+                    );
                 }
 
                 let revision = AppState::bump_revision(&state.app_config_revision).await;
@@ -1734,41 +2052,105 @@ pub async fn register_recording_hotkey(
 
     // Создаем обработчик - вызываем toggle напрямую вместо события
     // Важно: фильтруем только Pressed события, иначе срабатывает и на key down, и на key up
-    app_handle.global_shortcut().on_shortcut(shortcut, move |app, _shortcut, event| {
-        use tauri_plugin_global_shortcut::ShortcutState;
-        if event.state != ShortcutState::Pressed {
-            return;
+    app_handle
+        .global_shortcut()
+        .on_shortcut(shortcut, move |app, _shortcut, event| {
+            use tauri_plugin_global_shortcut::ShortcutState;
+            if event.state != ShortcutState::Pressed {
+                return;
+            }
+            log::debug!("Recording hotkey pressed");
+            let app_clone = app.clone();
+            let _ = tauri::async_runtime::spawn(async move {
+                let state_opt = app_clone.try_state::<crate::presentation::state::AppState>();
+                let window_opt = app_clone.get_webview_window("main");
+
+                if let (Some(state), Some(window)) = (state_opt, window_opt) {
+                    let app_for_call = app_clone.clone();
+
+                    // Дебаунс: защищаемся от key repeat / двойных срабатываний.
+                    // Иначе окно может "мигать" (показ/скрытие несколько раз подряд).
+                    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                    let last_ms = state
+                        .inner()
+                        .last_recording_hotkey_ms
+                        .load(Ordering::Relaxed);
+                    let delta = now_ms.saturating_sub(last_ms);
+                    if delta < 450 {
+                        log::debug!("Hotkey ignored (debounced): {}ms since last trigger", delta);
+                        return;
+                    }
+                    state
+                        .inner()
+                        .last_recording_hotkey_ms
+                        .store(now_ms, Ordering::Relaxed);
+
+                    if let Err(e) =
+                        crate::presentation::commands::toggle_recording_with_window_internal(
+                            state.inner(),
+                            window,
+                            app_for_call,
+                        )
+                        .await
+                    {
+                        log::error!("Failed to toggle recording: {}", e);
+                    }
+                }
+            });
+        })
+        .map_err(|e| format!("Failed to register hotkey '{}': {}", effective_hotkey, e))?;
+
+    let mute_shortcut = match DEFAULT_MICROPHONE_MUTE_HOTKEY.parse::<Shortcut>() {
+        Ok(shortcut) => shortcut,
+        Err(e) => {
+            log::warn!(
+                "Failed to parse built-in microphone mute hotkey '{}': {}",
+                DEFAULT_MICROPHONE_MUTE_HOTKEY,
+                e
+            );
+            log::info!("Successfully registered hotkey: {}", effective_hotkey);
+            return Ok(());
         }
-        log::debug!("Recording hotkey pressed");
-        let app_clone = app.clone();
-        let _ = tauri::async_runtime::spawn(async move {
-            let state_opt = app_clone.try_state::<crate::presentation::state::AppState>();
-            let window_opt = app_clone.get_webview_window("main");
+    };
 
-            if let (Some(state), Some(window)) = (state_opt, window_opt) {
-                let app_for_call = app_clone.clone();
-
-                // Дебаунс: защищаемся от key repeat / двойных срабатываний.
-                // Иначе окно может "мигать" (показ/скрытие несколько раз подряд).
-                let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-                let last_ms = state.inner().last_recording_hotkey_ms.load(Ordering::Relaxed);
-                let delta = now_ms.saturating_sub(last_ms);
-                if delta < 450 {
-                    log::debug!("Hotkey ignored (debounced): {}ms since last trigger", delta);
+    if effective_hotkey != DEFAULT_MICROPHONE_MUTE_HOTKEY {
+        if let Err(e) = app_handle
+            .global_shortcut()
+            .on_shortcut(mute_shortcut, move |app, _shortcut, event| {
+                use tauri_plugin_global_shortcut::ShortcutState;
+                if event.state != ShortcutState::Pressed {
                     return;
                 }
-                state.inner().last_recording_hotkey_ms.store(now_ms, Ordering::Relaxed);
 
-                if let Err(e) = crate::presentation::commands::toggle_recording_with_window_internal(
-                    state.inner(),
-                    window,
-                    app_for_call,
-                ).await {
-                    log::error!("Failed to toggle recording: {}", e);
-                }
-            }
-        });
-    }).map_err(|e| format!("Failed to register hotkey '{}': {}", effective_hotkey, e))?;
+                let app_clone = app.clone();
+                let _ = tauri::async_runtime::spawn(async move {
+                    let state_opt = app_clone.try_state::<crate::presentation::state::AppState>();
+                    if let Some(state) = state_opt {
+                        if let Err(e) =
+                            crate::presentation::commands::toggle_microphone_muted_internal(
+                                state.inner(),
+                                app_clone.clone(),
+                            )
+                            .await
+                        {
+                            log::error!("Failed to toggle microphone mute: {}", e);
+                        }
+                    }
+                });
+            })
+        {
+            log::warn!(
+                "Failed to register built-in microphone mute hotkey '{}': {}",
+                DEFAULT_MICROPHONE_MUTE_HOTKEY,
+                e
+            );
+        } else {
+            log::info!(
+                "Successfully registered microphone mute hotkey: {}",
+                DEFAULT_MICROPHONE_MUTE_HOTKEY
+            );
+        }
+    }
 
     log::info!("Successfully registered hotkey: {}", effective_hotkey);
     Ok(())
@@ -1776,9 +2158,7 @@ pub async fn register_recording_hotkey(
 
 /// Временно снять регистрацию горячей клавиши (пока пользователь настраивает новую)
 #[tauri::command]
-pub async fn unregister_recording_hotkey(
-    app_handle: AppHandle,
-) -> Result<(), String> {
+pub async fn unregister_recording_hotkey(app_handle: AppHandle) -> Result<(), String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
     log::info!("Command: unregister_recording_hotkey - временно снимаем хоткей");
@@ -1815,8 +2195,8 @@ pub async fn install_update(app_handle: AppHandle) -> Result<String, String> {
 //
 
 use crate::infrastructure::models::{
-    WhisperModelInfo, download_model, get_available_models,
-    is_model_downloaded, get_model_size, delete_model,
+    delete_model, download_model, get_available_models, get_model_size, is_model_downloaded,
+    WhisperModelInfo,
 };
 
 /// Get list of available Whisper models
@@ -1838,8 +2218,11 @@ pub async fn get_available_whisper_models() -> Result<Vec<WhisperModelInfo>, Str
         // Добавляем информацию в description если модель скачана
         if is_downloaded {
             if let Some(size) = local_size {
-                model.description = format!("{} (Скачана, {} на диске)",
-                    model.description, format_size_human(size));
+                model.description = format!(
+                    "{} (Скачана, {} на диске)",
+                    model.description,
+                    format_size_human(size)
+                );
             } else {
                 model.description = format!("{} (Скачана)", model.description);
             }
@@ -1891,12 +2274,15 @@ pub async fn download_whisper_model(
             progress: u8,
         }
 
-        let _ = app_handle_progress.emit("whisper-model:download-progress", DownloadProgressPayload {
-            model_name: model_name_progress.clone(),
-            downloaded,
-            total,
-            progress,
-        });
+        let _ = app_handle_progress.emit(
+            "whisper-model:download-progress",
+            DownloadProgressPayload {
+                model_name: model_name_progress.clone(),
+                downloaded,
+                total,
+                progress,
+            },
+        );
     };
 
     // Загружаем модель
@@ -1907,7 +2293,11 @@ pub async fn download_whisper_model(
     // Эмитируем событие завершения загрузки
     let _ = app_handle.emit("whisper-model:download-completed", model_name.clone());
 
-    log::info!("Model '{}' downloaded successfully to {:?}", model_name, model_path);
+    log::info!(
+        "Model '{}' downloaded successfully to {:?}",
+        model_name,
+        model_path
+    );
     Ok(format!("Model '{}' downloaded successfully", model_name))
 }
 
@@ -1916,8 +2306,7 @@ pub async fn download_whisper_model(
 pub async fn delete_whisper_model(model_name: String) -> Result<String, String> {
     log::info!("Command: delete_whisper_model - model: {}", model_name);
 
-    delete_model(&model_name)
-        .map_err(|e| format!("Failed to delete model: {}", e))?;
+    delete_model(&model_name).map_err(|e| format!("Failed to delete model: {}", e))?;
 
     Ok(format!("Model '{}' deleted successfully", model_name))
 }
@@ -1927,16 +2316,14 @@ pub async fn delete_whisper_model(model_name: String) -> Result<String, String> 
 pub async fn get_audio_devices() -> Result<Vec<String>, String> {
     log::info!("Command: get_audio_devices");
 
-    use cpal::traits::{HostTrait, DeviceTrait};
+    use cpal::traits::{DeviceTrait, HostTrait};
 
     let host = cpal::default_host();
 
     let devices: Vec<String> = host
         .input_devices()
         .map_err(|e| format!("Failed to enumerate input devices: {}", e))?
-        .filter_map(|device| {
-            device.name().ok()
-        })
+        .filter_map(|device| device.name().ok())
         .collect();
 
     log::info!("Found {} audio input devices", devices.len());
@@ -1989,10 +2376,15 @@ pub async fn start_haiku_stream(
         .as_str()
     {
         "anthropic" => crate::domain::LlmProviderType::Anthropic,
-        "openai" | "openai_compatible" | "openrouter" => crate::domain::LlmProviderType::OpenAiCompatible,
+        "openai" | "openai_compatible" | "openrouter" => {
+            crate::domain::LlmProviderType::OpenAiCompatible
+        }
         "backend" => crate::domain::LlmProviderType::Backend,
         other => {
-            log::warn!("Unknown LLM_PROVIDER='{}', falling back to anthropic", other);
+            log::warn!(
+                "Unknown LLM_PROVIDER='{}', falling back to anthropic",
+                other
+            );
             crate::domain::LlmProviderType::Anthropic
         }
     };
@@ -2061,9 +2453,15 @@ pub async fn start_haiku_stream(
         .filter(|v| !v.is_empty())
         .or_else(|| std::env::var("LLM_SYSTEM_PROMPT").ok())
         .or_else(|| match provider {
-            crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_SYSTEM_PROMPT").ok(),
-            crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_SYSTEM_PROMPT").ok(),
-            crate::domain::LlmProviderType::Backend => std::env::var("BACKEND_LLM_SYSTEM_PROMPT").ok(),
+            crate::domain::LlmProviderType::Anthropic => {
+                std::env::var("ANTHROPIC_SYSTEM_PROMPT").ok()
+            }
+            crate::domain::LlmProviderType::OpenAiCompatible => {
+                std::env::var("OPENAI_SYSTEM_PROMPT").ok()
+            }
+            crate::domain::LlmProviderType::Backend => {
+                std::env::var("BACKEND_LLM_SYSTEM_PROMPT").ok()
+            }
         })
         .unwrap_or_else(|| default_system_prompt.to_string());
 
@@ -2073,7 +2471,9 @@ pub async fn start_haiku_stream(
         crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_MODEL")
             .or_else(|_| std::env::var("LLM_MODEL"))
             .map_err(|_| "OPENAI_MODEL (or LLM_MODEL) is not set".to_string())?,
-        crate::domain::LlmProviderType::Backend => std::env::var("LLM_MODEL").unwrap_or_else(|_| "default".to_string()),
+        crate::domain::LlmProviderType::Backend => {
+            std::env::var("LLM_MODEL").unwrap_or_else(|_| "default".to_string())
+        }
     };
 
     let api_key = match provider {
@@ -2082,8 +2482,7 @@ pub async fn start_haiku_stream(
                 .map_err(|_| "ANTHROPIC_API_KEY is not set".to_string())?,
         ),
         crate::domain::LlmProviderType::OpenAiCompatible => Some(
-            std::env::var("OPENAI_API_KEY")
-                .map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
+            std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
         ),
         crate::domain::LlmProviderType::Backend => None,
     };
@@ -2110,7 +2509,9 @@ pub async fn start_haiku_stream(
     };
 
     let llm_factory = crate::infrastructure::DefaultLlmProviderFactory::new();
-    let llm_provider = llm_factory.create(&runtime_cfg).map_err(|e| e.to_string())?;
+    let llm_provider = llm_factory
+        .create(&runtime_cfg)
+        .map_err(|e| e.to_string())?;
 
     let request_id = uuid::Uuid::new_v4().to_string();
     log::info!(
@@ -2213,10 +2614,15 @@ pub async fn start_haiku_chat_stream(
         .as_str()
     {
         "anthropic" => crate::domain::LlmProviderType::Anthropic,
-        "openai" | "openai_compatible" | "openrouter" => crate::domain::LlmProviderType::OpenAiCompatible,
+        "openai" | "openai_compatible" | "openrouter" => {
+            crate::domain::LlmProviderType::OpenAiCompatible
+        }
         "backend" => crate::domain::LlmProviderType::Backend,
         other => {
-            log::warn!("Unknown LLM_PROVIDER='{}', falling back to anthropic", other);
+            log::warn!(
+                "Unknown LLM_PROVIDER='{}', falling back to anthropic",
+                other
+            );
             crate::domain::LlmProviderType::Anthropic
         }
     };
@@ -2279,9 +2685,15 @@ pub async fn start_haiku_chat_stream(
         .filter(|v| !v.is_empty())
         .or_else(|| std::env::var("LLM_SYSTEM_PROMPT").ok())
         .or_else(|| match provider {
-            crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_SYSTEM_PROMPT").ok(),
-            crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_SYSTEM_PROMPT").ok(),
-            crate::domain::LlmProviderType::Backend => std::env::var("BACKEND_LLM_SYSTEM_PROMPT").ok(),
+            crate::domain::LlmProviderType::Anthropic => {
+                std::env::var("ANTHROPIC_SYSTEM_PROMPT").ok()
+            }
+            crate::domain::LlmProviderType::OpenAiCompatible => {
+                std::env::var("OPENAI_SYSTEM_PROMPT").ok()
+            }
+            crate::domain::LlmProviderType::Backend => {
+                std::env::var("BACKEND_LLM_SYSTEM_PROMPT").ok()
+            }
         })
         .unwrap_or_else(|| default_system_prompt.to_string());
 
@@ -2329,7 +2741,9 @@ pub async fn start_haiku_chat_stream(
     };
 
     let llm_factory = crate::infrastructure::DefaultLlmProviderFactory::new();
-    let llm_provider = llm_factory.create(&runtime_cfg).map_err(|e| e.to_string())?;
+    let llm_provider = llm_factory
+        .create(&runtime_cfg)
+        .map_err(|e| e.to_string())?;
 
     let request_id = uuid::Uuid::new_v4().to_string();
     log::info!(
@@ -2431,15 +2845,16 @@ pub async fn start_haiku_chat_stream(
                         crate::infrastructure::ai::anthropic::AnthropicError::MissingApiKey => {
                             crate::domain::LlmError::Authentication("Missing API key".to_string())
                         }
-                        crate::infrastructure::ai::anthropic::AnthropicError::Http { status, body } => {
-                            crate::domain::LlmError::Http { status, body }
-                        }
+                        crate::infrastructure::ai::anthropic::AnthropicError::Http {
+                            status,
+                            body,
+                        } => crate::domain::LlmError::Http { status, body },
                         crate::infrastructure::ai::anthropic::AnthropicError::Network(err) => {
                             crate::domain::LlmError::Network(err.to_string())
                         }
-                        crate::infrastructure::ai::anthropic::AnthropicError::InvalidResponse(err) => {
-                            crate::domain::LlmError::InvalidResponse(err)
-                        }
+                        crate::infrastructure::ai::anthropic::AnthropicError::InvalidResponse(
+                            err,
+                        ) => crate::domain::LlmError::InvalidResponse(err),
                     })
                 }
                 Err(e) => Err(e),
@@ -2526,10 +2941,15 @@ pub async fn start_code_explain_stream(
         .as_str()
     {
         "anthropic" => crate::domain::LlmProviderType::Anthropic,
-        "openai" | "openai_compatible" | "openrouter" => crate::domain::LlmProviderType::OpenAiCompatible,
+        "openai" | "openai_compatible" | "openrouter" => {
+            crate::domain::LlmProviderType::OpenAiCompatible
+        }
         "backend" => crate::domain::LlmProviderType::Backend,
         other => {
-            log::warn!("Unknown LLM_PROVIDER='{}', falling back to anthropic", other);
+            log::warn!(
+                "Unknown LLM_PROVIDER='{}', falling back to anthropic",
+                other
+            );
             crate::domain::LlmProviderType::Anthropic
         }
     };
@@ -2601,7 +3021,9 @@ pub async fn start_code_explain_stream(
         crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_MODEL")
             .or_else(|_| std::env::var("LLM_MODEL"))
             .map_err(|_| "OPENAI_MODEL (or LLM_MODEL) is not set".to_string())?,
-        crate::domain::LlmProviderType::Backend => std::env::var("LLM_MODEL").unwrap_or_else(|_| "default".to_string()),
+        crate::domain::LlmProviderType::Backend => {
+            std::env::var("LLM_MODEL").unwrap_or_else(|_| "default".to_string())
+        }
     };
 
     let api_key = match provider {
@@ -2610,8 +3032,7 @@ pub async fn start_code_explain_stream(
                 .map_err(|_| "ANTHROPIC_API_KEY is not set".to_string())?,
         ),
         crate::domain::LlmProviderType::OpenAiCompatible => Some(
-            std::env::var("OPENAI_API_KEY")
-                .map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
+            std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
         ),
         crate::domain::LlmProviderType::Backend => None,
     };
@@ -2638,7 +3059,9 @@ pub async fn start_code_explain_stream(
     };
 
     let llm_factory = crate::infrastructure::DefaultLlmProviderFactory::new();
-    let llm_provider = llm_factory.create(&runtime_cfg).map_err(|e| e.to_string())?;
+    let llm_provider = llm_factory
+        .create(&runtime_cfg)
+        .map_err(|e| e.to_string())?;
 
     let request_id = request_id
         .map(|v| v.trim().to_string())
@@ -2740,8 +3163,7 @@ pub async fn check_accessibility_permission() -> Result<bool, String> {
 #[tauri::command]
 pub async fn request_accessibility_permission() -> Result<(), String> {
     log::info!("Command: request_accessibility_permission");
-    crate::infrastructure::auto_paste::open_accessibility_settings()
-        .map_err(|e| e.to_string())
+    crate::infrastructure::auto_paste::open_accessibility_settings().map_err(|e| e.to_string())
 }
 
 /// Автоматически вставляет текст в последнее активное окно
@@ -2792,12 +3214,10 @@ pub async fn auto_paste_text(
 
     // Вставляем текст в blocking thread (enigo работает с синхронными нативными API)
     let text_clone = text.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::infrastructure::auto_paste::paste_text(&text_clone)
-    })
-    .await
-    .map_err(|e| format!("Failed to join blocking task: {}", e))?
-    .map_err(|e| format!("Failed to paste text: {}", e))?;
+    tokio::task::spawn_blocking(move || crate::infrastructure::auto_paste::paste_text(&text_clone))
+        .await
+        .map_err(|e| format!("Failed to join blocking task: {}", e))?
+        .map_err(|e| format!("Failed to paste text: {}", e))?;
 
     // Возвращаем окно HackInterviewAI поверх всех окон (но без фокуса)
     if let Some(window) = app_handle.get_webview_window("main") {
@@ -2813,15 +3233,16 @@ pub async fn auto_paste_text(
 /// Работает БЕЗ активации приложения - решает проблему с nonactivating_panel на macOS
 #[tauri::command]
 pub async fn copy_to_clipboard_native(text: String) -> Result<(), String> {
-    log::debug!("Command: copy_to_clipboard_native - text length: {}", text.len());
+    log::debug!(
+        "Command: copy_to_clipboard_native - text length: {}",
+        text.len()
+    );
 
     // Используем blocking task (arboard работает с синхронными системными API, как enigo)
-    tokio::task::spawn_blocking(move || {
-        crate::infrastructure::copy_to_clipboard(&text)
-    })
-    .await
-    .map_err(|e| format!("Failed to join blocking task: {}", e))?
-    .map_err(|e| format!("Failed to copy to clipboard: {}", e))?;
+    tokio::task::spawn_blocking(move || crate::infrastructure::copy_to_clipboard(&text))
+        .await
+        .map_err(|e| format!("Failed to join blocking task: {}", e))?
+        .map_err(|e| format!("Failed to copy to clipboard: {}", e))?;
 
     log::info!("Text copied to clipboard successfully");
     Ok(())
@@ -2987,9 +3408,12 @@ pub async fn show_profile_window(
     if let Some(profile) = app_handle.get_webview_window("profile") {
         show_webview_window_on_active_monitor(&profile)?;
         profile.set_focus().map_err(|e| e.to_string())?;
-        let _ = profile.emit("profile-window-opened", serde_json::json!({
-            "initialSection": initial_section.unwrap_or_else(|| "none".to_string())
-        }));
+        let _ = profile.emit(
+            "profile-window-opened",
+            serde_json::json!({
+                "initialSection": initial_section.unwrap_or_else(|| "none".to_string())
+            }),
+        );
     }
 
     Ok(())
@@ -3103,8 +3527,15 @@ pub async fn set_auth_session(
     if let Err(e) = state.transcription_service.update_config(stt.clone()).await {
         log::warn!("Failed to update transcription service config token: {}", e);
     }
-    if let Err(e) = state.microphone_transcription_service.update_config(stt).await {
-        log::warn!("Failed to update microphone transcription config token: {}", e);
+    if let Err(e) = state
+        .microphone_transcription_service
+        .update_config(stt)
+        .await
+    {
+        log::warn!(
+            "Failed to update microphone transcription config token: {}",
+            e
+        );
     }
 
     // 4) Bump revisions + invalidations
@@ -3145,7 +3576,10 @@ pub async fn set_authenticated(
     authenticated: bool,
     token: Option<String>,
 ) -> Result<(), String> {
-    log::info!("Command: set_authenticated - authenticated: {}", authenticated);
+    log::info!(
+        "Command: set_authenticated - authenticated: {}",
+        authenticated
+    );
 
     let current_auth = *state.is_authenticated.read().await;
     if current_auth == authenticated {
@@ -3156,8 +3590,14 @@ pub async fn set_authenticated(
                 if config.backend_auth_token.as_deref() != Some(t.as_str()) {
                     config.backend_auth_token = Some(t.clone());
                     let _ = ConfigStore::save_config(&config).await;
-                    let _ = state.transcription_service.update_config(config.clone()).await;
-                    let _ = state.microphone_transcription_service.update_config(config).await;
+                    let _ = state
+                        .transcription_service
+                        .update_config(config.clone())
+                        .await;
+                    let _ = state
+                        .microphone_transcription_service
+                        .update_config(config)
+                        .await;
                 }
             }
         }
@@ -3186,8 +3626,14 @@ pub async fn set_authenticated(
     ConfigStore::save_config(&config)
         .await
         .map_err(|e| format!("Failed to save config: {}", e))?;
-    let _ = state.transcription_service.update_config(config.clone()).await;
-    let _ = state.microphone_transcription_service.update_config(config).await;
+    let _ = state
+        .transcription_service
+        .update_config(config.clone())
+        .await;
+    let _ = state
+        .microphone_transcription_service
+        .update_config(config)
+        .await;
 
     // Синхронизация между окнами через state-sync
     let revision = AppState::bump_revision(&state.auth_state_revision).await;

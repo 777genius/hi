@@ -62,4 +62,3 @@ pub trait LlmProvider: Send + Sync {
 pub trait LlmProviderFactory: Send + Sync {
     fn create(&self, config: &LlmRuntimeConfig) -> LlmResult<Box<dyn LlmProvider>>;
 }
-

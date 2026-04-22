@@ -137,7 +137,10 @@ pub fn activate_app_by_bundle_id(bundle_id: &str) -> Result<()> {
         let activated: bool = msg_send![app, activateWithOptions: 0];
 
         if !activated {
-            anyhow::bail!("Failed to activate application with bundle ID: {}", bundle_id);
+            anyhow::bail!(
+                "Failed to activate application with bundle ID: {}",
+                bundle_id
+            );
         }
 
         log::info!("App activated successfully: {}", bundle_id);
@@ -160,14 +163,24 @@ pub fn activate_app_by_bundle_id(_bundle_id: &str) -> Result<()> {
 ///
 /// Требует разрешения Accessibility на macOS
 pub fn paste_text(text: &str) -> Result<()> {
-    log::info!("🔧 paste_text called with {} chars: '{}'", text.len(),
-        if text.len() > 50 { format!("{}...", text.chars().take(50).collect::<String>()) } else { text.to_string() });
+    log::info!(
+        "🔧 paste_text called with {} chars: '{}'",
+        text.len(),
+        if text.len() > 50 {
+            format!("{}...", text.chars().take(50).collect::<String>())
+        } else {
+            text.to_string()
+        }
+    );
 
     // Проверяем разрешение Accessibility на macOS
     #[cfg(target_os = "macos")]
     {
         let has_permission = check_accessibility_permission();
-        log::info!("🔐 Accessibility permission check result: {}", has_permission);
+        log::info!(
+            "🔐 Accessibility permission check result: {}",
+            has_permission
+        );
 
         if !has_permission {
             let error_msg = "Accessibility permission not granted. Please enable it in System Settings > Privacy & Security > Accessibility";
@@ -182,9 +195,15 @@ pub fn paste_text(text: &str) -> Result<()> {
     log::info!("✅ Enigo initialized successfully");
 
     // Вводим текст в текущую позицию курсора (как человек)
-    log::info!("⌨️ Typing text at cursor position ({} chars): '{}'...",
+    log::info!(
+        "⌨️ Typing text at cursor position ({} chars): '{}'...",
         text.len(),
-        if text.len() > 30 { format!("{}...", text.chars().take(30).collect::<String>()) } else { text.to_string() });
+        if text.len() > 30 {
+            format!("{}...", text.chars().take(30).collect::<String>())
+        } else {
+            text.to_string()
+        }
+    );
 
     log::debug!("   Starting text input...");
     enigo.text(text).context("Failed to type text")?;

@@ -86,6 +86,13 @@ export interface ConnectionQualityPayload {
   reason?: string;
 }
 
+export interface MicrophoneMuteStatePayload {
+  muted: boolean;
+  supported: boolean;
+  source: string;
+  detail?: string;
+}
+
 export interface HaikuDeltaPayload {
   request_id: string;
   delta: string;
@@ -128,6 +135,7 @@ export const EVENT_CODE_EXPLAIN_DONE = 'code_explain:done';
 export const EVENT_CODE_EXPLAIN_ERROR = 'code_explain:error';
 export const EVENT_ERROR = 'app:error';
 export const EVENT_RECORDING_WINDOW_SHOWN = 'recording:window-shown';
+export const EVENT_MICROPHONE_MUTE_STATE = 'microphone:mute-state';
 
 // STT Configuration types
 export enum SttProviderType {

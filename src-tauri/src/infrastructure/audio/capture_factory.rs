@@ -44,4 +44,3 @@ pub fn create_output_audio_capture_for_device(
         return Ok(Box::new(capture));
     }
 }
-

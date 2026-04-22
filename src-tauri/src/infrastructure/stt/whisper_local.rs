@@ -10,7 +10,7 @@ mod whisper_impl {
     use super::*;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
+    use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
     pub struct WhisperLocalProvider {
         config: Option<SttConfig>,
@@ -32,8 +32,9 @@ mod whisper_impl {
         }
 
         fn get_model_path(model_name: &str) -> SttResult<PathBuf> {
-            let app_data_dir = dirs::data_dir()
-                .ok_or_else(|| SttError::Configuration("Cannot determine app data directory".to_string()))?;
+            let app_data_dir = dirs::data_dir().ok_or_else(|| {
+                SttError::Configuration("Cannot determine app data directory".to_string())
+            })?;
 
             let models_dir = app_data_dir.join("HackInterview").join("models");
             let model_file = models_dir.join(format!("ggml-{}.bin", model_name));
@@ -64,15 +65,15 @@ mod whisper_impl {
         async fn initialize(&mut self, config: &SttConfig) -> SttResult<()> {
             log::info!("WhisperLocalProvider: Initializing");
 
-            let model_name = config
-                .model
-                .clone()
-                .unwrap_or_else(|| "base".to_string());
+            let model_name = config.model.clone().unwrap_or_else(|| "base".to_string());
 
             log::info!("WhisperLocalProvider: Using model: {}", model_name);
 
             let model_path = Self::get_model_path(&model_name)?;
-            log::info!("WhisperLocalProvider: Loading model from: {}", model_path.display());
+            log::info!(
+                "WhisperLocalProvider: Loading model from: {}",
+                model_path.display()
+            );
 
             let model_path_clone = model_path.clone();
             let whisper_ctx = tokio::task::spawn_blocking(move || {
@@ -81,7 +82,9 @@ mod whisper_impl {
                     .map_err(|e| SttError::Internal(format!("Failed to load Whisper model: {}", e)))
             })
             .await
-            .map_err(|e| SttError::Internal(format!("Failed to spawn model loading task: {}", e)))??;
+            .map_err(|e| {
+                SttError::Internal(format!("Failed to spawn model loading task: {}", e))
+            })??;
 
             self.whisper_ctx = Some(Arc::new(whisper_ctx));
             self.config = Some(config.clone());
@@ -138,21 +141,30 @@ mod whisper_impl {
             }
 
             let duration_sec = self.audio_buffer.len() as f32 / 16000.0;
-            log::info!("WhisperLocalProvider: Processing {:.2}s of audio ({} samples)",
-                duration_sec, self.audio_buffer.len());
+            log::info!(
+                "WhisperLocalProvider: Processing {:.2}s of audio ({} samples)",
+                duration_sec,
+                self.audio_buffer.len()
+            );
 
-            let ctx = self.whisper_ctx.as_ref()
+            let ctx = self
+                .whisper_ctx
+                .as_ref()
                 .ok_or_else(|| SttError::Internal("Whisper context not available".to_string()))?
                 .clone();
 
-            let callback = self.on_final_callback.as_ref()
+            let callback = self
+                .on_final_callback
+                .as_ref()
                 .ok_or_else(|| SttError::Internal("Final callback not set".to_string()))?
                 .clone();
 
             let audio_f32 = Self::convert_audio_to_f32(&self.audio_buffer);
             self.audio_buffer.clear();
 
-            let language = self.config.as_ref()
+            let language = self
+                .config
+                .as_ref()
                 .and_then(|c| Some(c.language.clone()))
                 .unwrap_or_else(|| "ru".to_string());
 
@@ -167,13 +179,16 @@ mod whisper_impl {
                 params.set_print_realtime(false);
                 params.set_n_threads(num_cpus::get() as i32);
 
-                let mut state = ctx.create_state()
-                    .map_err(|e| SttError::Internal(format!("Failed to create Whisper state: {}", e)))?;
+                let mut state = ctx.create_state().map_err(|e| {
+                    SttError::Internal(format!("Failed to create Whisper state: {}", e))
+                })?;
 
-                state.full(params, &audio_f32)
+                state
+                    .full(params, &audio_f32)
                     .map_err(|e| SttError::Processing(format!("Transcription failed: {}", e)))?;
 
-                let num_segments = state.full_n_segments()
+                let num_segments = state
+                    .full_n_segments()
                     .map_err(|e| SttError::Processing(format!("Failed to get segments: {}", e)))?;
 
                 let mut full_text = String::new();
@@ -195,8 +210,11 @@ mod whisper_impl {
             .map_err(|e| SttError::Internal(format!("Transcription task failed: {}", e)))??;
 
             let elapsed = start_time.elapsed();
-            log::info!("WhisperLocalProvider: Transcription completed in {:.2}s: '{}'",
-                elapsed.as_secs_f32(), transcription_result);
+            log::info!(
+                "WhisperLocalProvider: Transcription completed in {:.2}s: '{}'",
+                elapsed.as_secs_f32(),
+                transcription_result
+            );
 
             let transcription = Transcription {
                 text: transcription_result,
@@ -207,7 +225,7 @@ mod whisper_impl {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_else(|_| std::time::Duration::from_secs(0))
                     .as_millis() as i64,
-                start: 0.0, // Whisper Local не предоставляет start время
+                start: 0.0,    // Whisper Local не предоставляет start время
                 duration: 0.0, // Whisper Local не предоставляет duration
             };
 

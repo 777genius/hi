@@ -13,8 +13,13 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "Открыть", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "settings", "Настройки", true, None::<&str>)?;
     let profile_item = MenuItem::with_id(app, "profile", "Профиль", true, None::<&str>)?;
-    let check_updates_item =
-        MenuItem::with_id(app, "check_updates", "Проверить обновления", true, None::<&str>)?;
+    let check_updates_item = MenuItem::with_id(
+        app,
+        "check_updates",
+        "Проверить обновления",
+        true,
+        None::<&str>,
+    )?;
     let separator = tauri::menu::PredefinedMenuItem::separator(app)?;
     let quit_item = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
 

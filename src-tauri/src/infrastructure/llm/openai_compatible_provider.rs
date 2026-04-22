@@ -3,7 +3,9 @@ use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde_json::Value;
 
-use crate::domain::{LlmDeltaCallback, LlmError, LlmProvider, LlmResult, LlmRuntimeConfig, LlmStreamRequest};
+use crate::domain::{
+    LlmDeltaCallback, LlmError, LlmProvider, LlmResult, LlmRuntimeConfig, LlmStreamRequest,
+};
 use crate::infrastructure::ai::sse::SseDecoder;
 
 /// OpenAI-compatible Chat Completions provider (SSE streaming).
@@ -215,4 +217,3 @@ mod tests {
         assert_eq!(extract_error_message(&json), Some("bad key".to_string()));
     }
 }
-

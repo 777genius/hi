@@ -107,9 +107,8 @@ mod tests {
     #[test]
     fn parses_single_event_lf() {
         let mut dec = SseDecoder::new();
-        let events = dec.push(
-            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n",
-        );
+        let events =
+            dec.push(b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event.as_deref(), Some("content_block_delta"));
         assert_eq!(events[0].data, "{\"type\":\"content_block_delta\"}");
@@ -118,9 +117,7 @@ mod tests {
     #[test]
     fn parses_single_event_crlf() {
         let mut dec = SseDecoder::new();
-        let events = dec.push(
-            b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
-        );
+        let events = dec.push(b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event.as_deref(), Some("message_stop"));
         assert_eq!(events[0].data, "{\"type\":\"message_stop\"}");
@@ -129,9 +126,7 @@ mod tests {
     #[test]
     fn parses_multiple_events_in_one_chunk() {
         let mut dec = SseDecoder::new();
-        let events = dec.push(
-            b"event: a\ndata: 1\n\nevent: b\ndata: 2\n\n",
-        );
+        let events = dec.push(b"event: a\ndata: 1\n\nevent: b\ndata: 2\n\n");
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event.as_deref(), Some("a"));
         assert_eq!(events[0].data, "1");
@@ -150,4 +145,3 @@ mod tests {
         assert_eq!(b[0].data, "hello");
     }
 }
-

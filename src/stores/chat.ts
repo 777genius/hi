@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isTauriAvailable } from '../utils/tauri';
@@ -7,12 +7,14 @@ import {
   EVENT_HAIKU_DELTA,
   EVENT_HAIKU_DONE,
   EVENT_HAIKU_ERROR,
+  EVENT_MICROPHONE_MUTE_STATE,
   EVENT_TRANSCRIPTION_FINAL,
   EVENT_TRANSCRIPTION_PARTIAL,
   type FinalTranscriptionPayload,
   type HaikuDeltaPayload,
   type HaikuDonePayload,
   type HaikuErrorPayload,
+  type MicrophoneMuteStatePayload,
   type PartialTranscriptionPayload,
 } from '../types';
 import { mergeTranscriptText } from '../utils/transcriptionText';
@@ -135,6 +137,8 @@ export const useChatStore = defineStore('chat', () => {
   const systemAudioLevel = ref<number>(0);
   const micAudioLevel = ref<number>(0);
   const micDominantUntilMs = ref<number>(0);
+  const microphoneMuteSupported = ref<boolean>(false);
+  const microphoneMuteSource = ref<string>('unknown');
 
   const isHaikuStreaming = computed(() => Object.keys(activeHaikuRequests.value).length > 0);
   const ignoredHaikuRequestIds = ref<Record<string, true>>({});
@@ -927,19 +931,36 @@ export const useChatStore = defineStore('chat', () => {
     liveMicSinceMs.value = 0;
   }
 
-  async function setMicrophoneEnabled(enabled: boolean): Promise<void> {
-    microphoneEnabled.value = !!enabled;
+  async function waitForUiPaint(): Promise<void> {
+    await nextTick();
+    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    });
+  }
 
-    // Сразу чистим live-буферы, чтобы UI не "висел" на последнем стриминге.
-    if (!microphoneEnabled.value) {
+  async function setMicrophoneEnabled(enabled: boolean): Promise<void> {
+    const targetEnabled = !!enabled;
+    microphoneEnabled.value = targetEnabled;
+
+    if (!targetEnabled) {
       clearLiveMicBuffers();
     }
 
     if (!isTauriAvailable()) return;
     try {
-      await invoke('set_microphone_transcription_enabled', { enabled: microphoneEnabled.value });
+      // Даём UI шанс отрисовать новый state до нативного IPC/AppleScript,
+      // иначе кнопка визуально "запаздывает", хотя state уже сменили.
+      await waitForUiPaint();
+      const payload = await invoke<MicrophoneMuteStatePayload>('set_microphone_muted', {
+        muted: !targetEnabled,
+      });
+      applyMicrophoneMuteState(payload);
     } catch (err) {
-      console.warn('Failed to toggle microphone transcription:', err);
+      microphoneEnabled.value = !targetEnabled;
+      console.warn('Failed to toggle system microphone mute:', err);
     }
   }
 
@@ -954,6 +975,29 @@ export const useChatStore = defineStore('chat', () => {
   let unlistenMicFinal: UnlistenFn | null = null;
   let unlistenSystemLevel: UnlistenFn | null = null;
   let unlistenMicLevel: UnlistenFn | null = null;
+  let unlistenMicMuteState: UnlistenFn | null = null;
+
+  function applyMicrophoneMuteState(payload: MicrophoneMuteStatePayload | null | undefined): void {
+    const muted = !!payload?.muted;
+    microphoneEnabled.value = !muted;
+    microphoneMuteSupported.value = !!payload?.supported;
+    microphoneMuteSource.value = String(payload?.source ?? 'unknown');
+
+    if (muted) {
+      clearLiveMicBuffers();
+    }
+  }
+
+  async function syncMicrophoneMuteState(): Promise<void> {
+    if (!isTauriAvailable()) return;
+    try {
+      const payload = await invoke<MicrophoneMuteStatePayload>('get_microphone_mute_state');
+      applyMicrophoneMuteState(payload);
+      await invoke('set_microphone_transcription_enabled', { enabled: !payload.muted });
+    } catch (err) {
+      console.warn('Failed to sync microphone mute state:', err);
+    }
+  }
 
   async function initialize(): Promise<void> {
     if (!isTauriAvailable()) return;
@@ -964,7 +1008,8 @@ export const useChatStore = defineStore('chat', () => {
       unlistenMicPartial ||
       unlistenMicFinal ||
       unlistenSystemLevel ||
-      unlistenMicLevel
+      unlistenMicLevel ||
+      unlistenMicMuteState
     ) {
       return;
     }
@@ -988,6 +1033,10 @@ export const useChatStore = defineStore('chat', () => {
       const level = Number(event.payload?.level ?? 0);
       micAudioLevel.value = Number.isFinite(level) ? Math.max(0, Math.min(1, level)) : 0;
       updateMicDominance(Date.now());
+    });
+
+    unlistenMicMuteState = await listen<MicrophoneMuteStatePayload>(EVENT_MICROPHONE_MUTE_STATE, (event) => {
+      applyMicrophoneMuteState(event.payload);
     });
 
     unlistenDelta = await listen<HaikuDeltaPayload>(EVENT_HAIKU_DELTA, (event) => {
@@ -1122,6 +1171,8 @@ export const useChatStore = defineStore('chat', () => {
         micCurrentUtteranceStart.value = -1;
       }
     );
+
+    await syncMicrophoneMuteState();
   }
 
   function cleanup(): void {
@@ -1132,6 +1183,7 @@ export const useChatStore = defineStore('chat', () => {
     if (unlistenMicFinal) unlistenMicFinal();
     if (unlistenSystemLevel) unlistenSystemLevel();
     if (unlistenMicLevel) unlistenMicLevel();
+    if (unlistenMicMuteState) unlistenMicMuteState();
     unlistenDelta = null;
     unlistenDone = null;
     unlistenError = null;
@@ -1139,6 +1191,7 @@ export const useChatStore = defineStore('chat', () => {
     unlistenMicFinal = null;
     unlistenSystemLevel = null;
     unlistenMicLevel = null;
+    unlistenMicMuteState = null;
   }
 
   function clearChatOutgoing(): void {
@@ -1176,8 +1229,11 @@ export const useChatStore = defineStore('chat', () => {
     sttMessages,
     haikuMessages,
     microphoneEnabled,
+    microphoneMuteSupported,
+    microphoneMuteSource,
     setMicrophoneEnabled,
     toggleMicrophoneEnabled,
+    syncMicrophoneMuteState,
 
     selectedCount,
     hasSelection,
@@ -1219,4 +1275,3 @@ export const useChatStore = defineStore('chat', () => {
     cleanup,
   };
 });
-

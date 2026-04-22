@@ -12,6 +12,7 @@ pub const EVENT_AUDIO_SPECTRUM: &str = "audio:spectrum";
 pub const EVENT_MICROPHONE_TEST_LEVEL: &str = "microphone_test:level";
 pub const EVENT_SYSTEM_AUDIO_TEST_LEVEL: &str = "system_audio_test:level";
 pub const EVENT_MICROPHONE_AUDIO_LEVEL: &str = "microphone:level";
+pub const EVENT_MICROPHONE_MUTE_STATE: &str = "microphone:mute-state";
 
 pub const EVENT_TRANSCRIPTION_ERROR: &str = "transcription:error";
 pub const EVENT_CONNECTION_QUALITY: &str = "connection:quality";
@@ -55,8 +56,8 @@ pub struct PartialTranscriptionPayload {
     /// Unix timestamp in milliseconds (epoch ms).
     pub timestamp: i64,
     pub is_segment_final: bool, // true когда сегмент финализирован (is_final=true в Deepgram)
-    pub start: f64, // start время utterance в секундах (от Deepgram)
-    pub duration: f64, // длительность utterance в секундах (от Deepgram)
+    pub start: f64,             // start время utterance в секундах (от Deepgram)
+    pub duration: f64,          // длительность utterance в секундах (от Deepgram)
 }
 
 impl PartialTranscriptionPayload {
@@ -136,6 +137,17 @@ pub struct MicrophoneTestLevelPayload {
 pub struct SystemAudioTestLevelPayload {
     /// Normalized audio level (0.0 - 1.0)
     pub level: f32,
+}
+
+/// Payload for OS microphone mute state updates
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicrophoneMuteStatePayload {
+    pub muted: bool,
+    pub supported: bool,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Payload for transcription error event

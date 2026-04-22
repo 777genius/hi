@@ -1,13 +1,13 @@
 use std::{
-    sync::{Arc, Mutex},
     sync::atomic::{AtomicBool, Ordering},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
-use tauri::{AppHandle, Emitter, Runtime};
-use tauri_plugin_updater::UpdaterExt;
 #[cfg(target_os = "windows")]
 use super::config_store::ConfigStore;
+use tauri::{AppHandle, Emitter, Runtime};
+use tauri_plugin_updater::UpdaterExt;
 
 /// Защита от двойного старта установки.
 ///
@@ -69,9 +69,7 @@ pub fn start_background_update_check<R: Runtime>(app: AppHandle<R>) {
 
 /// Проверяет наличие обновлений (без установки)
 /// Возвращает версию если доступна, None если обновлений нет
-pub async fn check_for_update<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<Option<UpdateInfo>, String> {
+pub async fn check_for_update<R: Runtime>(app: AppHandle<R>) -> Result<Option<UpdateInfo>, String> {
     let updater = app
         .updater_builder()
         .build()
@@ -104,9 +102,7 @@ pub async fn check_for_update<R: Runtime>(
 ///
 /// Важно: подтверждение делаем во frontend (наш UpdateDialog), поэтому тут
 /// не показываем системный диалог — иначе получится двойное подтверждение.
-pub async fn check_and_install_update<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<String, String> {
+pub async fn check_and_install_update<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
     let updater = app
         .updater_builder()
         .build()

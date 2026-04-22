@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 
-use crate::domain::{LlmDeltaCallback, LlmError, LlmProvider, LlmResult, LlmRuntimeConfig, LlmStreamRequest};
+use crate::domain::{
+    LlmDeltaCallback, LlmError, LlmProvider, LlmResult, LlmRuntimeConfig, LlmStreamRequest,
+};
 
 /// Backend provider placeholder.
 ///
@@ -50,4 +52,3 @@ impl LlmProvider for BackendLlmProvider {
         true
     }
 }
-

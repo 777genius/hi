@@ -36,7 +36,7 @@ export default defineConfig({
 
   server: {
     host: host || false,
-    port: Number(process.env.PORT || 1420),
+    port: Number(process.env.PORT || 1425),
     strictPort: true,
     hmr: host
       ? {

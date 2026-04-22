@@ -1,5 +1,9 @@
-use crate::domain::{LlmProvider, LlmProviderFactory, LlmProviderType, LlmResult, LlmRuntimeConfig};
-use crate::infrastructure::llm::{AnthropicLlmProvider, BackendLlmProvider, OpenAiCompatibleLlmProvider};
+use crate::domain::{
+    LlmProvider, LlmProviderFactory, LlmProviderType, LlmResult, LlmRuntimeConfig,
+};
+use crate::infrastructure::llm::{
+    AnthropicLlmProvider, BackendLlmProvider, OpenAiCompatibleLlmProvider,
+};
 
 /// Factory for creating LLM providers based on runtime configuration.
 pub struct DefaultLlmProviderFactory;
@@ -23,7 +27,9 @@ impl LlmProviderFactory for DefaultLlmProviderFactory {
         match config.provider {
             LlmProviderType::Anthropic => Ok(Box::new(AnthropicLlmProvider::new(config)?)),
 
-            LlmProviderType::OpenAiCompatible => Ok(Box::new(OpenAiCompatibleLlmProvider::new(config)?)),
+            LlmProviderType::OpenAiCompatible => {
+                Ok(Box::new(OpenAiCompatibleLlmProvider::new(config)?))
+            }
 
             LlmProviderType::Backend => Ok(Box::new(BackendLlmProvider::new(config)?)),
         }
@@ -61,4 +67,3 @@ mod tests {
         assert!(matches!(err, crate::domain::LlmError::Authentication(_)));
     }
 }
-

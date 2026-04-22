@@ -1,5 +1,5 @@
 use std::time::Duration;
-use webrtc_vad::{Vad, VadMode, SampleRate};
+use webrtc_vad::{SampleRate, Vad, VadMode};
 
 use crate::domain::{SttError, SttResult};
 
@@ -91,7 +91,9 @@ impl VadProcessor {
         let frame: Vec<i16> = self.buffer.drain(..FRAME_SIZE_SAMPLES).collect();
 
         // Run VAD detection
-        let is_speech = self.vad.is_voice_segment(&frame)
+        let is_speech = self
+            .vad
+            .is_voice_segment(&frame)
             .map_err(|_| SttError::Processing("VAD error".to_string()))?;
 
         if is_speech {
@@ -276,7 +278,8 @@ mod tests {
         let vad_quality = VadProcessor::new(Some(800), Some(VadMode::Quality)).unwrap();
         let vad_low_bitrate = VadProcessor::new(Some(800), Some(VadMode::LowBitrate)).unwrap();
         let vad_aggressive = VadProcessor::new(Some(800), Some(VadMode::Aggressive)).unwrap();
-        let vad_very_aggressive = VadProcessor::new(Some(800), Some(VadMode::VeryAggressive)).unwrap();
+        let vad_very_aggressive =
+            VadProcessor::new(Some(800), Some(VadMode::VeryAggressive)).unwrap();
 
         // Проверяем что все режимы создались успешно
         assert_eq!(vad_quality.timeout(), Duration::from_millis(800));

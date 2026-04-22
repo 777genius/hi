@@ -1,1 +1,0 @@
-export { LanguagesRepository } from "./languages";

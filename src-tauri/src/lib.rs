@@ -1,6 +1,6 @@
 // Clean Architecture layers
-pub mod domain;
 pub mod application;
+pub mod domain;
 pub mod infrastructure;
 mod presentation;
 
@@ -12,12 +12,12 @@ mod demo;
 #[macro_use]
 extern crate objc;
 
+use infrastructure::ConfigStore;
 use presentation::commands;
 use presentation::state::AppState;
-use tauri::{Emitter, Manager};
-use infrastructure::ConfigStore;
 #[cfg(target_os = "windows")]
 use std::time::Duration;
+use tauri::{Emitter, Manager};
 
 // Определяем базовый NSPanel класс для macOS (появление поверх fullscreen приложений)
 #[cfg(target_os = "macos")]
@@ -50,8 +50,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_shell::init())
-        ;
+        .plugin(tauri_plugin_shell::init());
 
     // Добавляем NSPanel плагин на macOS для появления поверх fullscreen приложений
     #[cfg(target_os = "macos")]
@@ -107,6 +106,9 @@ pub fn run() {
             commands::start_recording,
             commands::stop_recording,
             commands::set_microphone_transcription_enabled,
+            commands::get_microphone_mute_state,
+            commands::set_microphone_muted,
+            commands::toggle_microphone_muted,
             commands::get_recording_status,
             commands::toggle_window,
             commands::toggle_recording_with_window,
@@ -623,6 +625,13 @@ pub fn run() {
             if let Some(state) = app.try_state::<AppState>() {
                 state.start_vad_timeout_handler(app.handle().clone());
             }
+
+            // Локальный HTTP companion для проверки доступа с телефона по Wi‑Fi.
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::presentation::companion::start_test_server().await {
+                    log::error!("Failed to start companion test server: {}", e);
+                }
+            });
 
             // Запускаем фоновую проверку обновлений (каждые 6 часов)
             log::info!("Starting background update checker");

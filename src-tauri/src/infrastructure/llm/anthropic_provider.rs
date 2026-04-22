@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 
-use crate::domain::{LlmDeltaCallback, LlmError, LlmProvider, LlmResult, LlmRuntimeConfig, LlmStreamRequest};
+use crate::domain::{
+    LlmDeltaCallback, LlmError, LlmProvider, LlmResult, LlmRuntimeConfig, LlmStreamRequest,
+};
 
 /// Anthropic Messages API provider.
 pub struct AnthropicLlmProvider {
@@ -66,4 +68,3 @@ impl LlmProvider for AnthropicLlmProvider {
         true
     }
 }
-

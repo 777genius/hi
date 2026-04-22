@@ -5,7 +5,7 @@
     "identifier": "com.voicetotext.app",
     "build": {
         "frontendDist": "../dist",
-        "devUrl": "http://localhost:1420",
+        "devUrl": "http://localhost:1425",
         "beforeDevCommand": "pnpm dev",
         "beforeBuildCommand": "pnpm build"
     },
@@ -16,7 +16,7 @@
                 "title": "HackInterviewAI",
                 "width": 960,
                 "height": 720,
-                "minWidth": 640,
+                "minWidth": 250,
                 "minHeight": 480,
                 "maxWidth": 1400,
                 "maxHeight": 1000,

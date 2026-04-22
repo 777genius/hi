@@ -5,7 +5,9 @@ use rubato::{
 use screencapturekit::prelude::*;
 use std::sync::{Arc, Mutex};
 
-use crate::domain::{AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, AudioError, AudioResult};
+use crate::domain::{
+    AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, AudioError, AudioResult,
+};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 const TARGET_CHANNELS: u16 = 1;
@@ -231,8 +233,7 @@ impl ResamplePipeline {
                 };
                 sum += v;
             }
-            self.native_mono
-                .push(sum / per_buf_samples.len() as f32);
+            self.native_mono.push(sum / per_buf_samples.len() as f32);
         }
     }
 
@@ -283,11 +284,9 @@ impl AudioCapture for MacosOutputAudioCapture {
         let content = SCShareableContent::get()
             .map_err(|e| AudioError::AccessDenied(format!("ScreenCaptureKit unavailable: {e}")))?;
 
-        let display = content
-            .displays()
-            .into_iter()
-            .next()
-            .ok_or_else(|| AudioError::DeviceNotFound("No displays found for capture".to_string()))?;
+        let display = content.displays().into_iter().next().ok_or_else(|| {
+            AudioError::DeviceNotFound("No displays found for capture".to_string())
+        })?;
 
         let filter = SCContentFilter::create()
             .with_display(&display)
@@ -367,9 +366,9 @@ impl AudioCapture for MacosOutputAudioCapture {
             ));
         }
 
-        stream
-            .start_capture()
-            .map_err(|e| AudioError::Capture(format!("Failed to start ScreenCaptureKit capture: {e}")))?;
+        stream.start_capture().map_err(|e| {
+            AudioError::Capture(format!("Failed to start ScreenCaptureKit capture: {e}"))
+        })?;
 
         self.stream = Some(stream);
         self.is_capturing = true;
@@ -398,4 +397,3 @@ impl AudioCapture for MacosOutputAudioCapture {
         self.audio_config
     }
 }
-

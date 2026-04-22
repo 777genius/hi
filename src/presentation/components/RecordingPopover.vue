@@ -61,6 +61,7 @@ const showUpdateDialog = ref(false);
 const appVersion = ref('');
 const glowColor = ref<'blue' | 'red' | null>(null);
 const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+const microphoneMuteHotkeyLabel = computed(() => (isMac ? 'Cmd+Shift+M' : 'Ctrl+Shift+M'));
 
 const audioPermissions = useAudioPermissions();
 
@@ -718,6 +719,7 @@ onMounted(async () => {
   unlistenWindowShown = await listen(EVENT_RECORDING_WINDOW_SHOWN, async () => {
     void auth.initialize({ silent: true });
     void appConfigStore.refresh();
+    void chatStore.syncMicrophoneMuteState();
 
     // Если UI рассинхронизировался (например окно было скрыто и JS "заморозили"),
     // сначала сверяемся с backend: он источник правды по статусу записи.
@@ -1260,6 +1262,7 @@ const onChatMouseDown = (e: MouseEvent) => {
             :class="{
               incoming: msg.role === 'incoming',
               outgoing: msg.role === 'outgoing',
+              'assistant-response': msg.kind === 'haiku',
               prompt: msg.kind === 'prompt',
               anchor:
                 chatStore.anchorMode === 'fixed' &&
@@ -1410,7 +1413,12 @@ const onChatMouseDown = (e: MouseEvent) => {
       <!-- Controls -->
       <div class="controls">
         <div class="controls-center">
-          <v-tooltip :text="chatStore.microphoneEnabled ? 'Выключить микрофон' : 'Включить микрофон'" location="top">
+          <v-tooltip
+            :text="chatStore.microphoneEnabled
+              ? `Замьютить микрофон (${microphoneMuteHotkeyLabel})`
+              : `Размьютить микрофон (${microphoneMuteHotkeyLabel})`"
+            location="top"
+          >
             <template #activator="{ props: tp }">
               <button
                 v-bind="tp"
@@ -2021,6 +2029,15 @@ const onChatMouseDown = (e: MouseEvent) => {
   background: rgba(59, 130, 246, 0.16);
   border-color: rgba(59, 130, 246, 0.25);
   color: var(--color-text);
+}
+
+.chat-row.assistant-response .chat-bubble {
+  width: calc(100% - 18px);
+  max-width: calc(100% - 18px);
+}
+
+.chat-row.assistant-response .chat-actions {
+  right: 10px;
 }
 
 .chat-row.outgoing.prompt .chat-bubble {
@@ -2946,6 +2963,197 @@ const onChatMouseDown = (e: MouseEvent) => {
   align-items: center;
   gap: 4px;
   min-width: 0;
+}
+
+@media (max-width: 560px) {
+  .popover-content {
+    padding: 6px;
+  }
+
+  .header {
+    padding: 6px;
+  }
+
+  .header-right {
+    gap: 6px;
+  }
+
+  .chat-scroll {
+    padding: 6px 4px 8px 2px;
+    gap: 6px;
+  }
+
+  .chat-row {
+    gap: 4px;
+  }
+
+  .chat-bubble {
+    padding: 8px 9px 8px 8px;
+  }
+
+  .chat-row.outgoing .chat-bubble {
+    width: calc(100% - 16px);
+  }
+
+  .chat-row.assistant-response .chat-bubble {
+    width: calc(100% - 6px);
+    max-width: calc(100% - 6px);
+  }
+
+  .chat-row.outgoing .chat-actions {
+    right: calc(100% - 10px);
+  }
+
+  .chat-row.assistant-response .chat-actions {
+    right: 6px;
+  }
+
+  .chat-markdown :deep(ul),
+  .chat-markdown :deep(ol) {
+    padding-left: 16px;
+  }
+
+  .chat-markdown :deep(.code-block pre),
+  .chat-text-highlighted :deep(.shiki) {
+    padding: 10px 12px;
+  }
+
+  .controls-center,
+  .controls-right {
+    gap: 8px;
+  }
+
+  .controls-right {
+    left: 6px;
+  }
+
+  .haiku-button,
+  .mic-toggle-button,
+  .controls-right .selection-clear-button,
+  .controls-right .context-clear-button,
+  .controls-right .history-clear-button {
+    width: 42px;
+    height: 42px;
+    border-radius: 10px;
+    font-size: 18px;
+  }
+
+  .haiku-spinner {
+    width: 28px;
+    height: 28px;
+  }
+
+  .record-button {
+    width: 58px;
+    height: 58px;
+    font-size: 24px;
+  }
+}
+
+@media (max-width: 420px) {
+  .popover-content {
+    padding: 4px;
+  }
+
+  .header {
+    padding: 4px;
+  }
+
+  .title {
+    font-size: 16px;
+  }
+
+  .app-version {
+    display: none;
+  }
+
+  .header-right {
+    gap: 2px;
+  }
+
+  .minimize-button,
+  .settings-button,
+  .profile-button {
+    font-size: 20px;
+    padding: 1px 4px;
+  }
+
+  .chat-scroll {
+    padding: 4px 2px 8px 0;
+  }
+
+  .chat-bubble {
+    padding: 8px;
+    border-radius: 10px;
+  }
+
+  .chat-row.assistant-response .chat-bubble {
+    width: calc(100% - 2px);
+    max-width: calc(100% - 2px);
+  }
+
+  .controls-center,
+  .controls-right {
+    gap: 6px;
+  }
+
+  .controls-right {
+    left: 4px;
+  }
+
+  .haiku-button,
+  .mic-toggle-button,
+  .controls-right .selection-clear-button,
+  .controls-right .context-clear-button,
+  .controls-right .history-clear-button {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    font-size: 17px;
+  }
+
+  .record-button {
+    width: 54px;
+    height: 54px;
+    font-size: 22px;
+  }
+
+  .ask-fab {
+    right: 12px;
+    bottom: 12px;
+    width: 46px;
+    height: 46px;
+    border-radius: 14px;
+    font-size: 20px;
+  }
+}
+
+@media (max-width: 340px) {
+  .controls-right {
+    display: block;
+    left: 4px;
+    width: 82px;
+    min-height: 82px;
+    transform: translateY(-50%);
+  }
+
+  .controls-right .selection-clear-wrapper {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+  }
+
+  .controls-right .context-clear-button {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+  }
+
+  .controls-right .history-clear-button {
+    position: absolute;
+    right: 0;
+    top: 0;
+  }
 }
 
 ::global(.theme-light) .prompt-button:hover,

@@ -48,11 +48,7 @@ impl SystemAudioCapture {
         let all_devices: Vec<String> = host
             .input_devices()
             .ok()
-            .map(|devices| {
-                devices
-                    .filter_map(|d| d.name().ok())
-                    .collect()
-            })
+            .map(|devices| devices.filter_map(|d| d.name().ok()).collect())
             .unwrap_or_default();
         log::debug!("Available input devices: {:?}", all_devices);
 
@@ -60,28 +56,32 @@ impl SystemAudioCapture {
         let device = if let Some(ref name) = device_name {
             log::info!("Looking for audio input device: {}", name);
 
-            host
-                .input_devices()
-                .map_err(|e| AudioError::DeviceNotFound(format!("Failed to enumerate devices: {}", e)))?
-                .find(|d| {
-                    d.name().ok().as_ref() == Some(name)
-                })
-                .ok_or_else(|| AudioError::DeviceNotFound(format!("Device '{}' not found. Available devices: {:?}", name, all_devices)))?
+            host.input_devices()
+                .map_err(|e| {
+                    AudioError::DeviceNotFound(format!("Failed to enumerate devices: {}", e))
+                })?
+                .find(|d| d.name().ok().as_ref() == Some(name))
+                .ok_or_else(|| {
+                    AudioError::DeviceNotFound(format!(
+                        "Device '{}' not found. Available devices: {:?}",
+                        name, all_devices
+                    ))
+                })?
         } else {
             log::info!("Using default audio input device");
 
-            host
-                .default_input_device()
-                .ok_or_else(|| AudioError::DeviceNotFound("No input device available".to_string()))?
+            host.default_input_device().ok_or_else(|| {
+                AudioError::DeviceNotFound("No input device available".to_string())
+            })?
         };
 
         let selected_device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
         log::info!("Using audio input device: {}", selected_device_name);
 
         // Check supported configs and choose best one
-        let supported_configs = device
-            .supported_input_configs()
-            .map_err(|e| AudioError::Configuration(format!("Failed to get supported configs: {}", e)))?;
+        let supported_configs = device.supported_input_configs().map_err(|e| {
+            AudioError::Configuration(format!("Failed to get supported configs: {}", e))
+        })?;
 
         let native_config = supported_configs
             .filter(|config| {
@@ -99,7 +99,9 @@ impl SystemAudioCapture {
                     .ok()?
                     .find(|c| c.sample_format() == SampleFormat::F32)
             })
-            .ok_or_else(|| AudioError::Configuration("No suitable f32 audio config found".to_string()))?;
+            .ok_or_else(|| {
+                AudioError::Configuration("No suitable f32 audio config found".to_string())
+            })?;
 
         log::info!(
             "Selected audio config: {} Hz, {} channels, {:?} format",
@@ -138,9 +140,7 @@ impl AudioCapture for SystemAudioCapture {
 
     async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
         if self.is_capturing {
-            return Err(AudioError::Capture(
-                "Already capturing audio".to_string(),
-            ));
+            return Err(AudioError::Capture("Already capturing audio".to_string()));
         }
 
         let native_sample_rate = self.native_config.sample_rate().0;
@@ -277,14 +277,22 @@ mod tests {
     #[test]
     fn test_f32_to_i16_edge_cases() {
         // Тест граничных случаев конвертации
-        let edge_cases = vec![-1.5, 1.5, -2.0, 2.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+        let edge_cases = vec![
+            -1.5,
+            1.5,
+            -2.0,
+            2.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
         let output = speech_audio::f32_to_i16(&edge_cases);
 
         // Значения должны быть clamped в диапазон [-1.0, 1.0]
         assert_eq!(output[0], -32767); // -1.5 clamped to -1.0
-        assert_eq!(output[1], 32767);  // 1.5 clamped to 1.0
+        assert_eq!(output[1], 32767); // 1.5 clamped to 1.0
         assert_eq!(output[2], -32767); // -2.0 clamped to -1.0
-        assert_eq!(output[3], 32767);  // 2.0 clamped to 1.0
+        assert_eq!(output[3], 32767); // 2.0 clamped to 1.0
     }
 
     #[test]

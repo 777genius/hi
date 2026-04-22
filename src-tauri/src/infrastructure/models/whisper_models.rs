@@ -1,6 +1,6 @@
-use std::path::PathBuf;
-use std::fs;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
 
 /// Информация о модели Whisper
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,44 +33,44 @@ pub const AVAILABLE_MODELS: &[(&str, &str, u64, f32, f32)] = &[
     (
         "tiny",
         "Самая быстрая модель, базовое качество",
-        75_000_000,      // ~75 MB
-        4.0,             // 4x быстрее base
-        0.6,             // 60% качества от base
+        75_000_000, // ~75 MB
+        4.0,        // 4x быстрее base
+        0.6,        // 60% качества от base
     ),
     (
         "base",
         "Хороший баланс скорости и качества",
-        142_000_000,     // ~142 MB
-        1.0,             // базовая скорость
-        1.0,             // базовое качество
+        142_000_000, // ~142 MB
+        1.0,         // базовая скорость
+        1.0,         // базовое качество
     ),
     (
         "small",
         "Рекомендуется для большинства случаев",
-        466_000_000,     // ~466 MB
-        0.5,             // 2x медленнее base
-        1.4,             // 140% качества от base
+        466_000_000, // ~466 MB
+        0.5,         // 2x медленнее base
+        1.4,         // 140% качества от base
     ),
     (
         "medium",
         "Очень высокое качество, медленнее",
-        1_500_000_000,   // ~1.5 GB
-        0.25,            // 4x медленнее base
-        1.7,             // 170% качества от base
+        1_500_000_000, // ~1.5 GB
+        0.25,          // 4x медленнее base
+        1.7,           // 170% качества от base
     ),
     (
         "large",
         "Максимальное качество, очень медленно",
-        2_900_000_000,   // ~2.9 GB
-        0.125,           // 8x медленнее base
-        2.0,             // 200% качества от base
+        2_900_000_000, // ~2.9 GB
+        0.125,         // 8x медленнее base
+        2.0,           // 200% качества от base
     ),
 ];
 
 /// Получает путь к директории хранения моделей
 pub fn get_models_dir() -> anyhow::Result<PathBuf> {
-    let app_data_dir = dirs::data_dir()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine app data directory"))?;
+    let app_data_dir =
+        dirs::data_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine app data directory"))?;
 
     let models_dir = app_data_dir.join("HackInterview").join("models");
 
@@ -150,10 +150,7 @@ fn format_size(bytes: u64) -> String {
 ///
 /// Использует streaming для экономии памяти и поддержки больших файлов.
 /// Callback вызывается для отслеживания прогресса (downloaded_bytes, total_bytes).
-pub async fn download_model<F>(
-    model_name: &str,
-    progress_callback: F,
-) -> anyhow::Result<PathBuf>
+pub async fn download_model<F>(model_name: &str, progress_callback: F) -> anyhow::Result<PathBuf>
 where
     F: Fn(u64, u64) + Send + Sync,
 {
@@ -164,7 +161,11 @@ where
 
     let model_path = get_model_path(model_name)?;
 
-    log::info!("Downloading model '{}' from {}", model_name, model_info.download_url);
+    log::info!(
+        "Downloading model '{}' from {}",
+        model_name,
+        model_info.download_url
+    );
     log::info!("Target path: {}", model_path.display());
 
     // Создаем директорию если не существует
@@ -203,7 +204,11 @@ where
     // Переименовываем временный файл в финальный
     fs::rename(&temp_path, &model_path)?;
 
-    log::info!("Model '{}' downloaded successfully to {}", model_name, model_path.display());
+    log::info!(
+        "Model '{}' downloaded successfully to {}",
+        model_name,
+        model_path.display()
+    );
     Ok(model_path)
 }
 

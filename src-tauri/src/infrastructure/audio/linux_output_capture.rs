@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::domain::{AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, AudioError, AudioResult};
+use crate::domain::{
+    AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, AudioError, AudioResult,
+};
 
 /// Linux system output (speaker) capture using PipeWire.
 ///
@@ -36,7 +38,10 @@ impl LinuxOutputAudioCapture {
 impl AudioCapture for LinuxOutputAudioCapture {
     async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
         self.audio_config = config;
-        log::info!("LinuxOutputAudioCapture initialized with config: {:?}", config);
+        log::info!(
+            "LinuxOutputAudioCapture initialized with config: {:?}",
+            config
+        );
         Ok(())
     }
 
@@ -92,21 +97,13 @@ impl AudioCapture for LinuxOutputAudioCapture {
         }
 
         // Signal stop.
-        let tx = self
-            .stop_tx
-            .lock()
-            .ok()
-            .and_then(|mut g| g.take());
+        let tx = self.stop_tx.lock().ok().and_then(|mut g| g.take());
         if let Some(tx) = tx {
             let _ = tx.send(StopMessage);
         }
 
         // Join thread.
-        let handle = self
-            .thread_handle
-            .lock()
-            .ok()
-            .and_then(|mut g| g.take());
+        let handle = self.thread_handle.lock().ok().and_then(|mut g| g.take());
         if let Some(handle) = handle {
             let _ = handle.join();
         }
@@ -284,4 +281,3 @@ fn pipewire_thread(
     // Run until stop signal.
     mainloop.run();
 }
-

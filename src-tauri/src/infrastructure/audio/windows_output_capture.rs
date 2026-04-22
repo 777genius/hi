@@ -66,12 +66,16 @@ impl WindowsOutputAudioCapture {
                 })?
         } else {
             log::info!("Using default audio output device");
-            host.default_output_device()
-                .ok_or_else(|| AudioError::DeviceNotFound("No output device available".to_string()))?
+            host.default_output_device().ok_or_else(|| {
+                AudioError::DeviceNotFound("No output device available".to_string())
+            })?
         };
 
         let selected_device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
-        log::info!("Using audio output device (loopback): {}", selected_device_name);
+        log::info!(
+            "Using audio output device (loopback): {}",
+            selected_device_name
+        );
 
         // Choose a config for `build_input_stream` (loopback).
         //
@@ -109,7 +113,9 @@ impl WindowsOutputAudioCapture {
                 }
             }
 
-            best.ok_or_else(|| AudioError::Configuration("No suitable audio config found".to_string()))?
+            best.ok_or_else(|| {
+                AudioError::Configuration("No suitable audio config found".to_string())
+            })?
         };
 
         log::info!(
@@ -139,7 +145,10 @@ unsafe impl Sync for WindowsOutputAudioCapture {}
 impl AudioCapture for WindowsOutputAudioCapture {
     async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
         self.audio_config = config;
-        log::info!("WindowsOutputAudioCapture initialized with config: {:?}", config);
+        log::info!(
+            "WindowsOutputAudioCapture initialized with config: {:?}",
+            config
+        );
         Ok(())
     }
 
@@ -196,7 +205,9 @@ impl AudioCapture for WindowsOutputAudioCapture {
                     |err| log::error!("Audio stream error: {}", err),
                     None,
                 )
-                .map_err(|e| AudioError::Capture(format!("Failed to build loopback stream: {}", e)))?,
+                .map_err(|e| {
+                    AudioError::Capture(format!("Failed to build loopback stream: {}", e))
+                })?,
             SampleFormat::I16 => self
                 .device
                 .build_input_stream(
@@ -221,7 +232,9 @@ impl AudioCapture for WindowsOutputAudioCapture {
                     |err| log::error!("Audio stream error: {}", err),
                     None,
                 )
-                .map_err(|e| AudioError::Capture(format!("Failed to build loopback stream: {}", e)))?,
+                .map_err(|e| {
+                    AudioError::Capture(format!("Failed to build loopback stream: {}", e))
+                })?,
             SampleFormat::I32 => self
                 .device
                 .build_input_stream(
@@ -246,7 +259,9 @@ impl AudioCapture for WindowsOutputAudioCapture {
                     |err| log::error!("Audio stream error: {}", err),
                     None,
                 )
-                .map_err(|e| AudioError::Capture(format!("Failed to build loopback stream: {}", e)))?,
+                .map_err(|e| {
+                    AudioError::Capture(format!("Failed to build loopback stream: {}", e))
+                })?,
             SampleFormat::U16 => self
                 .device
                 .build_input_stream(
@@ -271,7 +286,9 @@ impl AudioCapture for WindowsOutputAudioCapture {
                     |err| log::error!("Audio stream error: {}", err),
                     None,
                 )
-                .map_err(|e| AudioError::Capture(format!("Failed to build loopback stream: {}", e)))?,
+                .map_err(|e| {
+                    AudioError::Capture(format!("Failed to build loopback stream: {}", e))
+                })?,
             other => {
                 return Err(AudioError::Configuration(format!(
                     "Unsupported sample format for loopback: {:?}",
@@ -312,4 +329,3 @@ impl AudioCapture for WindowsOutputAudioCapture {
         self.audio_config
     }
 }
-

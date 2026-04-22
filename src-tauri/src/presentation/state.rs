@@ -1,17 +1,16 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use tokio::sync::RwLock;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::RwLock;
 
 use crate::application::TranscriptionService;
-use crate::domain::{AppConfig, Transcription, AudioCapture, UiPreferences};
+use crate::domain::{AppConfig, AudioCapture, Transcription, UiPreferences};
 use crate::infrastructure::{
     audio::{
-        create_default_output_audio_capture, create_output_audio_capture_for_device, VadCaptureWrapper,
-        VadProcessor,
+        create_default_output_audio_capture, create_output_audio_capture_for_device,
+        VadCaptureWrapper, VadProcessor,
     },
-    AuthSession, AuthStore, AuthStoreData, AuthUser, ConfigStore,
-    DefaultSttProviderFactory,
+    AuthSession, AuthStore, AuthStoreData, AuthUser, ConfigStore, DefaultSttProviderFactory,
 };
 
 /// State for microphone testing
@@ -132,12 +131,16 @@ pub struct AppState {
     /// Включена ли параллельная транскрибация микрофона.
     /// Управляется из UI (кнопкой рядом с Haiku).
     pub microphone_transcription_enabled: AtomicBool,
+
+    /// Последняя ненулевая input volume для восстановления после OS mute.
+    pub microphone_restore_input_volume: Arc<RwLock<Option<u32>>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         // Initialize audio capture (system output by default).
-        let capture_result: Result<Box<dyn AudioCapture>, _> = create_default_output_audio_capture();
+        let capture_result: Result<Box<dyn AudioCapture>, _> =
+            create_default_output_audio_capture();
 
         let raw_capture = match capture_result {
             Ok(capture) => capture,
@@ -146,7 +149,10 @@ impl AppState {
                 // Fallback to mock if no audio device
                 let mock = crate::infrastructure::audio::MockAudioCapture::new();
                 let stt_factory = Arc::new(DefaultSttProviderFactory::new());
-                let service = Arc::new(TranscriptionService::new(Box::new(mock), stt_factory.clone()));
+                let service = Arc::new(TranscriptionService::new(
+                    Box::new(mock),
+                    stt_factory.clone(),
+                ));
                 let mic_service = Arc::new(TranscriptionService::new(
                     Box::new(crate::infrastructure::audio::MockAudioCapture::new()),
                     stt_factory,
@@ -183,6 +189,7 @@ impl AppState {
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
                     microphone_transcription_enabled: AtomicBool::new(true),
+                    microphone_restore_input_volume: Arc::new(RwLock::new(None)),
                 };
             }
         };
@@ -209,8 +216,7 @@ impl AppState {
                         }
                     };
 
-                let mic_service =
-                    Arc::new(TranscriptionService::new(mic_capture, stt_factory));
+                let mic_service = Arc::new(TranscriptionService::new(mic_capture, stt_factory));
 
                 // Создаем dummy channel для VAD (не будет использоваться без VAD)
                 let (_vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -243,6 +249,7 @@ impl AppState {
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
                     microphone_transcription_enabled: AtomicBool::new(true),
+                    microphone_restore_input_volume: Arc::new(RwLock::new(None)),
                 };
             }
         };
@@ -262,14 +269,19 @@ impl AppState {
         let audio_capture = Box::new(vad_wrapper);
         let stt_factory = Arc::new(DefaultSttProviderFactory::new());
 
-        let transcription_service =
-            Arc::new(TranscriptionService::new(audio_capture, stt_factory.clone()));
+        let transcription_service = Arc::new(TranscriptionService::new(
+            audio_capture,
+            stt_factory.clone(),
+        ));
 
         let mic_capture: Box<dyn AudioCapture> =
             match crate::infrastructure::audio::SystemAudioCapture::new() {
                 Ok(c) => Box::new(c),
                 Err(e) => {
-                    log::error!("Failed to initialize microphone capture: {}. Using mock.", e);
+                    log::error!(
+                        "Failed to initialize microphone capture: {}. Using mock.",
+                        e
+                    );
                     Box::new(crate::infrastructure::audio::MockAudioCapture::new())
                 }
             };
@@ -277,8 +289,10 @@ impl AppState {
         let microphone_transcription_service =
             Arc::new(TranscriptionService::new(mic_capture, stt_factory));
 
-        log::info!("AppState initialized with audio capture + VAD (timeout: {}ms)",
-            app_config.vad_silence_timeout_ms);
+        log::info!(
+            "AppState initialized with audio capture + VAD (timeout: {}ms)",
+            app_config.vad_silence_timeout_ms
+        );
 
         Self {
             transcription_service,
@@ -308,6 +322,7 @@ impl AppState {
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
             microphone_transcription_enabled: AtomicBool::new(true),
+            microphone_restore_input_volume: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -336,15 +351,31 @@ impl AppState {
         if let Err(e) = ConfigStore::save_config(&config).await {
             log::warn!("Failed to persist STT config token: {}", e);
         }
-        if let Err(e) = self.transcription_service.update_config(config.clone()).await {
+        if let Err(e) = self
+            .transcription_service
+            .update_config(config.clone())
+            .await
+        {
             log::warn!("Failed to update transcription service config token: {}", e);
         }
-        if let Err(e) = self.microphone_transcription_service.update_config(config).await {
-            log::warn!("Failed to update microphone transcription config token: {}", e);
+        if let Err(e) = self
+            .microphone_transcription_service
+            .update_config(config)
+            .await
+        {
+            log::warn!(
+                "Failed to update microphone transcription config token: {}",
+                e
+            );
         }
     }
 
-    async fn emit_invalidation(app_handle: &AppHandle, topic: &str, revision: String, source_id: Option<String>) {
+    async fn emit_invalidation(
+        app_handle: &AppHandle,
+        topic: &str,
+        revision: String,
+        source_id: Option<String>,
+    ) {
         let _ = app_handle.emit(
             crate::presentation::events::EVENT_STATE_SYNC_INVALIDATION,
             crate::presentation::StateSyncInvalidationPayload {
@@ -476,7 +507,10 @@ impl AppState {
                     Ok(c) => c,
                     Err(e) => {
                         log::warn!("[auth-refresh] failed to build HTTP client: {}", e);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(
+                            ERROR_RETRY_DELAY_SECS,
+                        ))
+                        .await;
                         continue;
                     }
                 };
@@ -495,7 +529,10 @@ impl AppState {
                     Ok(r) => r,
                     Err(e) => {
                         log::warn!("[auth-refresh] network error: {}", e);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(
+                            ERROR_RETRY_DELAY_SECS,
+                        ))
+                        .await;
                         continue;
                     }
                 };
@@ -503,9 +540,7 @@ impl AppState {
                 if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     let access_ttl_ms = sess2.access_expires_at_ms - now_ms;
-                    let refresh_ttl_ms = sess2
-                        .refresh_expires_at_ms
-                        .map(|ms| ms - now_ms);
+                    let refresh_ttl_ms = sess2.refresh_expires_at_ms.map(|ms| ms - now_ms);
 
                     // Считываем ответ, чтобы логировать серверный код/сообщение (важно для диагностики).
                     let body_text = resp.text().await.unwrap_or_default();
@@ -513,7 +548,10 @@ impl AppState {
                         let v: serde_json::Value = serde_json::from_str(&body_text).ok()?;
                         // envelope: { error: { code, message } }
                         let err = v.get("error")?;
-                        let code = err.get("code").and_then(|x| x.as_str()).map(|s| s.to_string());
+                        let code = err
+                            .get("code")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string());
                         let msg = err
                             .get("message")
                             .and_then(|x| x.as_str())
@@ -529,8 +567,10 @@ impl AppState {
                     let became_stale = {
                         let store = auth_store_arc.read().await;
                         let current_device_id = store.device_id.clone();
-                        let current_refresh = store.session.as_ref().and_then(|s| s.refresh_token.clone());
-                        current_device_id != device_id2 || current_refresh != Some(refresh_token2.clone())
+                        let current_refresh =
+                            store.session.as_ref().and_then(|s| s.refresh_token.clone());
+                        current_device_id != device_id2
+                            || current_refresh != Some(refresh_token2.clone())
                     };
 
                     if became_stale {
@@ -560,10 +600,22 @@ impl AppState {
                     *is_authenticated_arc.write().await = false;
 
                     let rev_state = AppState::bump_revision(&auth_state_revision).await;
-                    AppState::emit_invalidation(&app_handle_for_task, "auth-state", rev_state, None).await;
+                    AppState::emit_invalidation(
+                        &app_handle_for_task,
+                        "auth-state",
+                        rev_state,
+                        None,
+                    )
+                    .await;
 
                     let rev_session = AppState::bump_revision(&auth_session_revision).await;
-                    AppState::emit_invalidation(&app_handle_for_task, "auth-session", rev_session, None).await;
+                    AppState::emit_invalidation(
+                        &app_handle_for_task,
+                        "auth-session",
+                        rev_session,
+                        None,
+                    )
+                    .await;
 
                     // Clear STT token
                     if let Some(state) = app_handle_for_task.try_state::<AppState>() {
@@ -578,7 +630,8 @@ impl AppState {
                         "[auth-refresh] refresh failed: status={}",
                         resp.status().as_u16()
                     );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS))
+                        .await;
                     continue;
                 }
 
@@ -586,19 +639,29 @@ impl AppState {
                     Ok(j) => j,
                     Err(e) => {
                         log::warn!("[auth-refresh] invalid JSON: {}", e);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(
+                            ERROR_RETRY_DELAY_SECS,
+                        ))
+                        .await;
                         continue;
                     }
                 };
 
-                let access_expires_at_ms = match AppState::parse_rfc3339_to_ms(&json.data.access_expires_at) {
-                    Some(ms) => ms,
-                    None => {
-                        log::warn!("[auth-refresh] bad access_expires_at: {}", json.data.access_expires_at);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS)).await;
-                        continue;
-                    }
-                };
+                let access_expires_at_ms =
+                    match AppState::parse_rfc3339_to_ms(&json.data.access_expires_at) {
+                        Some(ms) => ms,
+                        None => {
+                            log::warn!(
+                                "[auth-refresh] bad access_expires_at: {}",
+                                json.data.access_expires_at
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_secs(
+                                ERROR_RETRY_DELAY_SECS,
+                            ))
+                            .await;
+                            continue;
+                        }
+                    };
 
                 let refresh_expires_at_ms = json
                     .data
@@ -638,7 +701,13 @@ impl AppState {
 
                 // Emit auth-session invalidation (auth-state stays the same)
                 let rev_session = AppState::bump_revision(&auth_session_revision).await;
-                AppState::emit_invalidation(&app_handle_for_task, "auth-session", rev_session, None).await;
+                AppState::emit_invalidation(
+                    &app_handle_for_task,
+                    "auth-session",
+                    rev_session,
+                    None,
+                )
+                .await;
 
                 // Continue loop (will schedule next refresh)
                 let _ = device_id; // silence unused warning in some builds
@@ -675,23 +744,6 @@ impl AppState {
         log::info!("VAD auto-stop handler started");
     }
 
-    /// Перезапускает VAD timeout handler (используется при смене устройства)
-    pub async fn restart_vad_timeout_handler(&self, app_handle: tauri::AppHandle) {
-        log::info!("Restarting VAD timeout handler");
-
-        // Отменяем старый handler если он запущен
-        if let Some(old_handle) = self.vad_handler_task.write().await.take() {
-            log::debug!("Aborting old VAD handler");
-            old_handle.abort();
-            let _ = old_handle.await; // Ждем завершения
-        }
-
-        // Запускаем новый handler
-        self.start_vad_timeout_handler(app_handle);
-
-        log::info!("VAD timeout handler restarted successfully");
-    }
-
     /// Пересоздает audio capture с новым устройством (применяет selected_audio_device)
     /// Можно вызывать при старте приложения и при смене устройства в настройках
     pub async fn recreate_audio_capture_with_device(
@@ -701,9 +753,23 @@ impl AppState {
     ) -> Result<(), String> {
         log::info!("Recreating audio capture with device: {:?}", device_name);
 
+        // ВАЖНО: сначала останавливаем старый VAD handler, чтобы освободить mutex на vad_timeout_rx.
+        // Старый handler держит lock на vad_timeout_rx.lock() всё время жизни,
+        // и если попытаться заменить rx без abort — будет deadlock.
+        if let Some(old_handle) = self.vad_handler_task.write().await.take() {
+            log::debug!("Aborting old VAD handler before replacing audio capture");
+            old_handle.abort();
+            let _ = old_handle.await;
+        }
+
         // Создаем новый audio capture (system output).
-        let base_capture: Box<dyn AudioCapture> = create_output_audio_capture_for_device(device_name.clone())
-            .map_err(|e| format!("Failed to create audio capture with device {:?}: {}", device_name, e))?;
+        let base_capture: Box<dyn AudioCapture> =
+            create_output_audio_capture_for_device(device_name.clone()).map_err(|e| {
+                format!(
+                    "Failed to create audio capture with device {:?}: {}",
+                    device_name, e
+                )
+            })?;
 
         // Получаем текущий VAD timeout из конфига
         let vad_timeout_ms = self.config.read().await.vad_silence_timeout_ms;
@@ -722,7 +788,7 @@ impl AppState {
             let _ = vad_tx.send(());
         }));
 
-        // Заменяем vad_timeout_rx на новый
+        // Теперь mutex свободен (старый handler уже остановлен) — можем заменить rx
         *self.vad_timeout_rx.lock().await = vad_rx;
 
         // Заменяем audio capture в TranscriptionService
@@ -731,10 +797,13 @@ impl AppState {
             .await
             .map_err(|e| format!("Failed to replace audio capture: {}", e))?;
 
-        // Перезапускаем VAD timeout handler чтобы он слушал новый channel
-        self.restart_vad_timeout_handler(app_handle).await;
+        // Запускаем новый VAD handler для нового channel
+        self.start_vad_timeout_handler(app_handle);
 
-        log::info!("Audio capture recreated successfully with device: {:?}", device_name);
+        log::info!(
+            "Audio capture recreated successfully with device: {:?}",
+            device_name
+        );
         Ok(())
     }
 }

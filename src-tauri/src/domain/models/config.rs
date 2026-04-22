@@ -243,15 +243,13 @@ mod tests {
 
     #[test]
     fn test_stt_config_with_language() {
-        let config = SttConfig::new(SttProviderType::Deepgram)
-            .with_language("en");
+        let config = SttConfig::new(SttProviderType::Deepgram).with_language("en");
         assert_eq!(config.language, "en");
     }
 
     #[test]
     fn test_stt_config_with_model() {
-        let config = SttConfig::new(SttProviderType::WhisperLocal)
-            .with_model("base");
+        let config = SttConfig::new(SttProviderType::WhisperLocal).with_model("base");
         assert_eq!(config.model, Some("base".to_string()));
     }
 
@@ -286,8 +284,7 @@ mod tests {
 
     #[test]
     fn test_stt_config_clone() {
-        let config1 = SttConfig::new(SttProviderType::Deepgram)
-            .with_language("en");
+        let config1 = SttConfig::new(SttProviderType::Deepgram).with_language("en");
         let config2 = config1.clone();
         assert_eq!(config1.provider, config2.provider);
         assert_eq!(config1.language, config2.language);
@@ -298,6 +295,9 @@ mod tests {
         let config1 = AppConfig::default();
         let config2 = config1.clone();
         assert_eq!(config1.recording_hotkey, config2.recording_hotkey);
-        assert_eq!(config1.microphone_sensitivity, config2.microphone_sensitivity);
+        assert_eq!(
+            config1.microphone_sensitivity,
+            config2.microphone_sensitivity
+        );
     }
 }

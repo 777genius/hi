@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
-use crate::domain::{SttConfig, AppConfig, UiPreferences};
+use crate::domain::{AppConfig, SttConfig, UiPreferences};
 
 /// Маркер "приложение только что обновилось".
 ///
@@ -46,8 +46,8 @@ impl ConfigStore {
 
     /// Получить директорию конфигурации приложения
     fn config_dir() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
+        let config_dir =
+            dirs::config_dir().ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
 
         let app_config_dir = config_dir.join("HackInterview");
 

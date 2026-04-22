@@ -187,4 +187,3 @@ mod tests {
         assert!(is_message_stop(&json));
     }
 }
-
