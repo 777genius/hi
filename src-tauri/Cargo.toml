@@ -58,6 +58,9 @@ rustfft = "6.2"  # FFT для аудио-визуализации (спектр)
 
 # HTTP client for cloud ASR providers
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls-native-roots"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
 
 # WebSocket for streaming
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }

@@ -143,7 +143,7 @@ export async function highlightMessage(text: string): Promise<string> {
       const collapsible = lineCount > COLLAPSE_THRESHOLD;
       const cls = collapsible ? 'code-block code-block-collapsible collapsed' : 'code-block';
       const toggleBtn = collapsible
-        ? '<button class="code-block-toggle" onclick="this.closest(\'.code-block-collapsible\').classList.toggle(\'collapsed\')" type="button"></button>'
+        ? '<button class="code-block-toggle" type="button" aria-label="Показать или свернуть код"></button>'
         : '';
       parts.push(`<div class="${cls}" data-lang="${escapeHtml(seg.lang)}" data-lines="${lineCount}">${html}${toggleBtn}</div>`);
     }

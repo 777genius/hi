@@ -1,4 +1,5 @@
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
@@ -114,6 +115,70 @@ pub struct AppState {
     /// Ревизия auth-session topic (меняется и при refresh, и при login/logout).
     pub auth_session_revision: Arc<RwLock<u64>>,
 
+    /// Ревизия companion-ui topic.
+    pub companion_revision: Arc<RwLock<u64>>,
+
+    /// Runtime state для локального companion server.
+    pub companion_runtime: Arc<RwLock<crate::presentation::companion::CompanionRuntime>>,
+
+    /// Фоновая задача companion server listener.
+    pub companion_server_task: Arc<RwLock<Option<tauri::async_runtime::JoinHandle<()>>>>,
+
+    /// Single-writer lock для shared companion actions.
+    pub companion_action_lock: Arc<tokio::sync::Mutex<()>>,
+
+    /// Companion timeline (session-local, backend-owned coarse snapshot).
+    pub companion_timeline: Arc<RwLock<Vec<crate::presentation::companion::CompanionMessage>>>,
+
+    /// Следующий монотонный seq для companion timeline.
+    pub companion_next_seq: Arc<AtomicU64>,
+
+    /// Следующий stt index для companion timeline после dedup.
+    pub companion_next_stt_index: Arc<AtomicU64>,
+
+    /// Floor для history clear.
+    pub companion_history_floor_seq: Arc<AtomicU64>,
+
+    /// Floor для context clear.
+    pub companion_context_floor_seq: Arc<AtomicU64>,
+
+    /// Generation для invalidation старых AI / clear semantics.
+    pub companion_conversation_generation: Arc<AtomicU64>,
+
+    /// Последний shared companion action для desktop catch-up.
+    pub companion_last_action: Arc<RwLock<Option<String>>>,
+
+    /// Shared system prompt для companion AI flows.
+    pub companion_system_prompt: Arc<RwLock<String>>,
+
+    /// Live microphone partial text for backend-owned timeline parity.
+    pub companion_microphone_partial_text: Arc<RwLock<String>>,
+
+    /// Accumulated microphone interim-final buffer before utterance flush.
+    pub companion_microphone_accumulated_text: Arc<RwLock<String>>,
+
+    /// Current microphone utterance start marker.
+    pub companion_microphone_current_utterance_start: Arc<RwLock<Option<f64>>>,
+
+    /// Last finalized microphone chunk to avoid duplicate segment-final flushes.
+    pub companion_microphone_last_finalized_text: Arc<RwLock<String>>,
+
+    /// When live system partial appeared.
+    pub companion_live_system_started_at_ms: Arc<AtomicU64>,
+
+    /// When live microphone partial appeared.
+    pub companion_live_microphone_started_at_ms: Arc<AtomicU64>,
+
+    /// Audio levels used for mic dominance reducer parity.
+    pub companion_system_audio_level_bits: Arc<AtomicU32>,
+    pub companion_microphone_audio_level_bits: Arc<AtomicU32>,
+
+    /// Hold-until timestamp for microphone dominance.
+    pub companion_microphone_dominant_until_ms: Arc<AtomicU64>,
+
+    /// Active AI request metadata for stale-generation guarding.
+    pub companion_request_generations: Arc<RwLock<HashMap<String, u64>>>,
+
     /// Фоновая задача refresh токенов (если есть refresh_token).
     pub auth_refresh_task: Arc<RwLock<Option<tauri::async_runtime::JoinHandle<()>>>>,
 
@@ -184,6 +249,30 @@ impl AppState {
                         session: None,
                     })),
                     auth_session_revision: Arc::new(RwLock::new(0)),
+                    companion_revision: Arc::new(RwLock::new(0)),
+                    companion_runtime: Arc::new(RwLock::new(
+                        crate::presentation::companion::new_runtime(),
+                    )),
+                    companion_server_task: Arc::new(RwLock::new(None)),
+                    companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
+                    companion_timeline: Arc::new(RwLock::new(Vec::new())),
+                    companion_next_seq: Arc::new(AtomicU64::new(0)),
+                    companion_next_stt_index: Arc::new(AtomicU64::new(0)),
+                    companion_history_floor_seq: Arc::new(AtomicU64::new(0)),
+                    companion_context_floor_seq: Arc::new(AtomicU64::new(0)),
+                    companion_conversation_generation: Arc::new(AtomicU64::new(0)),
+                    companion_last_action: Arc::new(RwLock::new(None)),
+                    companion_system_prompt: Arc::new(RwLock::new(String::new())),
+                    companion_microphone_partial_text: Arc::new(RwLock::new(String::new())),
+                    companion_microphone_accumulated_text: Arc::new(RwLock::new(String::new())),
+                    companion_microphone_current_utterance_start: Arc::new(RwLock::new(None)),
+                    companion_microphone_last_finalized_text: Arc::new(RwLock::new(String::new())),
+                    companion_live_system_started_at_ms: Arc::new(AtomicU64::new(0)),
+                    companion_live_microphone_started_at_ms: Arc::new(AtomicU64::new(0)),
+                    companion_system_audio_level_bits: Arc::new(AtomicU32::new(0)),
+                    companion_microphone_audio_level_bits: Arc::new(AtomicU32::new(0)),
+                    companion_microphone_dominant_until_ms: Arc::new(AtomicU64::new(0)),
+                    companion_request_generations: Arc::new(RwLock::new(HashMap::new())),
                     auth_refresh_task: Arc::new(RwLock::new(None)),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     transcription_session_seq: AtomicU64::new(0),
@@ -244,6 +333,30 @@ impl AppState {
                         session: None,
                     })),
                     auth_session_revision: Arc::new(RwLock::new(0)),
+                    companion_revision: Arc::new(RwLock::new(0)),
+                    companion_runtime: Arc::new(RwLock::new(
+                        crate::presentation::companion::new_runtime(),
+                    )),
+                    companion_server_task: Arc::new(RwLock::new(None)),
+                    companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
+                    companion_timeline: Arc::new(RwLock::new(Vec::new())),
+                    companion_next_seq: Arc::new(AtomicU64::new(0)),
+                    companion_next_stt_index: Arc::new(AtomicU64::new(0)),
+                    companion_history_floor_seq: Arc::new(AtomicU64::new(0)),
+                    companion_context_floor_seq: Arc::new(AtomicU64::new(0)),
+                    companion_conversation_generation: Arc::new(AtomicU64::new(0)),
+                    companion_last_action: Arc::new(RwLock::new(None)),
+                    companion_system_prompt: Arc::new(RwLock::new(String::new())),
+                    companion_microphone_partial_text: Arc::new(RwLock::new(String::new())),
+                    companion_microphone_accumulated_text: Arc::new(RwLock::new(String::new())),
+                    companion_microphone_current_utterance_start: Arc::new(RwLock::new(None)),
+                    companion_microphone_last_finalized_text: Arc::new(RwLock::new(String::new())),
+                    companion_live_system_started_at_ms: Arc::new(AtomicU64::new(0)),
+                    companion_live_microphone_started_at_ms: Arc::new(AtomicU64::new(0)),
+                    companion_system_audio_level_bits: Arc::new(AtomicU32::new(0)),
+                    companion_microphone_audio_level_bits: Arc::new(AtomicU32::new(0)),
+                    companion_microphone_dominant_until_ms: Arc::new(AtomicU64::new(0)),
+                    companion_request_generations: Arc::new(RwLock::new(HashMap::new())),
                     auth_refresh_task: Arc::new(RwLock::new(None)),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     transcription_session_seq: AtomicU64::new(0),
@@ -317,6 +430,28 @@ impl AppState {
                 session: None,
             })),
             auth_session_revision: Arc::new(RwLock::new(0)),
+            companion_revision: Arc::new(RwLock::new(0)),
+            companion_runtime: Arc::new(RwLock::new(crate::presentation::companion::new_runtime())),
+            companion_server_task: Arc::new(RwLock::new(None)),
+            companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
+            companion_timeline: Arc::new(RwLock::new(Vec::new())),
+            companion_next_seq: Arc::new(AtomicU64::new(0)),
+            companion_next_stt_index: Arc::new(AtomicU64::new(0)),
+            companion_history_floor_seq: Arc::new(AtomicU64::new(0)),
+            companion_context_floor_seq: Arc::new(AtomicU64::new(0)),
+            companion_conversation_generation: Arc::new(AtomicU64::new(0)),
+            companion_last_action: Arc::new(RwLock::new(None)),
+            companion_system_prompt: Arc::new(RwLock::new(String::new())),
+            companion_microphone_partial_text: Arc::new(RwLock::new(String::new())),
+            companion_microphone_accumulated_text: Arc::new(RwLock::new(String::new())),
+            companion_microphone_current_utterance_start: Arc::new(RwLock::new(None)),
+            companion_microphone_last_finalized_text: Arc::new(RwLock::new(String::new())),
+            companion_live_system_started_at_ms: Arc::new(AtomicU64::new(0)),
+            companion_live_microphone_started_at_ms: Arc::new(AtomicU64::new(0)),
+            companion_system_audio_level_bits: Arc::new(AtomicU32::new(0)),
+            companion_microphone_audio_level_bits: Arc::new(AtomicU32::new(0)),
+            companion_microphone_dominant_until_ms: Arc::new(AtomicU64::new(0)),
+            companion_request_generations: Arc::new(RwLock::new(HashMap::new())),
             auth_refresh_task: Arc::new(RwLock::new(None)),
             last_recording_hotkey_ms: AtomicU64::new(0),
             transcription_session_seq: AtomicU64::new(0),

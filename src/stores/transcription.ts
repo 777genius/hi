@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { isTauriAvailable } from '../utils/tauri';
+import type { CompanionSnapshotData } from '@/windowing/stateSync';
 import { i18n } from '../i18n';
 import { mergeTranscriptText } from '../utils/transcriptionText';
 import { api } from '../features/auth/infrastructure/api/apiClient';
@@ -1762,6 +1763,48 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  function hydrateFromCompanionSnapshot(snapshot: CompanionSnapshotData): void {
+    const nextSessionId = Number(snapshot.recording.activeSessionId || 0);
+    if (nextSessionId > 0) {
+      bumpLastSeenSessionId(nextSessionId);
+    }
+
+    status.value = snapshot.recording.status as RecordingStatus;
+    sessionId.value = nextSessionId > 0 ? nextSessionId : null;
+    awaitingSessionStart.value = false;
+    isConnecting.value = false;
+    connectAttempt.value = 0;
+    connectMaxAttempts.value = 0;
+
+    if (status.value !== RecordingStatus.Error) {
+      error.value = null;
+      errorType.value = null;
+      lastConnectFailure.value = null;
+      lastConnectFailureRaw.value = '';
+      lastConnectFailureDetails.value = null;
+    }
+
+    partialText.value = String(snapshot.live.partialText ?? '');
+    accumulatedText.value = '';
+    animatedPartialText.value = '';
+    animatedAccumulatedText.value = '';
+    currentUtteranceStart.value = -1;
+    lastFinalizedSegmentKey.value = '';
+    lastFinalizedSegmentTextNorm.value = '';
+
+    finalUtterances.value = snapshot.timeline
+      .filter((message) => message.kind === 'stt' && message.status === 'final' && !message.deleted)
+      .sort((a, b) => a.seq - b.seq)
+      .map((message) => ({
+        id: message.id,
+        sessionId: Number(message.sessionId || nextSessionId || 0),
+        text: message.text,
+        timestamp: message.createdAtMs,
+      }));
+
+    rebuildFinalTextFromUtterances();
+  }
+
   return {
     // State
     status,
@@ -1802,6 +1845,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     clearText,
     clearHistoryUiOnly,
     toggleRecording,
+    hydrateFromCompanionSnapshot,
     reconcileBackendStatus,
     cleanup,
   };

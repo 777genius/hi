@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick, type Ref } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, nextTick, type Ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { toDataURL as toQrDataUrl } from 'qrcode';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getVersion } from '@tauri-apps/api/app';
 import { useTranscriptionStore } from '../../stores/transcription';
@@ -16,7 +17,9 @@ import ProfilePopover from './ProfilePopover.vue';
 import UpdateIndicator from './UpdateIndicator.vue';
 import UpdateDialog from './UpdateDialog.vue';
 import AudioVisualizer from './AudioVisualizer.vue';
+import ConversationFeed from './ConversationFeed.vue';
 import { playShowSound, playDoneSound, preloadUiSounds } from '../../utils/sound';
+import { renderMarkdownToSafeHtml } from '@/utils/markdown';
 import { isTauriAvailable } from '../../utils/tauri';
 import {
   EVENT_RECORDING_WINDOW_SHOWN,
@@ -27,9 +30,22 @@ import {
   type CodeExplainDonePayload,
   type CodeExplainErrorPayload,
 } from '@/types';
-import { renderMarkdownToSafeHtml } from '@/utils/markdown';
-import { highlightMessage, messageHasCode } from '../../utils/codeHighlight';
 import { useAudioPermissions } from '@/composables/useAudioPermissions';
+import {
+  CMD_COMPANION_CLEAR_CONTEXT,
+  CMD_COMPANION_CLEAR_HISTORY,
+  CMD_COMPANION_REQUEST_AI,
+  CMD_ENABLE_COMPANION_MODE,
+  CMD_GET_COMPANION_SERVER_STATUS,
+  CMD_GET_COMPANION_SNAPSHOT,
+  STATE_SYNC_INVALIDATION_EVENT,
+  TOPIC_COMPANION_UI,
+  type CompanionActionResponse,
+  type CompanionServerStatus,
+  type CompanionSnapshotData,
+  type StateSyncInvalidationEventPayload,
+  type TauriSnapshotEnvelope,
+} from '@/windowing/stateSync';
 
 // Простая поддержка перетаскивания мышью по шапке
 async function onDragMouseDown(e: MouseEvent) {
@@ -61,7 +77,7 @@ const showUpdateDialog = ref(false);
 const appVersion = ref('');
 const glowColor = ref<'blue' | 'red' | null>(null);
 const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-const microphoneMuteHotkeyLabel = computed(() => (isMac ? 'Cmd+Shift+M' : 'Ctrl+Shift+M'));
+const microphoneMuteHotkeyLabel = computed(() => (isMac ? 'Option+Z' : 'Alt+Z'));
 
 const audioPermissions = useAudioPermissions();
 
@@ -73,40 +89,6 @@ const shouldShowMicrophonePermissionWarning = computed(() => {
   return chatStore.microphoneEnabled && !audioPermissions.microphoneGranted.value;
 });
 
-type HighlightEntry = { sourceText: string; html: string };
-const highlightedById = reactive<Record<string, HighlightEntry>>({});
-
-const highlightCandidates = computed(() => {
-  return chatStore.messages
-    .filter((m) => m.kind !== 'haiku' && !!m.text && messageHasCode(m.text))
-    .map((m) => ({ id: m.id, text: m.text }));
-});
-
-watch(
-  () => highlightCandidates.value,
-  (items) => {
-    for (const it of items) {
-      const existing = highlightedById[it.id];
-      if (existing?.sourceText === it.text) continue;
-      void highlightMessage(it.text)
-        .then((html) => {
-          highlightedById[it.id] = { sourceText: it.text, html };
-        })
-        .catch(() => {});
-    }
-  },
-  { immediate: true }
-);
-
-function getHighlightedHtml(id: string, text: string): string | null {
-  if (!text) return null;
-  if (!messageHasCode(text)) return null;
-  const entry = highlightedById[id];
-  if (!entry) return null;
-  if (entry.sourceText !== text) return null;
-  return entry.html;
-}
-
 // Debouncing для hotkey - блокирует повторные вызовы в течение 500ms
 let hotkeyDebounceTimeout: number | null = null;
 let isHotkeyProcessing = false;
@@ -115,12 +97,43 @@ let unlistenHotkey: UnlistenFn | null = null;
 let unlistenAutoHide: UnlistenFn | null = null;
 let unlistenStartRequested: UnlistenFn | null = null;
 let unlistenWindowShown: UnlistenFn | null = null;
+let unlistenCompanionInvalidation: UnlistenFn | null = null;
 let unlistenCodeExplainDelta: UnlistenFn | null = null;
 let unlistenCodeExplainDone: UnlistenFn | null = null;
 let unlistenCodeExplainError: UnlistenFn | null = null;
 
+const companionRevision = ref('0');
+const companionHistoryFloorSeq = ref(0);
+const companionContextFloorSeq = ref(0);
+const companionConversationGeneration = ref(0);
+const companionActiveSessionId = ref(0);
+const localTimelineMutationsDisabled = computed(() => chatStore.companionModeEnabled);
+const companionMenuOpen = ref(false);
+const companionServerStatus = ref<CompanionServerStatus | null>(null);
+const companionServerBusy = ref(false);
+const companionTransientMessage = ref('');
+const companionQrDataUrl = ref('');
+let companionTransientMessageTimeout: number | null = null;
+let companionStatusRetryTimeout: number | null = null;
+const conversationFeedRef = ref<{ scrollEl: HTMLElement | null } | null>(null);
+
+const companionPrimaryUrl = computed(() => {
+  const status = companionServerStatus.value;
+  return status?.localNetworkUrl || status?.localUrl || '';
+});
+const companionLanUrl = computed(() => companionServerStatus.value?.localNetworkUrl || '');
+const companionLoopbackUrl = computed(() => companionServerStatus.value?.localUrl || '');
+const companionReady = computed(() => companionPrimaryUrl.value.length > 0);
+const companionStatusLine = computed(() => {
+  if (companionServerBusy.value) return 'Поднимаю companion на Mac';
+  if (companionLanUrl.value) return 'Готово - открой QR с телефона в той же Wi-Fi сети';
+  if (companionLoopbackUrl.value) return 'Companion активен локально на этом Mac';
+  if (companionServerStatus.value?.enabled) return 'Companion включён, но адрес ещё определяется';
+  return 'Companion пока не включён';
+});
+
 // Ref для области чата (для автоскролла)
-const chatScrollRef = ref<HTMLElement | null>(null);
+const chatScrollRef = computed(() => conversationFeedRef.value?.scrollEl ?? null);
 
 const CODE_EXPLAIN_SYSTEM_PROMPT = `Ты — ассистент на техническом собеседовании. Отвечай по-русски.
 
@@ -312,19 +325,6 @@ function onSelectionChange(): void {
   });
 }
 
-const onChatClick = (e: MouseEvent) => {
-  const target = e.target as HTMLElement | null;
-  if (!target) return;
-
-  const toggle = target.closest<HTMLButtonElement>('.code-block-toggle');
-  if (toggle) {
-    const block = toggle.closest<HTMLElement>('.code-block-collapsible');
-    if (block) block.classList.toggle('collapsed');
-    e.preventDefault();
-    e.stopPropagation();
-  }
-};
-
 function buildContextUpToMessageId(messageId: string): string {
   const parts: string[] = [];
   const list = chatStore.messages;
@@ -430,8 +430,180 @@ const saveSystemPrompt = () => {
   promptMenuOpen.value = false;
 };
 
-const clearLlmContext = () => {
-  chatStore.clearLlmContext();
+function applyCompanionSnapshot(snapshot: TauriSnapshotEnvelope<CompanionSnapshotData>): void {
+  const nextRevision = Number(snapshot.revision || '0');
+  const currentRevision = Number(companionRevision.value || '0');
+  if (Number.isFinite(nextRevision) && Number.isFinite(currentRevision) && nextRevision < currentRevision) {
+    return;
+  }
+
+  const nextHistoryFloor = Number(snapshot.data.controls.historyFloorSeq || 0);
+  const nextContextFloor = Number(snapshot.data.controls.contextFloorSeq || 0);
+  const nextGeneration = Number(snapshot.data.controls.conversationGeneration || 0);
+  const nextSessionId = Number(snapshot.data.recording.activeSessionId || 0);
+  const lastAction = snapshot.data.controls.lastAction || null;
+
+  const historyAdvanced = nextHistoryFloor > companionHistoryFloorSeq.value;
+  const contextAdvanced = nextContextFloor > companionContextFloorSeq.value;
+  const generationAdvanced = nextGeneration > companionConversationGeneration.value;
+  const sessionAdvanced = nextSessionId > 0 && nextSessionId !== companionActiveSessionId.value;
+
+  if (lastAction === 'started' && sessionAdvanced) {
+    store.clearText();
+    chatStore.clearChatOutgoing();
+  } else if (lastAction === 'cleared_history' && (historyAdvanced || generationAdvanced)) {
+    chatStore.clearAllHistory();
+  } else if (lastAction === 'cleared_context' && (contextAdvanced || generationAdvanced)) {
+    chatStore.clearLlmContext();
+  }
+
+  store.hydrateFromCompanionSnapshot(snapshot.data);
+  chatStore.hydrateFromCompanionSnapshot(snapshot.data);
+
+  companionRevision.value = snapshot.revision;
+  companionHistoryFloorSeq.value = nextHistoryFloor;
+  companionContextFloorSeq.value = nextContextFloor;
+  companionConversationGeneration.value = nextGeneration;
+  companionActiveSessionId.value = nextSessionId;
+}
+
+async function refreshCompanionSnapshot(): Promise<void> {
+  if (!isTauriAvailable()) return;
+  try {
+    const snapshot = await invoke<TauriSnapshotEnvelope<CompanionSnapshotData>>(CMD_GET_COMPANION_SNAPSHOT);
+    applyCompanionSnapshot(snapshot);
+  } catch (err) {
+    console.debug('[companion] refresh failed:', err);
+  }
+}
+
+function clearCompanionTransientMessageTimer(): void {
+  if (companionTransientMessageTimeout !== null) {
+    window.clearTimeout(companionTransientMessageTimeout);
+    companionTransientMessageTimeout = null;
+  }
+}
+
+function clearCompanionStatusRetryTimer(): void {
+  if (companionStatusRetryTimeout !== null) {
+    window.clearTimeout(companionStatusRetryTimeout);
+    companionStatusRetryTimeout = null;
+  }
+}
+
+function setCompanionTransientMessage(message: string, timeoutMs = 2600): void {
+  companionTransientMessage.value = message;
+  clearCompanionTransientMessageTimer();
+  companionTransientMessageTimeout = window.setTimeout(() => {
+    companionTransientMessage.value = '';
+    companionTransientMessageTimeout = null;
+  }, timeoutMs);
+}
+
+async function refreshCompanionServerStatus(): Promise<void> {
+  if (!isTauriAvailable()) return;
+  try {
+    companionServerStatus.value = await invoke<CompanionServerStatus>(CMD_GET_COMPANION_SERVER_STATUS);
+  } catch (err) {
+    console.debug('[companion] status refresh failed:', err);
+  }
+}
+
+function scheduleCompanionStatusRetry(): void {
+  if (!import.meta.env.DEV || companionReady.value) return;
+  clearCompanionStatusRetryTimer();
+  companionStatusRetryTimeout = window.setTimeout(() => {
+    companionStatusRetryTimeout = null;
+    void refreshCompanionServerStatus();
+  }, 1400);
+}
+
+async function ensureCompanionReady(): Promise<void> {
+  if (!isTauriAvailable() || companionServerBusy.value) return;
+  companionServerBusy.value = true;
+  try {
+    const status =
+      companionServerStatus.value?.enabled && companionPrimaryUrl.value
+        ? await invoke<CompanionServerStatus>(CMD_GET_COMPANION_SERVER_STATUS)
+        : await invoke<CompanionServerStatus>(CMD_ENABLE_COMPANION_MODE);
+    companionServerStatus.value = status;
+    if (status.localNetworkUrl || status.localUrl) {
+      setCompanionTransientMessage('Ссылка для телефона готова');
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    setCompanionTransientMessage(`Не удалось поднять companion: ${message}`, 4200);
+  } finally {
+    companionServerBusy.value = false;
+  }
+}
+
+async function copyCompanionUrl(): Promise<void> {
+  const url = companionPrimaryUrl.value;
+  if (!url) return;
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+    } else {
+      await invoke('copy_to_clipboard_native', { text: url });
+    }
+    setCompanionTransientMessage('Ссылка скопирована');
+  } catch (err) {
+    try {
+      await invoke('copy_to_clipboard_native', { text: url });
+      setCompanionTransientMessage('Ссылка скопирована');
+    } catch (fallbackErr) {
+      const message = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr ?? err);
+      setCompanionTransientMessage(`Не удалось скопировать ссылку: ${message}`, 4200);
+    }
+  }
+}
+
+watch(
+  () => companionPrimaryUrl.value,
+  async (url) => {
+    if (!url) {
+      companionQrDataUrl.value = '';
+      return;
+    }
+
+    try {
+      companionQrDataUrl.value = await toQrDataUrl(url, {
+        errorCorrectionLevel: 'M',
+        margin: 1,
+        width: 220,
+        color: {
+          dark: '#0f172a',
+          light: '#0000',
+        },
+      });
+    } catch (err) {
+      companionQrDataUrl.value = '';
+      console.debug('[companion] qr generation failed:', err);
+    }
+  },
+  { immediate: true }
+);
+
+watch(
+  () => companionMenuOpen.value,
+  (open) => {
+    if (!open) return;
+    void ensureCompanionReady();
+  }
+);
+
+async function runCompanionClear(commandName: string): Promise<void> {
+  if (!isTauriAvailable()) return;
+  const response = await invoke<CompanionActionResponse>(commandName);
+  if (response.snapshot) {
+    applyCompanionSnapshot(response.snapshot);
+  }
+}
+
+const clearLlmContext = async () => {
+  await runCompanionClear(CMD_COMPANION_CLEAR_CONTEXT);
 };
 
 type AskImageDraft = {
@@ -617,6 +789,7 @@ function getEditableText(el: HTMLElement | null): string {
 }
 
 const startInlineEdit = (msg: { id: string; kind: string }) => {
+  if (localTimelineMutationsDisabled.value) return;
   if (msg.kind === 'haiku') return;
   editingMessageId.value = msg.id;
   nextTick(() => {
@@ -631,6 +804,7 @@ const cancelInlineEdit = () => {
 };
 
 const saveInlineEdit = () => {
+  if (localTimelineMutationsDisabled.value) return;
   const id = editingMessageId.value;
   if (!id) return;
   const el = getEditingEl(id);
@@ -640,12 +814,14 @@ const saveInlineEdit = () => {
 };
 
 const makeQuestion = (msg: { id: string; text: string }) => {
+  if (localTimelineMutationsDisabled.value) return;
   const trimmed = msg.text.trimEnd();
   const updated = trimmed.endsWith('.') ? trimmed.slice(0, -1) + '?' : trimmed + '?';
   chatStore.editMessageText(msg.id, updated);
 };
 
 const replyWithAi = (msg: { id: string }) => {
+  if (localTimelineMutationsDisabled.value) return;
   void chatStore.replyToMessageWithAi(msg.id);
 };
 
@@ -713,6 +889,9 @@ onMounted(async () => {
   await chatStore.initialize();
   await appConfigStore.startSync();
   await sttConfigStore.startSync();
+  await refreshCompanionSnapshot();
+  await refreshCompanionServerStatus();
+  scheduleCompanionStatusRetry();
 
   // Очищаем UI при фактическом показе окна (НЕ через focus: main может быть nonactivating NSPanel).
   // Важно: не очищаем посреди активной записи — иначе можно потерять текст если пользователь скрыл и снова показал окно.
@@ -720,6 +899,7 @@ onMounted(async () => {
     void auth.initialize({ silent: true });
     void appConfigStore.refresh();
     void chatStore.syncMicrophoneMuteState();
+    await refreshCompanionSnapshot();
 
     // Если UI рассинхронизировался (например окно было скрыто и JS "заморозили"),
     // сначала сверяемся с backend: он источник правды по статусу записи.
@@ -733,6 +913,17 @@ onMounted(async () => {
       return;
     }
   });
+
+  unlistenCompanionInvalidation = await listen<StateSyncInvalidationEventPayload>(
+    STATE_SYNC_INVALIDATION_EVENT,
+    async (event) => {
+      if (event.payload.topic !== TOPIC_COMPANION_UI) return;
+      await refreshCompanionSnapshot();
+      if (!companionReady.value && chatStore.companionModeEnabled) {
+        await refreshCompanionServerStatus();
+      }
+    }
+  );
 
   // Слушаем событие нажатия горячей клавиши для записи
   unlistenHotkey = await listen('hotkey:toggle-recording', async () => {
@@ -829,12 +1020,18 @@ onUnmounted(() => {
   if (unlistenWindowShown) {
     unlistenWindowShown();
   }
+  if (unlistenCompanionInvalidation) {
+    unlistenCompanionInvalidation();
+  }
   if (unlistenCodeExplainDelta) unlistenCodeExplainDelta();
   if (unlistenCodeExplainDone) unlistenCodeExplainDone();
   if (unlistenCodeExplainError) unlistenCodeExplainError();
   unlistenCodeExplainDelta = null;
   unlistenCodeExplainDone = null;
   unlistenCodeExplainError = null;
+  unlistenCompanionInvalidation = null;
+  clearCompanionTransientMessageTimer();
+  clearCompanionStatusRetryTimer();
 
   document.removeEventListener('selectionchange', onSelectionChange);
   document.removeEventListener('paste', onPaste);
@@ -926,6 +1123,17 @@ watch(() => store.wantsLicenseActivation, (val) => {
   }
 });
 
+watch(
+  () => chatStore.companionModeEnabled,
+  (enabled) => {
+    if (!enabled) return;
+    askComposerOpen.value = false;
+    editingMessageId.value = null;
+    chatStore.clearSelection();
+    hideCodeSelectionUi();
+  }
+);
+
 const closeSettings = async () => {
   showSettings.value = false;
   await appConfigStore.refresh();
@@ -943,6 +1151,15 @@ const haikuHoverArmed = ref(true);
 
 const onHaikuHover = async () => {
   try {
+    if (chatStore.companionModeEnabled) {
+      const response = await invoke<CompanionActionResponse>(CMD_COMPANION_REQUEST_AI, {
+        questionText: null,
+      });
+      if (response.snapshot) {
+        applyCompanionSnapshot(response.snapshot);
+      }
+      return;
+    }
     await chatStore.requestHaikuFromAnchor();
   } catch (err) {
     console.error('Failed to start Haiku stream:', err);
@@ -963,6 +1180,7 @@ const onHaikuPointerLeave = () => {
 };
 
 const onHaikuClick = () => {
+  if (chatStore.companionModeEnabled) return;
   if (!chatStore.isHaikuStreaming) return;
   chatStore.cancelActiveHaikuStreams();
   // Требуем реальный выход курсора, чтобы следующий запуск был только "снаружи".
@@ -989,6 +1207,7 @@ const onChatRowMouseMove = (e: MouseEvent) => {
 };
 
 const onMessageClick = (e: MouseEvent, messageId: string, kind: 'stt' | 'mic' | 'haiku' | 'prompt') => {
+  if (localTimelineMutationsDisabled.value) return;
   if (editingMessageId.value) return;
   if (kind === 'haiku') return;
   // Если пользователь выделяет текст внутри пузыря — не мешаем.
@@ -1002,16 +1221,23 @@ const onMessageClick = (e: MouseEvent, messageId: string, kind: 'stt' | 'mic' | 
   chatStore.selectOnly(messageId);
 };
 
-function renderHaikuMarkdown(text: string): string {
-  return renderMarkdownToSafeHtml(String(text ?? ''));
-}
+const onFeedRowMouseMove = (e: MouseEvent) => {
+  onChatRowMouseMove(e);
+};
+
+const onFeedMessageClick = (
+  e: MouseEvent,
+  msg: { id: string; kind: 'stt' | 'mic' | 'haiku' | 'prompt' },
+) => {
+  onMessageClick(e, msg.id, msg.kind);
+};
 
 const clearMessageSelection = () => {
   chatStore.clearSelection();
 };
 
-const clearAllHistory = () => {
-  chatStore.clearAllHistory();
+const clearAllHistory = async () => {
+  await runCompanionClear(CMD_COMPANION_CLEAR_HISTORY);
 };
 
 const lassoActive = ref(false);
@@ -1066,6 +1292,7 @@ function updateLasso(clientX: number, clientY: number): void {
 }
 
 const onChatMouseDown = (e: MouseEvent) => {
+  if (localTimelineMutationsDisabled.value) return;
   if (e.button !== 0) return;
   const container = chatScrollRef.value;
   if (!container) return;
@@ -1147,7 +1374,6 @@ const onChatMouseDown = (e: MouseEvent) => {
       <!-- Header -->
       <div class="header" data-tauri-drag-region @mousedown="onDragMouseDown">
         <div class="title-row">
-          <div class="title">{{ t('app.title') }}</div>
           <span v-if="appVersion" class="app-version">{{ appVersion }}</span>
           <UpdateIndicator class="no-drag" @click="showUpdateDialog = true" />
         </div>
@@ -1166,6 +1392,79 @@ const onChatMouseDown = (e: MouseEvent) => {
               </button>
             </template>
           </v-tooltip>
+          <v-menu
+            v-model="companionMenuOpen"
+            :close-on-content-click="false"
+            location="bottom end"
+            offset="8"
+          >
+            <template #activator="{ props: menuProps }">
+              <v-tooltip text="Открыть на телефоне" location="bottom">
+                <template #activator="{ props: tp }">
+                  <button
+                    v-bind="{ ...menuProps, ...tp }"
+                    class="companion-button no-drag"
+                    :class="{ active: companionMenuOpen || companionReady }"
+                  >
+                    <span class="mdi mdi-cellphone-link"></span>
+                  </button>
+                </template>
+              </v-tooltip>
+            </template>
+
+            <v-card class="companion-menu-card no-drag">
+              <v-card-title class="companion-menu-title">
+                <div>
+                  <div class="companion-menu-heading">Телефон</div>
+                  <div class="companion-menu-subtitle">{{ companionStatusLine }}</div>
+                </div>
+                <v-btn
+                  icon="mdi-refresh"
+                  variant="text"
+                  density="comfortable"
+                  :loading="companionServerBusy"
+                  @click="ensureCompanionReady"
+                />
+              </v-card-title>
+              <v-divider />
+              <v-card-text class="companion-menu-content">
+                <div class="companion-menu-note">
+                  На Mac окно можно свернуть. Телефон будет работать через локальный companion server.
+                </div>
+
+                <div v-if="companionQrDataUrl" class="companion-qr-shell">
+                  <img class="companion-qr-image" :src="companionQrDataUrl" alt="QR с companion ссылкой" />
+                </div>
+                <div v-else class="companion-qr-placeholder">
+                  Ссылка появится после старта companion
+                </div>
+
+                <div class="companion-link-block">
+                  <div class="companion-link-label">Ссылка для телефона</div>
+                  <div class="companion-link-value">
+                    {{ companionLanUrl || companionLoopbackUrl || 'Companion ещё не поднялся' }}
+                  </div>
+                </div>
+
+                <div v-if="companionLanUrl && companionLoopbackUrl" class="companion-link-secondary">
+                  Local: {{ companionLoopbackUrl }}
+                </div>
+
+                <div v-if="companionTransientMessage" class="companion-inline-status">
+                  {{ companionTransientMessage }}
+                </div>
+              </v-card-text>
+              <v-divider />
+              <v-card-actions class="companion-menu-actions">
+                <v-btn variant="text" :disabled="!companionReady" @click="copyCompanionUrl">
+                  Скопировать
+                </v-btn>
+                <v-btn color="primary" variant="flat" :loading="companionServerBusy" @click="ensureCompanionReady">
+                  {{ companionReady ? 'Обновить' : 'Включить' }}
+                </v-btn>
+              </v-card-actions>
+            </v-card>
+          </v-menu>
           <v-menu
             v-model="promptMenuOpen"
             :close-on-content-click="false"
@@ -1230,154 +1529,97 @@ const onChatMouseDown = (e: MouseEvent) => {
 
       <!-- Transcription Display -->
       <div class="chat-area">
-        <div
-          ref="chatScrollRef"
-          class="chat-scroll"
-          :class="{ selecting: lassoActive }"
-          @mousedown="onChatMouseDown"
-          @click.capture="onChatClick"
+        <ConversationFeed
+          ref="conversationFeedRef"
+          :messages="chatStore.messages"
+          :empty-text="store.displayText"
+          :selecting="lassoActive"
+          :editing-message-id="editingMessageId"
+          :anchor-mode="chatStore.anchorMode"
+          :anchor-stt-index="chatStore.anchorSttIndex"
+          :messages-clickable="true"
+          :is-selected="chatStore.isSelected"
+          :is-out-of-context="chatStore.isMessageOutOfContext"
+          @scroll-mousedown="onChatMouseDown"
+          @row-mousemove="onFeedRowMouseMove"
+          @message-click="onFeedMessageClick"
+          @inline-edit-keydown="onInlineEditKeydown"
         >
-          <div
-            v-if="lassoActive && lassoRect"
-            class="lasso-rect"
-            :style="{
-              left: `${lassoRect.left}px`,
-              top: `${lassoRect.top}px`,
-              width: `${lassoRect.width}px`,
-              height: `${lassoRect.height}px`,
-            }"
-          />
-          <div
-            v-if="chatStore.messages.length === 0 && !chatStore.livePartialText && !chatStore.liveMicText"
-            class="chat-empty"
-          >
-            {{ store.displayText }}
-          </div>
-
-          <div
-            v-for="msg in chatStore.messages"
-            :key="msg.id"
-            class="chat-row"
-            :data-msg-id="msg.id"
-            :class="{
-              incoming: msg.role === 'incoming',
-              outgoing: msg.role === 'outgoing',
-              'assistant-response': msg.kind === 'haiku',
-              prompt: msg.kind === 'prompt',
-              anchor:
-                chatStore.anchorMode === 'fixed' &&
-                msg.kind === 'stt' &&
-                msg.sttIndex === chatStore.anchorSttIndex,
-              selected: chatStore.isSelected(msg.id),
-              'out-of-context': chatStore.isMessageOutOfContext(msg),
-              error: msg.status === 'error',
-            }"
-            @mousemove="onChatRowMouseMove"
-          >
+          <template #overlay>
             <div
-              class="chat-bubble"
-              :class="{ clickable: msg.kind !== 'haiku', deleted: msg.deleted }"
-              @click="onMessageClick($event, msg.id, msg.kind)"
-            >
-              <template v-if="msg.deleted">
-                <span class="chat-text chat-text-deleted">{{ msg.text }}</span>
+              v-if="lassoActive && lassoRect"
+              class="lasso-rect"
+              :style="{
+                left: `${lassoRect.left}px`,
+                top: `${lassoRect.top}px`,
+                width: `${lassoRect.width}px`,
+                height: `${lassoRect.height}px`,
+              }"
+            />
+          </template>
+
+          <template v-if="!localTimelineMutationsDisabled" #actions="{ msg }">
+            <template v-if="msg.kind !== 'haiku' && msg.status === 'final'">
+              <template v-if="editingMessageId === msg.id">
+                <button class="chat-action-button" title="Сохранить" @click="saveInlineEdit">
+                  <span class="mdi mdi-check" />
+                </button>
+                <button class="chat-action-button" title="Отмена" @click="cancelInlineEdit">
+                  <span class="mdi mdi-close" />
+                </button>
               </template>
               <template v-else>
-                <span v-if="msg.kind === 'mic'" class="chat-icon mdi mdi-microphone" />
-
-                <template v-if="editingMessageId === msg.id">
-                  <span
-                    class="chat-text chat-text-editable"
-                    :data-edit-id="msg.id"
-                    contenteditable="true"
-                    spellcheck="false"
-                    @click.stop
-                    @keydown="onInlineEditKeydown"
-                  >{{ msg.text }}</span>
-                </template>
-                <template v-else>
-                  <div v-if="msg.kind === 'haiku'" class="chat-markdown" v-html="renderHaikuMarkdown(msg.text)" />
-                  <span
-                    v-else-if="getHighlightedHtml(msg.id, msg.text)"
-                    class="chat-text chat-text-highlighted"
-                    v-html="getHighlightedHtml(msg.id, msg.text)"
-                  />
-                  <span v-else class="chat-text">{{ msg.text }}</span>
-                </template>
-
-                <div v-if="msg.kind === 'prompt' && msg.attachments?.length" class="chat-attachments">
-                  <div v-for="att in msg.attachments" :key="att.id" class="chat-attachment">
-                    <img v-if="att.kind === 'image'" class="chat-attachment-img" :src="att.dataUrl" alt="Вложение" />
-                  </div>
-                </div>
-
-                <span v-if="msg.status === 'streaming'" class="chat-cursor">▍</span>
+                <button class="chat-action-button" title="Редактировать" @click="startInlineEdit(msg)">
+                  <span class="mdi mdi-pencil-outline" />
+                </button>
+                <button class="chat-action-button" title="Ответить" @click="replyWithAi(msg)">
+                  <span class="mdi mdi-robot-outline" />
+                </button>
+                <button class="chat-action-button" title="Сделать вопросом" @click="makeQuestion(msg)">
+                  <span class="mdi mdi-help-circle-outline" />
+                </button>
               </template>
-            </div>
+            </template>
 
-            <div v-if="!msg.deleted" class="chat-actions no-drag" @click.stop>
-              <template v-if="msg.kind !== 'haiku' && msg.status === 'final'">
-                <template v-if="editingMessageId === msg.id">
-                  <button class="chat-action-button" title="Сохранить" @click="saveInlineEdit">
-                    <span class="mdi mdi-check" />
-                  </button>
-                  <button class="chat-action-button" title="Отмена" @click="cancelInlineEdit">
-                    <span class="mdi mdi-close" />
-                  </button>
-                </template>
-                <template v-else>
-                  <button class="chat-action-button" title="Редактировать" @click="startInlineEdit(msg)">
-                    <span class="mdi mdi-pencil-outline" />
-                  </button>
-                  <button class="chat-action-button" title="Ответить" @click="replyWithAi(msg)">
-                    <span class="mdi mdi-robot-outline" />
-                  </button>
-                  <button class="chat-action-button" title="Сделать вопросом" @click="makeQuestion(msg)">
-                    <span class="mdi mdi-help-circle-outline" />
-                  </button>
-                </template>
-              </template>
+            <button
+              v-if="msg.kind === 'haiku' || msg.status === 'final'"
+              class="chat-action-button"
+              title="Удалить"
+              @click="chatStore.deleteMessage(msg.id)"
+            >
+              <span class="mdi mdi-trash-can-outline" />
+            </button>
+          </template>
+        </ConversationFeed>
 
-              <button
-                v-if="msg.kind === 'haiku' || msg.status === 'final'"
-                class="chat-action-button"
-                title="Удалить"
-                @click="chatStore.deleteMessage(msg.id)"
-              >
-                <span class="mdi mdi-trash-can-outline" />
-              </button>
+        <div v-if="store.error || store.hasError" class="error-container">
+          <div class="error-row">
+            <div class="error-icon">⚠️</div>
+            <div class="error-message">
+              {{ store.error || t('main.errorGeneric') }}
             </div>
           </div>
 
-          <div v-if="store.error || store.hasError" class="error-container">
-            <div class="error-row">
-              <div class="error-icon">⚠️</div>
-              <div class="error-message">
-                {{ store.error || t('main.errorGeneric') }}
-              </div>
-            </div>
+          <button
+            v-if="store.canReconnect"
+            class="error-action-button no-drag"
+            :disabled="store.isStarting || store.isProcessing || store.isConnecting"
+            @click="store.reconnect()"
+          >
+            {{ t('errors.actions.reconnect') }}
+          </button>
 
-            <button
-              v-if="store.canReconnect"
-              class="error-action-button no-drag"
-              :disabled="store.isStarting || store.isProcessing || store.isConnecting"
-              @click="store.reconnect()"
-            >
-              {{ t('errors.actions.reconnect') }}
-            </button>
-
-            <button
-              v-if="store.canActivateLicense"
-              class="error-action-button no-drag"
-              @click="openProfileWithLicense"
-            >
-              {{ t('errors.actions.activateLicense') }}
-            </button>
-          </div>
+          <button
+            v-if="store.canActivateLicense"
+            class="error-action-button no-drag"
+            @click="openProfileWithLicense"
+          >
+            {{ t('errors.actions.activateLicense') }}
+          </button>
         </div>
       </div>
 
-      <div v-if="askComposerOpen" class="ask-composer no-drag">
+      <div v-if="askComposerOpen && !localTimelineMutationsDisabled" class="ask-composer no-drag">
         <div class="ask-composer-header">
           <div class="ask-composer-title">Сообщение</div>
           <button class="ask-composer-close" title="Скрыть" @click="askComposerOpen = false">
@@ -1455,13 +1697,13 @@ const onChatMouseDown = (e: MouseEvent) => {
               </button>
             </template>
           </v-tooltip>
-          <v-tooltip :text="chatStore.isHaikuStreaming ? 'Отменить генерацию' : 'Отправить в AI'" location="top">
+          <v-tooltip :text="chatStore.isHaikuStreaming ? (chatStore.companionModeEnabled ? 'Генерация идёт на backend' : 'Отменить генерацию') : 'Отправить в AI'" location="top">
             <template #activator="{ props: tp }">
               <button
                 v-bind="tp"
                 class="haiku-button no-drag"
                 :class="{ loading: chatStore.isHaikuStreaming }"
-                :disabled="!chatStore.canRequestHaiku && !chatStore.isHaikuStreaming"
+                :disabled="(!chatStore.canRequestHaiku && !chatStore.isHaikuStreaming) || (chatStore.companionModeEnabled && chatStore.isHaikuStreaming)"
                 @pointerenter="onHaikuPointerEnter"
                 @pointerleave="onHaikuPointerLeave"
                 @click="onHaikuClick"
@@ -1473,7 +1715,7 @@ const onChatMouseDown = (e: MouseEvent) => {
           </v-tooltip>
         </div>
         <div class="controls-right no-drag">
-          <v-tooltip v-if="chatStore.selectedCount > 0" text="Снять выделение" location="top">
+          <v-tooltip v-if="!localTimelineMutationsDisabled && chatStore.selectedCount > 0" text="Снять выделение" location="top">
             <template #activator="{ props: tp }">
               <div v-bind="tp" class="selection-clear-wrapper">
                 <button
@@ -1527,6 +1769,7 @@ const onChatMouseDown = (e: MouseEvent) => {
     <UpdateDialog v-model="showUpdateDialog" />
 
     <button
+      v-if="!localTimelineMutationsDisabled"
       class="ask-fab no-drag"
       :class="{ open: askComposerOpen }"
       title="Сообщение"
@@ -1536,7 +1779,7 @@ const onChatMouseDown = (e: MouseEvent) => {
     </button>
 
     <button
-      v-if="codeSelectionUi.visible"
+      v-if="codeSelectionUi.visible && !localTimelineMutationsDisabled"
       class="code-selection-robot-button no-drag"
       :style="{ left: `${codeSelectionUi.x}px`, top: `${codeSelectionUi.y}px` }"
       title="Спросить про выделенное"
@@ -1734,6 +1977,9 @@ const onChatMouseDown = (e: MouseEvent) => {
   font-weight: 600;
   color: var(--color-text);
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .header-right {
@@ -1831,6 +2077,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 }
 
 .minimize-button,
+.companion-button,
 .settings-button,
 .profile-button {
   background: none;
@@ -1853,14 +2100,22 @@ const onChatMouseDown = (e: MouseEvent) => {
 }
 
 .minimize-button:hover,
+.companion-button:hover,
 .settings-button:hover,
 .profile-button:hover {
   opacity: 1;
   background: rgba(255, 255, 255, 0.1);
 }
 
+.companion-button.active {
+  opacity: 1;
+  background: rgba(59, 130, 246, 0.18);
+  color: rgba(255, 255, 255, 0.95);
+}
+
 
 :global(.theme-light) .minimize-button:hover,
+:global(.theme-light) .companion-button:hover,
 :global(.theme-light) .settings-button:hover,
 :global(.theme-light) .profile-button:hover {
   background: rgba(0, 0, 0, 0.06);
@@ -1883,108 +2138,13 @@ const onChatMouseDown = (e: MouseEvent) => {
 }
 
 :global(.os-windows) .minimize-button,
+:global(.os-windows) .companion-button,
 :global(.os-windows) .settings-button {
   padding: 2px 4px;
 }
 
 :global(.os-windows) .settings-button {
   font-size: 19px;
-}
-
-.chat-area {
-  min-height: 60px;
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  box-sizing: border-box;
-  overflow: hidden;
-  flex: 1;
-}
-
-.chat-scroll {
-  flex: 1;
-  width: 100%;
-  overflow-y: auto;
-  padding: var(--spacing-sm);
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-xs);
-  position: relative;
-}
-
-.chat-scroll.selecting {
-  user-select: none;
-}
-
-.lasso-rect {
-  position: absolute;
-  z-index: 5;
-  pointer-events: none;
-  border: 1px solid rgba(76, 175, 80, 0.55);
-  background: rgba(76, 175, 80, 0.12);
-  border-radius: 6px;
-}
-
-.chat-empty {
-  width: 100%;
-  color: var(--color-text);
-  opacity: 0.85;
-  font-size: 16px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-}
-
-.chat-row {
-  width: 100%;
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  position: relative;
-}
-
-.chat-row.incoming {
-  justify-content: flex-start;
-}
-
-.chat-row.outgoing {
-  justify-content: flex-end;
-}
-
-.chat-bubble {
-  max-width: calc(92% - 40px);
-  padding: 8px 10px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--color-text);
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-  position: relative;
-}
-
-.chat-actions {
-  display: flex;
-  flex-direction: row;
-  gap: 6px;
-  align-self: center;
-  opacity: 0;
-  transition: opacity 0.12s ease;
-  z-index: 2;
-}
-
-.chat-row.outgoing .chat-actions {
-  position: absolute;
-  right: calc(92% - 34px);
-  top: var(--actions-y, 0px);
-  align-self: auto;
-}
-
-.chat-row:hover .chat-actions,
-.chat-row:focus-within .chat-actions {
-  opacity: 1;
 }
 
 .chat-action-button {
@@ -2007,393 +2167,6 @@ const onChatMouseDown = (e: MouseEvent) => {
   opacity: 1;
   transform: translateY(-0.5px);
 }
-
-.chat-text-editable {
-  outline: none;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.chat-text-editable:focus {
-  outline: 2px solid rgba(59, 130, 246, 0.35);
-  outline-offset: 2px;
-  border-radius: 8px;
-}
-
-.chat-row.incoming .chat-bubble {
-  color: var(--color-accent);
-}
-
-.chat-row.outgoing .chat-bubble {
-  width: calc(92% - 40px);
-  background: rgba(59, 130, 246, 0.16);
-  border-color: rgba(59, 130, 246, 0.25);
-  color: var(--color-text);
-}
-
-.chat-row.assistant-response .chat-bubble {
-  width: calc(100% - 18px);
-  max-width: calc(100% - 18px);
-}
-
-.chat-row.assistant-response .chat-actions {
-  right: 10px;
-}
-
-.chat-row.outgoing.prompt .chat-bubble {
-  background: rgba(168, 85, 247, 0.16);
-  border-color: rgba(168, 85, 247, 0.28);
-}
-
-.chat-attachments {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.chat-attachment {
-  position: relative;
-  width: 96px;
-  height: 64px;
-  border-radius: 10px;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(0, 0, 0, 0.18);
-}
-
-.chat-attachment-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.chat-bubble.clickable {
-  cursor: pointer;
-}
-
-.chat-bubble.clickable:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.chat-row.anchor .chat-bubble {
-  outline: 2px solid rgba(244, 67, 54, 0.55);
-  outline-offset: 1px;
-}
-
-.chat-row.selected .chat-bubble {
-  outline: 2px solid rgba(76, 175, 80, 0.7);
-  outline-offset: 1px;
-}
-
-.chat-row.out-of-context .chat-bubble {
-  border-color: rgba(244, 67, 54, 0.25);
-}
-
-.chat-row.partial .chat-bubble {
-  opacity: 0.85;
-}
-
-.chat-row.error .chat-bubble {
-  border-color: rgba(244, 67, 54, 0.35);
-  background: rgba(244, 67, 54, 0.12);
-}
-
-.chat-icon {
-  font-size: 16px;
-  opacity: 0.9;
-  margin-right: 6px;
-}
-
-.chat-text {
-  white-space: pre-wrap;
-}
-
-.chat-text-deleted {
-  font-style: italic;
-  color: rgba(255, 255, 255, 0.35);
-}
-
-:global(.theme-light) .chat-text-deleted {
-  color: rgba(0, 0, 0, 0.35);
-}
-
-.chat-bubble.deleted {
-  background: transparent;
-  border-color: transparent;
-  cursor: default;
-}
-
-.chat-text-highlighted {
-  white-space: pre-wrap;
-  display: inline;
-}
-
-.chat-markdown {
-  display: block;
-  white-space: normal;
-}
-
-.chat-markdown :deep(p) {
-  margin: 4px 0;
-}
-
-.chat-markdown :deep(h1),
-.chat-markdown :deep(h2),
-.chat-markdown :deep(h3),
-.chat-markdown :deep(h4),
-.chat-markdown :deep(h5),
-.chat-markdown :deep(h6) {
-  font-weight: 700;
-  margin: 6px 0 4px;
-  line-height: 1.25;
-}
-
-.chat-markdown :deep(h1) {
-  font-size: 1.05em;
-}
-
-.chat-markdown :deep(h2) {
-  font-size: 1.02em;
-}
-
-.chat-markdown :deep(h3),
-.chat-markdown :deep(h4),
-.chat-markdown :deep(h5),
-.chat-markdown :deep(h6) {
-  font-size: 0.98em;
-}
-
-.chat-markdown :deep(ul),
-.chat-markdown :deep(ol) {
-  margin: 6px 0 10px;
-  padding-left: 18px;
-}
-
-.chat-markdown :deep(li) {
-  margin: 2px 0;
-}
-
-.chat-markdown :deep(.code-block) {
-  display: block;
-  margin: 6px 0;
-  border-radius: 8px;
-  overflow: hidden;
-  position: relative;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(0, 0, 0, 0.32);
-}
-
-.chat-markdown :deep(.code-block:last-child) {
-  margin-bottom: 0;
-}
-
-.chat-markdown :deep(.code-block::before) {
-  content: attr(data-lang);
-  position: absolute;
-  top: 6px;
-  right: 10px;
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.35);
-  text-transform: uppercase;
-  pointer-events: none;
-  font-family: inherit;
-  z-index: 1;
-}
-
-.chat-markdown :deep(.code-block pre) {
-  margin: 0;
-  padding: 12px 14px;
-  overflow-x: auto;
-  background: transparent;
-  font-size: 12.5px;
-  line-height: 1.5;
-}
-
-.chat-markdown :deep(.code-block pre code) {
-  font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Menlo, Monaco, Consolas, monospace;
-  font-size: 12.5px;
-  line-height: 1.5;
-  background: transparent;
-  padding: 0;
-  border-radius: 0;
-}
-
-.chat-markdown :deep(.code-block-collapsible pre) {
-  transition: max-height 0.3s ease;
-}
-
-.chat-markdown :deep(.code-block-collapsible.collapsed pre) {
-  /* Ровно ~25 строк + вертикальные паддинги (12px*2) */
-  max-height: calc(37.5em + 24px);
-  overflow: hidden;
-}
-
-.chat-markdown :deep(.code-block-collapsible.collapsed::after) {
-  content: '';
-  position: absolute;
-  bottom: 36px;
-  left: 0;
-  right: 0;
-  height: 88px;
-  background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.65));
-  pointer-events: none;
-}
-
-.chat-markdown :deep(.code-block-toggle) {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  padding: 6px 0;
-  border: none;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
-  color: rgba(255, 255, 255, 0.55);
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-  font-family: inherit;
-}
-
-.chat-markdown :deep(.code-block-toggle:hover) {
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.85);
-}
-
-.chat-markdown :deep(.collapsed .code-block-toggle::before) {
-  content: 'Показать полностью ▾';
-}
-
-.chat-markdown :deep(.code-block-collapsible:not(.collapsed) .code-block-toggle::before) {
-  content: 'Свернуть ▴';
-}
-
-.chat-markdown :deep(code) {
-  font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Menlo, Monaco, Consolas, monospace;
-  font-size: 0.92em;
-  padding: 1px 5px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.chat-markdown :deep(a) {
-  color: var(--color-accent);
-  text-decoration: none;
-}
-
-.chat-markdown :deep(a:hover) {
-  text-decoration: underline;
-}
-
-.chat-text-highlighted :deep(.code-block) {
-  display: block;
-  margin: 6px 0;
-  border-radius: 8px;
-  overflow: hidden;
-  position: relative;
-}
-
-.chat-text-highlighted :deep(.code-block:last-child) {
-  margin-bottom: 0;
-}
-
-.chat-text-highlighted :deep(.code-block::before) {
-  content: attr(data-lang);
-  position: absolute;
-  top: 6px;
-  right: 10px;
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.35);
-  text-transform: uppercase;
-  pointer-events: none;
-  font-family: inherit;
-  z-index: 1;
-}
-
-.chat-text-highlighted :deep(.code-block-collapsible .shiki) {
-  transition: max-height 0.3s ease;
-}
-
-.chat-text-highlighted :deep(.code-block-collapsible.collapsed .shiki) {
-  max-height: 360px;
-  overflow: hidden;
-}
-
-.chat-text-highlighted :deep(.code-block-collapsible.collapsed::after) {
-  content: '';
-  position: absolute;
-  bottom: 36px;
-  left: 0;
-  right: 0;
-  height: 80px;
-  background: linear-gradient(to bottom, transparent, #24292e);
-  pointer-events: none;
-  border-radius: 0 0 8px 8px;
-}
-
-.chat-text-highlighted :deep(.code-block-toggle) {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  padding: 6px 0;
-  border: none;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
-  color: rgba(255, 255, 255, 0.55);
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-  font-family: inherit;
-}
-
-.chat-text-highlighted :deep(.code-block-toggle:hover) {
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.85);
-}
-
-.chat-text-highlighted :deep(.collapsed .code-block-toggle::before) {
-  content: 'Показать полностью ▾';
-}
-
-.chat-text-highlighted :deep(.code-block-collapsible:not(.collapsed) .code-block-toggle::before) {
-  content: 'Свернуть ▴';
-}
-
-.chat-text-highlighted :deep(.shiki) {
-  margin: 0;
-  padding: 12px 14px;
-  border-radius: 8px 8px 0 0;
-  font-size: 12.5px;
-  line-height: 1.5;
-  overflow-x: auto;
-  tab-size: 2;
-}
-
-.chat-text-highlighted :deep(.code-block:not(.code-block-collapsible) .shiki) {
-  border-radius: 8px;
-}
-
-.chat-text-highlighted :deep(.shiki code) {
-  font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Menlo, Monaco, Consolas, monospace;
-  white-space: pre;
-}
-
-.chat-cursor {
-  display: inline-block;
-  margin-left: 2px;
-  opacity: 0.9;
-  animation: chat-cursor-blink 1s steps(2, end) infinite;
-}
-
-@keyframes chat-cursor-blink {
-  50% {
-    opacity: 0.25;
-  }
-}
-
 .code-selection-robot-button {
   position: fixed;
   z-index: 30;
@@ -2757,6 +2530,112 @@ const onChatMouseDown = (e: MouseEvent) => {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.companion-menu-card {
+  width: min(340px, calc(100vw - 20px));
+  border-radius: 18px;
+}
+
+.companion-menu-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.companion-menu-heading {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.companion-menu-subtitle {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+}
+
+.companion-menu-content {
+  display: grid;
+  gap: 12px;
+}
+
+.companion-menu-note {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+}
+
+.companion-qr-shell,
+.companion-qr-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.companion-qr-image {
+  width: min(220px, 100%);
+  height: auto;
+  display: block;
+  border-radius: 12px;
+}
+
+.companion-qr-placeholder {
+  min-height: 180px;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+
+.companion-link-block {
+  display: grid;
+  gap: 6px;
+}
+
+.companion-link-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-secondary);
+}
+
+.companion-link-value,
+.companion-link-secondary,
+.companion-inline-status {
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+.companion-link-value {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--color-text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.companion-link-secondary {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+}
+
+.companion-inline-status {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #8ec5ff;
+}
+
+.companion-menu-actions {
+  justify-content: space-between;
+}
+
 .selection-clear-wrapper {
   position: relative;
   display: inline-flex;
@@ -2978,46 +2857,6 @@ const onChatMouseDown = (e: MouseEvent) => {
     gap: 6px;
   }
 
-  .chat-scroll {
-    padding: 6px 4px 8px 2px;
-    gap: 6px;
-  }
-
-  .chat-row {
-    gap: 4px;
-  }
-
-  .chat-bubble {
-    padding: 8px 9px 8px 8px;
-  }
-
-  .chat-row.outgoing .chat-bubble {
-    width: calc(100% - 16px);
-  }
-
-  .chat-row.assistant-response .chat-bubble {
-    width: calc(100% - 6px);
-    max-width: calc(100% - 6px);
-  }
-
-  .chat-row.outgoing .chat-actions {
-    right: calc(100% - 10px);
-  }
-
-  .chat-row.assistant-response .chat-actions {
-    right: 6px;
-  }
-
-  .chat-markdown :deep(ul),
-  .chat-markdown :deep(ol) {
-    padding-left: 16px;
-  }
-
-  .chat-markdown :deep(.code-block pre),
-  .chat-text-highlighted :deep(.shiki) {
-    padding: 10px 12px;
-  }
-
   .controls-center,
   .controls-right {
     gap: 8px;
@@ -3072,24 +2911,12 @@ const onChatMouseDown = (e: MouseEvent) => {
   }
 
   .minimize-button,
+  .companion-button,
   .settings-button,
-  .profile-button {
+  .profile-button,
+  .prompt-button {
     font-size: 20px;
     padding: 1px 4px;
-  }
-
-  .chat-scroll {
-    padding: 4px 2px 8px 0;
-  }
-
-  .chat-bubble {
-    padding: 8px;
-    border-radius: 10px;
-  }
-
-  .chat-row.assistant-response .chat-bubble {
-    width: calc(100% - 2px);
-    max-width: calc(100% - 2px);
   }
 
   .controls-center,
@@ -3129,6 +2956,23 @@ const onChatMouseDown = (e: MouseEvent) => {
 }
 
 @media (max-width: 340px) {
+  .title {
+    font-size: 14px;
+  }
+
+  .header-right {
+    gap: 0;
+  }
+
+  .minimize-button,
+  .companion-button,
+  .settings-button,
+  .profile-button,
+  .prompt-button {
+    font-size: 18px;
+    padding: 1px 3px;
+  }
+
   .controls-right {
     display: block;
     left: 4px;
@@ -3139,19 +2983,19 @@ const onChatMouseDown = (e: MouseEvent) => {
 
   .controls-right .selection-clear-wrapper {
     position: absolute;
-    left: 0;
+    right: 0;
     bottom: 0;
   }
 
   .controls-right .context-clear-button {
     position: absolute;
-    right: 0;
+    left: 0;
     bottom: 0;
   }
 
   .controls-right .history-clear-button {
     position: absolute;
-    right: 0;
+    left: 0;
     top: 0;
   }
 }

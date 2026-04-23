@@ -3,6 +3,8 @@ import { computed, nextTick, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isTauriAvailable } from '../utils/tauri';
+import type { CompanionSnapshotData } from '@/windowing/stateSync';
+import { CMD_SET_COMPANION_SYSTEM_PROMPT } from '@/windowing/stateSync';
 import {
   EVENT_HAIKU_DELTA,
   EVENT_HAIKU_DONE,
@@ -139,6 +141,7 @@ export const useChatStore = defineStore('chat', () => {
   const micDominantUntilMs = ref<number>(0);
   const microphoneMuteSupported = ref<boolean>(false);
   const microphoneMuteSource = ref<string>('unknown');
+  const companionModeEnabled = ref<boolean>(false);
 
   const isHaikuStreaming = computed(() => Object.keys(activeHaikuRequests.value).length > 0);
   const ignoredHaikuRequestIds = ref<Record<string, true>>({});
@@ -497,6 +500,18 @@ export const useChatStore = defineStore('chat', () => {
     } catch {
       // ignore
     }
+    void syncCompanionSystemPrompt();
+  }
+
+  async function syncCompanionSystemPrompt(): Promise<void> {
+    if (!isTauriAvailable()) return;
+    try {
+      await invoke(CMD_SET_COMPANION_SYSTEM_PROMPT, {
+        prompt: sanitizeSystemPrompt(systemPrompt.value),
+      });
+    } catch (err) {
+      console.warn('Failed to sync companion system prompt:', err);
+    }
   }
   function isMicDominantNow(nowMs: number = Date.now()): boolean {
     return nowMs < micDominantUntilMs.value;
@@ -764,6 +779,10 @@ export const useChatStore = defineStore('chat', () => {
     const requestId = await invoke<string>('start_haiku_stream', {
       text: contextText,
       system_prompt: sanitizeSystemPrompt(systemPrompt.value),
+      companionMeta: {
+        insertAfterId,
+        createdAtMs: now,
+      },
     });
     markRequestActive(requestId);
 
@@ -833,6 +852,11 @@ export const useChatStore = defineStore('chat', () => {
           dataBase64: img.dataBase64,
         })),
         systemPrompt: sanitizeSystemPrompt(systemPrompt.value),
+        companionMeta: {
+          promptMessageId,
+          promptCreatedAtMs: createdAtMs,
+          createdAtMs,
+        },
       });
 
       markRequestActive(requestId);
@@ -874,6 +898,10 @@ export const useChatStore = defineStore('chat', () => {
         questionText: questionText,
         images: [],
         systemPrompt: sanitizeSystemPrompt(systemPrompt.value),
+        companionMeta: {
+          insertAfterId: messageId,
+          createdAtMs,
+        },
       });
 
       markRequestActive(requestId);
@@ -1173,6 +1201,7 @@ export const useChatStore = defineStore('chat', () => {
     );
 
     await syncMicrophoneMuteState();
+    await syncCompanionSystemPrompt();
   }
 
   function cleanup(): void {
@@ -1224,6 +1253,87 @@ export const useChatStore = defineStore('chat', () => {
     followTail();
   }
 
+  function hydrateFromCompanionSnapshot(snapshot: CompanionSnapshotData): void {
+    const timeline = [...(snapshot.timeline ?? [])]
+      .filter((message) => !message.deleted)
+      .sort((a, b) => a.seq - b.seq);
+
+    const toAttachments = (attachments: CompanionSnapshotData['timeline'][number]['attachments']) =>
+      (attachments ?? []).map((attachment) => ({
+        id: attachment.id,
+        kind: 'image' as const,
+        mime: attachment.mime,
+        dataUrl: attachment.dataUrl,
+      }));
+
+    micMessages.value = timeline
+      .filter((message) => message.kind === 'mic')
+      .map((message) => ({
+        id: message.id,
+        kind: 'mic' as const,
+        role: (message.role as ChatMessageRole) || 'outgoing',
+        status: (message.status as ChatMessageStatus) || 'final',
+        text: message.text,
+        createdAtMs: message.createdAtMs,
+        seq: message.seq,
+        attachments: toAttachments(message.attachments),
+      }));
+
+    promptMessages.value = timeline
+      .filter((message) => message.kind === 'prompt')
+      .map((message) => ({
+        id: message.id,
+        kind: 'prompt' as const,
+        role: (message.role as ChatMessageRole) || 'outgoing',
+        status: (message.status as ChatMessageStatus) || 'final',
+        text: message.text,
+        createdAtMs: message.createdAtMs,
+        seq: message.seq,
+        attachments: toAttachments(message.attachments),
+      }));
+
+    haikuMessages.value = timeline
+      .filter((message) => message.kind === 'haiku')
+      .map((message) => ({
+        id: message.id,
+        kind: 'haiku' as const,
+        role: (message.role as ChatMessageRole) || 'outgoing',
+        status: (message.status as ChatMessageStatus) || 'streaming',
+        text: message.text,
+        createdAtMs: message.createdAtMs,
+        seq: message.seq,
+        insertAfterId: message.insertAfterId ?? undefined,
+        attachments: toAttachments(message.attachments),
+      }));
+
+    activeHaikuRequests.value = Object.fromEntries(
+      haikuMessages.value
+        .filter((message) => message.status === 'streaming')
+        .map((message) => [message.id, true] as const)
+    );
+    ignoredHaikuRequestIds.value = {};
+
+    microphoneEnabled.value = !!snapshot.microphone.enabled;
+    microphoneMuteSupported.value = !!snapshot.microphone.supported;
+    microphoneMuteSource.value = String(snapshot.microphone.source ?? 'unknown');
+    companionModeEnabled.value = !!snapshot.controls.companionModeEnabled;
+
+    micPartialText.value = String(snapshot.live.microphonePartialText ?? '');
+    micAccumulatedText.value = '';
+    micLastFinalizedText.value = '';
+    micCurrentUtteranceStart.value = -1;
+    systemAudioLevel.value = 0;
+    liveMicSinceMs.value = micPartialText.value
+      ? Number(snapshot.live.microphonePartialStartedAtMs || Date.now())
+      : 0;
+
+    if (companionModeEnabled.value) {
+      clearSelection();
+    } else {
+      selectedMessageIds.value = filterSelectableIds(selectedMessageIds.value);
+    }
+  }
+
   return {
     messages,
     sttMessages,
@@ -1231,6 +1341,7 @@ export const useChatStore = defineStore('chat', () => {
     microphoneEnabled,
     microphoneMuteSupported,
     microphoneMuteSource,
+    companionModeEnabled,
     setMicrophoneEnabled,
     toggleMicrophoneEnabled,
     syncMicrophoneMuteState,
@@ -1269,6 +1380,7 @@ export const useChatStore = defineStore('chat', () => {
     cancelActiveHaikuStreams,
     clearChatOutgoing,
     clearAllHistory,
+    hydrateFromCompanionSnapshot,
     deleteMessage,
 
     initialize,

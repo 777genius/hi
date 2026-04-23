@@ -119,6 +119,14 @@ pub fn run() {
             commands::get_auth_state_snapshot,
             commands::get_auth_session_snapshot,
             commands::get_ui_preferences_snapshot,
+            commands::get_companion_snapshot,
+            commands::get_companion_server_status,
+            commands::enable_companion_mode,
+            commands::disable_companion_mode,
+            commands::companion_clear_context,
+            commands::companion_clear_history,
+            commands::companion_request_ai,
+            commands::set_companion_system_prompt,
             commands::update_ui_preferences,
             commands::update_app_config,
             commands::start_microphone_test,
@@ -626,12 +634,34 @@ pub fn run() {
                 state.start_vad_timeout_handler(app.handle().clone());
             }
 
-            // Локальный HTTP companion для проверки доступа с телефона по Wi‑Fi.
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = crate::presentation::companion::start_test_server().await {
-                    log::error!("Failed to start companion test server: {}", e);
-                }
-            });
+            #[cfg(debug_assertions)]
+            let disable_dev_companion_auto_start =
+                std::env::var("VOICETEXT_DISABLE_DEV_COMPANION_AUTO_START")
+                    .ok()
+                    .as_deref()
+                    == Some("1");
+            #[cfg(not(debug_assertions))]
+            let disable_dev_companion_auto_start = true;
+
+            if cfg!(debug_assertions) && !is_e2e && !disable_dev_companion_auto_start {
+                let app_handle_for_companion = app.handle().clone();
+                log::info!("Debug mode - auto-starting companion server");
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) =
+                        crate::presentation::companion::enable_mode(&app_handle_for_companion).await
+                    {
+                        log::warn!("Failed to auto-start companion in debug: {}", e);
+                    }
+                });
+            } else if cfg!(debug_assertions) && disable_dev_companion_auto_start {
+                log::info!(
+                    "Dev companion auto-start disabled by VOICETEXT_DISABLE_DEV_COMPANION_AUTO_START=1"
+                );
+            } else {
+                log::info!(
+                    "Companion runtime initialized - listener stays disabled until enable_companion_mode"
+                );
+            }
 
             // Запускаем фоновую проверку обновлений (каждые 6 часов)
             log::info!("Starting background update checker");

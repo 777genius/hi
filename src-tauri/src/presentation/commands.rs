@@ -8,7 +8,9 @@ use crate::domain::{
 };
 use crate::infrastructure::{AuthSession, AuthStore, AuthUser, ConfigStore};
 use crate::presentation::{
-    events::*, AppState, AudioLevelPayload, ConnectionQualityPayload, FinalTranscriptionPayload,
+    companion::{CompanionServerStatus, CompanionSnapshotEnvelope},
+    events::*,
+    AppState, AudioLevelPayload, ConnectionQualityPayload, FinalTranscriptionPayload,
     MicrophoneMuteStatePayload, MicrophoneTestLevelPayload, PartialTranscriptionPayload,
     RecordingStatusPayload, TranscriptionErrorPayload,
 };
@@ -19,7 +21,7 @@ pub struct AudioPermissionStatus {
     pub microphone_granted: bool,
 }
 
-const DEFAULT_MICROPHONE_MUTE_HOTKEY: &str = "CmdOrCtrl+Shift+M";
+const DEFAULT_MICROPHONE_MUTE_HOTKEY: &str = "Alt+Z";
 
 #[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -115,6 +117,7 @@ async fn sync_microphone_transcription_enabled_internal(
         {
             log::debug!("Microphone transcription stop skipped/failed: {}", e);
         }
+        crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
         return Ok(());
     }
 
@@ -140,24 +143,55 @@ async fn sync_microphone_transcription_enabled_internal(
     Ok(())
 }
 
-pub async fn toggle_microphone_muted_internal(
+pub async fn set_microphone_muted_raw(
     state: &AppState,
     app_handle: AppHandle,
+    muted: bool,
 ) -> Result<MicrophoneMuteStatePayload, String> {
     let current = crate::infrastructure::microphone_mute::get_microphone_mute_status()
         .map_err(|e| format!("Не удалось получить статус микрофона: {}", e))?;
-    let target_muted = !current.muted;
-    let restore_hint = *state.microphone_restore_input_volume.read().await;
+    if current.muted == muted {
+        let payload = to_microphone_mute_state_payload(current, None);
+        emit_microphone_mute_state(&app_handle, &payload).await;
+        sync_microphone_transcription_enabled_internal(state, app_handle.clone(), !payload.muted)
+            .await?;
+        return Ok(payload);
+    }
 
+    // Hotkey path не проходит через optimistic update на frontend как обычный клик по кнопке,
+    // поэтому публикуем целевое состояние заранее, чтобы иконка/tooltip менялись без задержки.
+    let optimistic_payload = to_microphone_mute_state_payload(
+        crate::infrastructure::microphone_mute::MicrophoneMuteStatus {
+            muted,
+            supported: current.supported,
+            source: current.source.clone(),
+        },
+        None,
+    );
+    emit_microphone_mute_state(&app_handle, &optimistic_payload).await;
+
+    let restore_hint = *state.microphone_restore_input_volume.read().await;
     let outcome =
-        crate::infrastructure::microphone_mute::set_microphone_muted(target_muted, restore_hint)
-            .map_err(|e| format!("Не удалось переключить mute микрофона: {}", e))?;
+        match crate::infrastructure::microphone_mute::set_microphone_muted(muted, restore_hint) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                let rollback_payload = to_microphone_mute_state_payload(current, None);
+                emit_microphone_mute_state(&app_handle, &rollback_payload).await;
+                sync_microphone_transcription_enabled_internal(
+                    state,
+                    app_handle.clone(),
+                    !rollback_payload.muted,
+                )
+                .await?;
+                return Err(format!("Не удалось переключить mute микрофона: {}", e));
+            }
+        };
 
     {
         let mut restore = state.microphone_restore_input_volume.write().await;
-        if target_muted {
+        if muted {
             *restore = outcome.restore_input_volume;
-        } else if outcome.status.muted {
+        } else if !outcome.status.muted {
             *restore = outcome.restore_input_volume.or(*restore);
         }
     }
@@ -181,6 +215,15 @@ pub async fn toggle_microphone_muted_internal(
     Ok(payload)
 }
 
+pub async fn toggle_microphone_muted_internal(
+    state: &AppState,
+    app_handle: AppHandle,
+) -> Result<MicrophoneMuteStatePayload, String> {
+    let current = crate::infrastructure::microphone_mute::get_microphone_mute_status()
+        .map_err(|e| format!("Не удалось получить статус микрофона: {}", e))?;
+    set_microphone_muted_raw(state, app_handle, !current.muted).await
+}
+
 #[tauri::command]
 pub async fn get_microphone_mute_state() -> Result<MicrophoneMuteStatePayload, String> {
     let status = crate::infrastructure::microphone_mute::get_microphone_mute_status()
@@ -194,50 +237,17 @@ pub async fn set_microphone_muted(
     app_handle: AppHandle,
     muted: bool,
 ) -> Result<MicrophoneMuteStatePayload, String> {
-    let current = crate::infrastructure::microphone_mute::get_microphone_mute_status()
-        .map_err(|e| format!("Не удалось получить статус микрофона: {}", e))?;
-    if current.muted == muted {
-        let payload = to_microphone_mute_state_payload(current, None);
-        emit_microphone_mute_state(&app_handle, &payload).await;
-        sync_microphone_transcription_enabled_internal(
-            state.inner(),
-            app_handle.clone(),
-            !payload.muted,
-        )
-        .await?;
-        return Ok(payload);
-    }
-
-    let restore_hint = *state.microphone_restore_input_volume.read().await;
-    let outcome = crate::infrastructure::microphone_mute::set_microphone_muted(muted, restore_hint)
-        .map_err(|e| format!("Не удалось переключить mute микрофона: {}", e))?;
-
-    {
-        let mut restore = state.microphone_restore_input_volume.write().await;
-        if muted {
-            *restore = outcome.restore_input_volume;
-        } else if !outcome.status.muted {
-            *restore = outcome.restore_input_volume.or(*restore);
-        }
-    }
-
-    sync_microphone_transcription_enabled_internal(
+    let response = crate::presentation::companion_actions::ensure_microphone_muted(
         state.inner(),
-        app_handle.clone(),
-        !outcome.status.muted,
+        &app_handle,
+        muted,
     )
     .await?;
-
-    let payload = to_microphone_mute_state_payload(
-        outcome.status,
-        if outcome.applied_methods.is_empty() {
-            None
-        } else {
-            Some(outcome.applied_methods.join(","))
-        },
-    );
-    emit_microphone_mute_state(&app_handle, &payload).await;
-    Ok(payload)
+    match response.action_result.as_str() {
+        "busy_transition" => Err("Transition in progress".to_string()),
+        "rejected_auth" => Err("Authentication required".to_string()),
+        _ => get_microphone_mute_state().await,
+    }
 }
 
 #[tauri::command]
@@ -245,7 +255,18 @@ pub async fn toggle_microphone_muted(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<MicrophoneMuteStatePayload, String> {
-    toggle_microphone_muted_internal(state.inner(), app_handle).await
+    let current = get_microphone_mute_state().await?;
+    let response = crate::presentation::companion_actions::ensure_microphone_muted(
+        state.inner(),
+        &app_handle,
+        !current.muted,
+    )
+    .await?;
+    match response.action_result.as_str() {
+        "busy_transition" => Err("Transition in progress".to_string()),
+        "rejected_auth" => Err("Authentication required".to_string()),
+        _ => get_microphone_mute_state().await,
+    }
 }
 
 fn spawn_microphone_transcription_start(
@@ -285,6 +306,15 @@ fn spawn_microphone_transcription_start(
                     session_id,
                     "microphone",
                 );
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    crate::presentation::companion_timeline::on_microphone_partial(
+                        state.inner(),
+                        &payload,
+                    )
+                    .await;
+                    let _ = crate::presentation::companion::publish_snapshot_sse_only(&app_handle)
+                        .await;
+                }
                 let _ = app_handle.emit(EVENT_TRANSCRIPTION_PARTIAL, payload);
             });
         });
@@ -297,12 +327,27 @@ fn spawn_microphone_transcription_start(
                     session_id,
                     "microphone",
                 );
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    crate::presentation::companion_timeline::on_microphone_final(
+                        state.inner(),
+                        &payload,
+                    )
+                    .await;
+                    let _ = crate::presentation::companion::publish_snapshot_sse_only(&app_handle)
+                        .await;
+                }
                 let _ = app_handle.emit(EVENT_TRANSCRIPTION_FINAL, payload);
             });
         });
 
         let app_handle_mic_level = app_handle_partial.clone();
         let on_audio_level_mic = Arc::new(move |level: f32| {
+            if let Some(state) = app_handle_mic_level.try_state::<AppState>() {
+                crate::presentation::companion_timeline::update_microphone_audio_level(
+                    state.inner(),
+                    level,
+                );
+            }
             let payload = AudioLevelPayload { level };
             let _ = app_handle_mic_level.emit(EVENT_MICROPHONE_AUDIO_LEVEL, payload);
         });
@@ -357,20 +402,20 @@ fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPay
     }
 }
 
-/// Start recording voice
-#[tauri::command]
-pub async fn start_recording(
-    state: State<'_, AppState>,
+fn next_recording_session_id(state: &AppState) -> u64 {
+    state.transcription_session_seq.load(Ordering::Relaxed) + 1
+}
+
+/// Start recording voice on the backend path shared with companion actions.
+pub async fn start_recording_raw(
+    state: &AppState,
     app_handle: AppHandle,
 ) -> Result<String, String> {
     log::info!("Command: start_recording");
 
-    // Новый идентификатор сессии записи. Маркируем им все события transcription:* и recording:status,
-    // чтобы frontend мог игнорировать "поздние" сообщения от предыдущей сессии.
-    let session_id = state
-        .transcription_session_seq
-        .fetch_add(1, Ordering::Relaxed)
-        + 1;
+    // Не коммитим seq заранее: если старт упадёт до реального запуска, не хотим "сжигать" session_id.
+    let session_id = next_recording_session_id(state);
+    crate::presentation::companion::reset_session_timeline(state).await;
     state
         .active_transcription_session_id
         .store(session_id, Ordering::Relaxed);
@@ -387,7 +432,28 @@ pub async fn start_recording(
 
         tokio::spawn(async move {
             // Update state
-            *state_partial.write().await = Some(text.clone());
+            let trimmed = text.trim().to_string();
+            *state_partial.write().await = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.clone())
+            };
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                if trimmed.is_empty() {
+                    state
+                        .companion_live_system_started_at_ms
+                        .store(0, Ordering::Relaxed);
+                } else if state
+                    .companion_live_system_started_at_ms
+                    .load(Ordering::Relaxed)
+                    == 0
+                {
+                    state.companion_live_system_started_at_ms.store(
+                        crate::presentation::companion_timeline::now_ms().max(0) as u64,
+                        Ordering::Relaxed,
+                    );
+                }
+            }
 
             // Emit event to frontend
             let payload = PartialTranscriptionPayload::from_transcription(
@@ -398,6 +464,11 @@ pub async fn start_recording(
             if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_PARTIAL, payload) {
                 log::error!("Failed to emit partial transcription event: {}", e);
             }
+            if let Err(e) =
+                crate::presentation::companion::publish_snapshot_sse_only(&app_handle).await
+            {
+                log::debug!("Failed to publish companion partial snapshot: {}", e);
+            }
         });
     });
 
@@ -405,7 +476,6 @@ pub async fn start_recording(
     let state_final = state.final_transcription.clone();
     let state_history = state.history.clone();
     let state_config = state.config.clone();
-
     // Callback for final transcription
     let on_final = Arc::new(move |transcription: crate::domain::Transcription| {
         let text = transcription.text.clone();
@@ -417,6 +487,11 @@ pub async fn start_recording(
         tokio::spawn(async move {
             // Update state
             *state_final.write().await = Some(text.clone());
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                state
+                    .companion_live_system_started_at_ms
+                    .store(0, Ordering::Relaxed);
+            }
 
             // Add to history
             state_history.write().await.push(transcription.clone());
@@ -430,6 +505,16 @@ pub async fn start_recording(
             }
             drop(history);
 
+            let _ = max_items;
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                crate::presentation::companion_timeline::append_system_final(
+                    state.inner(),
+                    session_id,
+                    &transcription,
+                )
+                .await;
+            }
+
             // Emit event to frontend
             let payload = FinalTranscriptionPayload::from_transcription(
                 transcription.clone(),
@@ -439,6 +524,11 @@ pub async fn start_recording(
             if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_FINAL, payload) {
                 log::error!("Failed to emit final transcription event: {}", e);
             }
+            if let Err(e) =
+                crate::presentation::companion::publish_snapshot_sse_only(&app_handle).await
+            {
+                log::debug!("Failed to publish companion final snapshot: {}", e);
+            }
         });
     });
 
@@ -447,6 +537,12 @@ pub async fn start_recording(
     // Callback for audio level visualization
     let on_audio_level = Arc::new(move |level: f32| {
         let app_handle = app_handle_level.clone();
+        if let Some(state) = app_handle.try_state::<AppState>() {
+            crate::presentation::companion_timeline::update_system_audio_level(
+                state.inner(),
+                level,
+            );
+        }
 
         // Don't spawn task for every level update - just emit directly
         let payload = AudioLevelPayload { level };
@@ -497,6 +593,9 @@ pub async fn start_recording(
                     stopped_via_hotkey: false,
                 },
             );
+            if let Err(e) = crate::presentation::companion::publish_snapshot(&app_handle).await {
+                log::debug!("Failed to publish companion error snapshot: {}", e);
+            }
         });
     });
 
@@ -573,6 +672,9 @@ pub async fn start_recording(
     // UI останется в Starting и будет ощущение "подключение идёт, но ничего не происходит".
     // Поэтому здесь явно отправляем error + status=Error тем же контрактом, что и в runtime-ошибках.
     if let Err(e) = start_result {
+        state
+            .active_transcription_session_id
+            .store(0, Ordering::Relaxed);
         // Стараемся извлечь исходную причину максимально надёжно (без парсинга строки).
         let stt = e
             .downcast_ref::<SttError>()
@@ -592,6 +694,10 @@ pub async fn start_recording(
 
         return Err(error);
     }
+
+    state
+        .transcription_session_seq
+        .store(session_id, Ordering::Relaxed);
 
     // Best-effort: параллельно запускаем транскрибацию с микрофона.
     // Важно: микрофон можно отключить из UI; при этом системный звук продолжает работать.
@@ -622,10 +728,10 @@ pub async fn start_recording(
 }
 
 /// Stop recording voice
-#[tauri::command]
-pub async fn stop_recording(
-    state: State<'_, AppState>,
+pub async fn stop_recording_raw(
+    state: &AppState,
     app_handle: AppHandle,
+    stopped_via_hotkey: bool,
 ) -> Result<String, String> {
     log::info!("Command: stop_recording");
 
@@ -648,6 +754,12 @@ pub async fn stop_recording(
         log::debug!("Microphone transcription stop skipped/failed: {}", e);
     }
 
+    *state.partial_transcription.write().await = None;
+    state
+        .companion_live_system_started_at_ms
+        .store(0, Ordering::Relaxed);
+    crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
+
     // Emit status change
     log::debug!("Emitting status: Idle (stopped_via_hotkey: false)");
     let _ = app_handle.emit(
@@ -655,11 +767,103 @@ pub async fn stop_recording(
         RecordingStatusPayload {
             session_id,
             status: RecordingStatus::Idle,
-            stopped_via_hotkey: false,
+            stopped_via_hotkey,
         },
     );
 
     Ok(result)
+}
+
+/// Abort recording start while the service is still in `Starting`.
+pub async fn abort_starting_recording_raw(
+    state: &AppState,
+    app_handle: AppHandle,
+    stopped_via_hotkey: bool,
+) -> Result<String, String> {
+    log::info!("Command: abort_starting_recording");
+
+    let session_id = state
+        .active_transcription_session_id
+        .load(Ordering::Relaxed);
+
+    let result = state
+        .transcription_service
+        .abort_starting()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Err(e) = state
+        .microphone_transcription_service
+        .stop_recording()
+        .await
+    {
+        log::debug!(
+            "Microphone transcription stop after start-abort skipped/failed: {}",
+            e
+        );
+    }
+
+    state
+        .active_transcription_session_id
+        .store(0, Ordering::Relaxed);
+    *state.partial_transcription.write().await = None;
+    *state.final_transcription.write().await = None;
+    state
+        .companion_live_system_started_at_ms
+        .store(0, Ordering::Relaxed);
+    crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
+
+    let _ = app_handle.emit(
+        EVENT_RECORDING_STATUS,
+        RecordingStatusPayload {
+            session_id,
+            status: RecordingStatus::Idle,
+            stopped_via_hotkey,
+        },
+    );
+
+    Ok(result)
+}
+
+/// Start recording voice
+#[tauri::command]
+pub async fn start_recording(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let response = crate::presentation::companion_actions::ensure_recording_started(
+        state.inner(),
+        &app_handle,
+    )
+    .await?;
+    match response.action_result.as_str() {
+        "started" => Ok("Recording started".to_string()),
+        "noop" => Ok("Recording already active".to_string()),
+        "busy_transition" => Err("Transition in progress".to_string()),
+        "rejected_auth" => Err("Authentication required".to_string()),
+        other => Ok(other.to_string()),
+    }
+}
+
+/// Stop recording voice
+#[tauri::command]
+pub async fn stop_recording(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let response = crate::presentation::companion_actions::ensure_recording_stopped(
+        state.inner(),
+        &app_handle,
+        false,
+    )
+    .await?;
+    match response.action_result.as_str() {
+        "stopped" => Ok("Recording stopped".to_string()),
+        "noop" => Ok("Recording already idle".to_string()),
+        "busy_transition" => Err("Transition in progress".to_string()),
+        "rejected_auth" => Err("Authentication required".to_string()),
+        other => Ok(other.to_string()),
+    }
 }
 
 /// Enable/disable parallel microphone transcription.
@@ -936,38 +1140,33 @@ pub async fn toggle_recording_with_window(
                 let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
             }
 
-            // Запускаем запись
-            start_recording(state.clone(), app_handle).await?;
+            // Запускаем запись через shared backend path
+            let _ = crate::presentation::companion_actions::ensure_recording_started(
+                state.inner(),
+                &app_handle,
+            )
+            .await?;
             log::info!("Recording started via hotkey");
         }
         RecordingStatus::Starting => {
-            // Запись еще запускается - игнорируем повторное нажатие
-            log::debug!("Ignoring toggle - recording is starting (WebSocket connecting, audio capture initializing)");
+            let _ = crate::presentation::companion_actions::ensure_recording_stopped(
+                state.inner(),
+                &app_handle,
+                true,
+            )
+            .await?;
+            log::info!("Recording start aborted via hotkey");
         }
         RecordingStatus::Recording => {
-            // Останавливаем запись
-            let _result = state
-                .transcription_service
-                .stop_recording()
-                .await
-                .map_err(|e| e.to_string())?;
+            // Останавливаем запись через shared backend path
+            let _ = crate::presentation::companion_actions::ensure_recording_stopped(
+                state.inner(),
+                &app_handle,
+                true,
+            )
+            .await?;
 
             log::info!("Recording stopped via hotkey");
-
-            // Эмитируем статус Idle с флагом stopped_via_hotkey
-            // Frontend скроет окно когда получит этот статус
-            let session_id = state
-                .active_transcription_session_id
-                .load(Ordering::Relaxed);
-            log::info!("Emitting status: Idle (stopped_via_hotkey: TRUE) - window will auto-hide");
-            let _ = app_handle.emit(
-                EVENT_RECORDING_STATUS,
-                RecordingStatusPayload {
-                    session_id,
-                    status: RecordingStatus::Idle,
-                    stopped_via_hotkey: true,
-                },
-            );
         }
         RecordingStatus::Processing => {
             // Игнорируем - запись уже останавливается
@@ -1024,34 +1223,31 @@ pub async fn toggle_recording_with_window_internal(
             // ВАЖНО: стартуем запись на Rust-стороне.
             // Иначе, когда окно было скрыто, WebView/JS могут быть "усыплены" и не обработать event,
             // из-за чего хоткей откроет окно, но запись не стартует и UI останется в старом состоянии.
-            let state_handle = app_handle
-                .try_state::<AppState>()
-                .ok_or_else(|| "AppState не доступен".to_string())?;
-            start_recording(state_handle, app_handle.clone()).await?;
+            let _ = crate::presentation::companion_actions::ensure_recording_started(
+                state,
+                &app_handle,
+            )
+            .await?;
             log::info!("Recording started via hotkey (internal)");
         }
         RecordingStatus::Starting => {
-            log::debug!("Ignoring toggle - recording is starting");
+            let _ = crate::presentation::companion_actions::ensure_recording_stopped(
+                state,
+                &app_handle,
+                true,
+            )
+            .await?;
+            log::info!("Recording start aborted via hotkey");
         }
         RecordingStatus::Recording => {
-            let _result = state
-                .transcription_service
-                .stop_recording()
-                .await
-                .map_err(|e| e.to_string())?;
+            let _ = crate::presentation::companion_actions::ensure_recording_stopped(
+                state,
+                &app_handle,
+                true,
+            )
+            .await?;
 
             log::info!("Recording stopped via hotkey");
-            let session_id = state
-                .active_transcription_session_id
-                .load(Ordering::Relaxed);
-            let _ = app_handle.emit(
-                EVENT_RECORDING_STATUS,
-                RecordingStatusPayload {
-                    session_id,
-                    status: RecordingStatus::Idle,
-                    stopped_via_hotkey: true,
-                },
-            );
         }
         RecordingStatus::Processing => {
             log::debug!("Ignoring toggle - recording is processing");
@@ -1366,6 +1562,68 @@ pub async fn get_ui_preferences_snapshot(
     let data = state.ui_preferences.read().await.clone();
     let revision = state.ui_preferences_revision.read().await.to_string();
     Ok(SnapshotEnvelope { revision, data })
+}
+
+#[tauri::command]
+pub async fn get_companion_snapshot(
+    app_handle: AppHandle,
+) -> Result<CompanionSnapshotEnvelope, String> {
+    crate::presentation::companion::build_current_snapshot(&app_handle).await
+}
+
+#[tauri::command]
+pub async fn get_companion_server_status(
+    app_handle: AppHandle,
+) -> Result<CompanionServerStatus, String> {
+    crate::presentation::companion::get_server_status(&app_handle).await
+}
+
+#[tauri::command]
+pub async fn enable_companion_mode(app_handle: AppHandle) -> Result<CompanionServerStatus, String> {
+    crate::presentation::companion::enable_mode(&app_handle).await
+}
+
+#[tauri::command]
+pub async fn disable_companion_mode(
+    app_handle: AppHandle,
+) -> Result<CompanionServerStatus, String> {
+    crate::presentation::companion::disable_mode(&app_handle).await?;
+    crate::presentation::companion::get_server_status(&app_handle).await
+}
+
+#[tauri::command]
+pub async fn companion_clear_context(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<crate::presentation::companion_actions::CompanionActionResponse, String> {
+    crate::presentation::companion_actions::ensure_context_cleared(state.inner(), &app_handle).await
+}
+
+#[tauri::command]
+pub async fn companion_clear_history(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<crate::presentation::companion_actions::CompanionActionResponse, String> {
+    crate::presentation::companion_actions::ensure_history_cleared(state.inner(), &app_handle).await
+}
+
+#[tauri::command]
+pub async fn companion_request_ai(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    question_text: Option<String>,
+) -> Result<crate::presentation::companion_actions::CompanionActionResponse, String> {
+    crate::presentation::companion_actions::request_ai(state.inner(), &app_handle, question_text)
+        .await
+}
+
+#[tauri::command]
+pub async fn set_companion_system_prompt(
+    state: State<'_, AppState>,
+    prompt: String,
+) -> Result<(), String> {
+    *state.companion_system_prompt.write().await = prompt.trim().to_string();
+    Ok(())
 }
 
 /// Обновить UI-настройки (тема, локаль) и уведомить все окна
@@ -2114,30 +2372,32 @@ pub async fn register_recording_hotkey(
     };
 
     if effective_hotkey != DEFAULT_MICROPHONE_MUTE_HOTKEY {
-        if let Err(e) = app_handle
-            .global_shortcut()
-            .on_shortcut(mute_shortcut, move |app, _shortcut, event| {
-                use tauri_plugin_global_shortcut::ShortcutState;
-                if event.state != ShortcutState::Pressed {
-                    return;
-                }
-
-                let app_clone = app.clone();
-                let _ = tauri::async_runtime::spawn(async move {
-                    let state_opt = app_clone.try_state::<crate::presentation::state::AppState>();
-                    if let Some(state) = state_opt {
-                        if let Err(e) =
-                            crate::presentation::commands::toggle_microphone_muted_internal(
-                                state.inner(),
-                                app_clone.clone(),
-                            )
-                            .await
-                        {
-                            log::error!("Failed to toggle microphone mute: {}", e);
-                        }
+        if let Err(e) =
+            app_handle
+                .global_shortcut()
+                .on_shortcut(mute_shortcut, move |app, _shortcut, event| {
+                    use tauri_plugin_global_shortcut::ShortcutState;
+                    if event.state != ShortcutState::Pressed {
+                        return;
                     }
-                });
-            })
+
+                    let app_clone = app.clone();
+                    let _ = tauri::async_runtime::spawn(async move {
+                        let state_opt =
+                            app_clone.try_state::<crate::presentation::state::AppState>();
+                        if let Some(state) = state_opt {
+                            if let Err(e) =
+                                crate::presentation::commands::toggle_microphone_muted_internal(
+                                    state.inner(),
+                                    app_clone.clone(),
+                                )
+                                .await
+                            {
+                                log::error!("Failed to toggle microphone mute: {}", e);
+                            }
+                        }
+                    });
+                })
         {
             log::warn!(
                 "Failed to register built-in microphone mute hotkey '{}': {}",
@@ -2363,6 +2623,7 @@ pub async fn start_haiku_stream(
     app_handle: AppHandle,
     text: String,
     system_prompt: Option<String>,
+    companion_meta: Option<CompanionAiRequestMeta>,
 ) -> Result<String, String> {
     let prompt = text.trim();
     if prompt.is_empty() {
@@ -2514,6 +2775,20 @@ pub async fn start_haiku_stream(
         .map_err(|e| e.to_string())?;
 
     let request_id = uuid::Uuid::new_v4().to_string();
+    let companion_meta = companion_meta.unwrap_or_default();
+    *state.companion_system_prompt.write().await = system_prompt.clone();
+    crate::presentation::companion_timeline::begin_haiku_message(
+        state.inner(),
+        crate::presentation::companion_timeline::CompanionHaikuStart {
+            request_id: request_id.clone(),
+            insert_after_id: companion_meta.insert_after_id.clone(),
+            created_at_ms: companion_meta
+                .created_at_ms
+                .unwrap_or_else(crate::presentation::companion_timeline::now_ms),
+        },
+    )
+    .await;
+    let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
     log::info!(
         "Command: start_haiku_stream request_id={} prompt_len={}",
         request_id,
@@ -2542,19 +2817,47 @@ pub async fn start_haiku_stream(
             .stream_text(
                 &request,
                 Box::new(move |delta| {
+                    let delta_text = delta.to_string();
                     let _ = app_handle_delta.emit(
                         EVENT_HAIKU_DELTA,
                         HaikuDeltaPayload {
                             request_id: request_id_delta.clone(),
-                            delta: delta.to_string(),
+                            delta: delta_text.clone(),
                         },
                     );
+                    let app_handle_companion = app_handle_delta.clone();
+                    let request_id = request_id_delta.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Some(state) = app_handle_companion.try_state::<AppState>() {
+                            crate::presentation::companion_timeline::append_haiku_delta(
+                                state.inner(),
+                                &request_id,
+                                &delta_text,
+                            )
+                            .await;
+                            let _ = crate::presentation::companion::publish_snapshot_sse_only(
+                                &app_handle_companion,
+                            )
+                            .await;
+                        }
+                    });
                 }),
             )
             .await;
 
         match result {
             Ok(()) => {
+                if let Some(state) = app_handle_clone.try_state::<AppState>() {
+                    crate::presentation::companion_timeline::finalize_haiku_message(
+                        state.inner(),
+                        &request_id_clone,
+                    )
+                    .await;
+                    let _ = crate::presentation::companion::publish_snapshot_sse_only(
+                        &app_handle_clone,
+                    )
+                    .await;
+                }
                 let _ = app_handle_clone.emit(
                     EVENT_HAIKU_DONE,
                     HaikuDonePayload {
@@ -2563,6 +2866,18 @@ pub async fn start_haiku_stream(
                 );
             }
             Err(e) => {
+                if let Some(state) = app_handle_clone.try_state::<AppState>() {
+                    crate::presentation::companion_timeline::fail_haiku_message(
+                        state.inner(),
+                        &request_id_clone,
+                        &e.to_string(),
+                    )
+                    .await;
+                    let _ = crate::presentation::companion::publish_snapshot_sse_only(
+                        &app_handle_clone,
+                    )
+                    .await;
+                }
                 let _ = app_handle_clone.emit(
                     EVENT_HAIKU_ERROR,
                     HaikuErrorPayload {
@@ -2584,6 +2899,15 @@ pub struct LlmImageInput {
     pub data_base64: String,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionAiRequestMeta {
+    pub insert_after_id: Option<String>,
+    pub created_at_ms: Option<i64>,
+    pub prompt_message_id: Option<String>,
+    pub prompt_created_at_ms: Option<i64>,
+}
+
 /// Стриминговый запрос в LLM из чата: контекст + явный вопрос + (опционально) изображения из clipboard.
 ///
 /// Возвращает `request_id`, а прогресс стриминга приходит через события:
@@ -2598,6 +2922,7 @@ pub async fn start_haiku_chat_stream(
     question_text: String,
     images: Option<Vec<LlmImageInput>>,
     system_prompt: Option<String>,
+    companion_meta: Option<CompanionAiRequestMeta>,
 ) -> Result<String, String> {
     let context = context_text.trim().to_string();
     let question = question_text.trim().to_string();
@@ -2746,6 +3071,56 @@ pub async fn start_haiku_chat_stream(
         .map_err(|e| e.to_string())?;
 
     let request_id = uuid::Uuid::new_v4().to_string();
+    let companion_meta = companion_meta.unwrap_or_default();
+    *state.companion_system_prompt.write().await = system_prompt.clone();
+    if let Some(prompt_message_id) = companion_meta
+        .prompt_message_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    {
+        crate::presentation::companion_timeline::append_prompt_message(
+            state.inner(),
+            crate::presentation::companion_timeline::CompanionPromptDraft {
+                id: prompt_message_id.clone(),
+                text: question.clone(),
+                created_at_ms: companion_meta
+                    .prompt_created_at_ms
+                    .unwrap_or_else(crate::presentation::companion_timeline::now_ms),
+                attachments: images
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(idx, image)| crate::presentation::companion::CompanionAttachment {
+                            id: format!("{}:img:{}", prompt_message_id, idx),
+                            kind: "image".to_string(),
+                            mime: image.media_type.clone(),
+                            data_url: format!(
+                                "data:{};base64,{}",
+                                image.media_type.trim(),
+                                image.data_base64.trim()
+                            ),
+                        },
+                    )
+                    .collect(),
+            },
+        )
+        .await;
+    }
+    crate::presentation::companion_timeline::begin_haiku_message(
+        state.inner(),
+        crate::presentation::companion_timeline::CompanionHaikuStart {
+            request_id: request_id.clone(),
+            insert_after_id: companion_meta
+                .insert_after_id
+                .clone()
+                .or_else(|| companion_meta.prompt_message_id.clone()),
+            created_at_ms: companion_meta
+                .created_at_ms
+                .unwrap_or_else(crate::presentation::companion_timeline::now_ms),
+        },
+    )
+    .await;
+    let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
     log::info!(
         "Command: start_haiku_chat_stream request_id={} ctx_len={} q_len={} images={}",
         request_id,
@@ -2831,13 +3206,31 @@ pub async fn start_haiku_chat_stream(
                             temperature,
                         },
                         move |delta| {
+                            let delta_text = delta.to_string();
                             let _ = app_handle_delta_anthropic.emit(
                                 EVENT_HAIKU_DELTA,
                                 HaikuDeltaPayload {
                                     request_id: request_id_for_delta_anthropic.clone(),
-                                    delta: delta.to_string(),
+                                    delta: delta_text.clone(),
                                 },
                             );
+                            let app_handle_companion = app_handle_delta_anthropic.clone();
+                            let request_id = request_id_for_delta_anthropic.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Some(state) = app_handle_companion.try_state::<AppState>() {
+                                    crate::presentation::companion_timeline::append_haiku_delta(
+                                        state.inner(),
+                                        &request_id,
+                                        &delta_text,
+                                    )
+                                    .await;
+                                    let _ =
+                                        crate::presentation::companion::publish_snapshot_sse_only(
+                                            &app_handle_companion,
+                                        )
+                                        .await;
+                                }
+                            });
                         },
                     )
                     .await
@@ -2879,13 +3272,30 @@ pub async fn start_haiku_chat_stream(
                 .stream_text(
                     &request,
                     Box::new(move |delta| {
+                        let delta_text = delta.to_string();
                         let _ = app_handle_delta_openai.emit(
                             EVENT_HAIKU_DELTA,
                             HaikuDeltaPayload {
                                 request_id: request_id_for_delta_openai.clone(),
-                                delta: delta.to_string(),
+                                delta: delta_text.clone(),
                             },
                         );
+                        let app_handle_companion = app_handle_delta_openai.clone();
+                        let request_id = request_id_for_delta_openai.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(state) = app_handle_companion.try_state::<AppState>() {
+                                crate::presentation::companion_timeline::append_haiku_delta(
+                                    state.inner(),
+                                    &request_id,
+                                    &delta_text,
+                                )
+                                .await;
+                                let _ = crate::presentation::companion::publish_snapshot_sse_only(
+                                    &app_handle_companion,
+                                )
+                                .await;
+                            }
+                        });
                     }),
                 )
                 .await
@@ -2893,6 +3303,17 @@ pub async fn start_haiku_chat_stream(
 
         match result {
             Ok(()) => {
+                if let Some(state) = app_handle_clone.try_state::<AppState>() {
+                    crate::presentation::companion_timeline::finalize_haiku_message(
+                        state.inner(),
+                        &request_id_for_done,
+                    )
+                    .await;
+                    let _ = crate::presentation::companion::publish_snapshot_sse_only(
+                        &app_handle_clone,
+                    )
+                    .await;
+                }
                 let _ = app_handle_clone.emit(
                     EVENT_HAIKU_DONE,
                     HaikuDonePayload {
@@ -2901,6 +3322,18 @@ pub async fn start_haiku_chat_stream(
                 );
             }
             Err(e) => {
+                if let Some(state) = app_handle_clone.try_state::<AppState>() {
+                    crate::presentation::companion_timeline::fail_haiku_message(
+                        state.inner(),
+                        &request_id_for_error,
+                        &e.to_string(),
+                    )
+                    .await;
+                    let _ = crate::presentation::companion::publish_snapshot_sse_only(
+                        &app_handle_clone,
+                    )
+                    .await;
+                }
                 let _ = app_handle_clone.emit(
                     EVENT_HAIKU_ERROR,
                     HaikuErrorPayload {
@@ -3564,6 +3997,15 @@ pub async fn set_auth_session(
     // 5) Перезапускаем фоновый refresh
     state.restart_auth_refresh_task(app_handle.clone()).await;
 
+    if !next_is_auth {
+        let _ = crate::presentation::companion::disable_mode(&app_handle).await;
+    } else if let Err(e) = crate::presentation::companion::publish_snapshot(&app_handle).await {
+        log::debug!(
+            "Failed to publish companion snapshot after set_auth_session: {}",
+            e
+        );
+    }
+
     Ok(())
 }
 
@@ -3646,6 +4088,15 @@ pub async fn set_authenticated(
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         },
     );
+
+    if !authenticated {
+        let _ = crate::presentation::companion::disable_mode(&app_handle).await;
+    } else if let Err(e) = crate::presentation::companion::publish_snapshot(&app_handle).await {
+        log::debug!(
+            "Failed to publish companion snapshot after set_authenticated: {}",
+            e
+        );
+    }
 
     Ok(())
 }

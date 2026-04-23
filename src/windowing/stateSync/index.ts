@@ -4,6 +4,7 @@ export {
   TOPIC_AUTH_STATE,
   TOPIC_AUTH_SESSION,
   TOPIC_UI_PREFERENCES,
+  TOPIC_COMPANION_UI,
 } from './topics';
 
 export type { RevisionSyncHandle } from '@statesync/core';
@@ -17,7 +18,15 @@ export {
   CMD_GET_AUTH_STATE_SNAPSHOT,
   CMD_GET_AUTH_SESSION_SNAPSHOT,
   CMD_GET_UI_PREFERENCES_SNAPSHOT,
+  CMD_GET_COMPANION_SNAPSHOT,
+  CMD_GET_COMPANION_SERVER_STATUS,
   CMD_UPDATE_UI_PREFERENCES,
+  CMD_ENABLE_COMPANION_MODE,
+  CMD_DISABLE_COMPANION_MODE,
+  CMD_COMPANION_CLEAR_CONTEXT,
+  CMD_COMPANION_CLEAR_HISTORY,
+  CMD_COMPANION_REQUEST_AI,
+  CMD_SET_COMPANION_SYSTEM_PROMPT,
   CMD_UPDATE_APP_CONFIG,
   CMD_UPDATE_STT_CONFIG,
   type StateSyncInvalidationEventPayload,
@@ -46,6 +55,10 @@ export type {
   AuthStateSnapshotData,
   AuthSessionSnapshotData,
   UiPreferencesSnapshotData,
+  CompanionRecordingStatus,
+  CompanionSnapshotData,
+  CompanionActionResponse,
+  CompanionServerStatus,
   TauriSnapshotEnvelope,
 } from './contracts';
 

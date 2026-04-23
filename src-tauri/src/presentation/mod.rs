@@ -2,6 +2,8 @@
 /// This layer handles communication with the frontend
 pub mod commands;
 pub mod companion;
+pub mod companion_actions;
+pub mod companion_timeline;
 pub mod events;
 pub mod state;
 pub mod tray;

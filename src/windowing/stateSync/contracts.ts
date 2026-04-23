@@ -80,6 +80,79 @@ export type UiPreferencesSnapshotData = {
   use_system_theme: boolean;
 };
 
+export type CompanionRecordingStatus =
+  | 'Idle'
+  | 'Starting'
+  | 'Recording'
+  | 'Processing'
+  | 'Error';
+
+export type CompanionMessage = {
+  id: string;
+  seq: number;
+  kind: string;
+  role: string;
+  status: string;
+  text: string;
+  createdAtMs: number;
+  sessionId?: number | null;
+  requestId?: string | null;
+  generation?: number | null;
+  insertAfterId?: string | null;
+  sttIndex?: number | null;
+  deleted?: boolean;
+  attachments?: CompanionAttachment[] | null;
+};
+
+export type CompanionAttachment = {
+  id: string;
+  kind: string;
+  mime: string;
+  dataUrl: string;
+};
+
+export type CompanionSnapshotData = {
+  authRequired: boolean;
+  recording: {
+    status: CompanionRecordingStatus;
+    activeSessionId: number;
+  };
+  microphone: {
+    muted: boolean;
+    enabled: boolean;
+    supported: boolean;
+    source: string;
+  };
+  controls: {
+    historyFloorSeq: number;
+    contextFloorSeq: number;
+    conversationGeneration: number;
+    companionModeEnabled: boolean;
+    lastAction?: string | null;
+  };
+  live: {
+    partialText?: string | null;
+    finalText?: string | null;
+    partialStartedAtMs?: number | null;
+    microphonePartialText?: string | null;
+    microphonePartialStartedAtMs?: number | null;
+  };
+  timeline: CompanionMessage[];
+};
+
+export type CompanionActionResponse = {
+  ok: boolean;
+  actionResult: string;
+  snapshot: TauriSnapshotEnvelope<CompanionSnapshotData>;
+};
+
+export type CompanionServerStatus = {
+  enabled: boolean;
+  port?: number | null;
+  token?: string | null;
+  localUrl?: string | null;
+  localNetworkUrl?: string | null;
+};
+
 // Переиспользуем envelope из state-sync, чтобы не плодить дубли.
 export type TauriSnapshotEnvelope<T> = SnapshotEnvelope<T>;
-

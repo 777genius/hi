@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -25,6 +25,7 @@ pub struct TranscriptionService {
     microphone_sensitivity: Arc<RwLock<u8>>, // 0-200, default 95
     inactivity_timer_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // таймер для автоочистки соединения
     audio_processor_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // обработчик аудио-чанков → STT
+    start_abort_requested: Arc<AtomicBool>,
 }
 
 impl TranscriptionService {
@@ -41,6 +42,7 @@ impl TranscriptionService {
             microphone_sensitivity: Arc::new(RwLock::new(95)), // Default 95% (порог ~1638, более чувствительный)
             inactivity_timer_task: Arc::new(RwLock::new(None)),
             audio_processor_task: Arc::new(RwLock::new(None)),
+            start_abort_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -67,6 +69,7 @@ impl TranscriptionService {
 
         // Устанавливаем статус Starting чтобы заблокировать повторные вызовы
         *status = RecordingStatus::Starting;
+        self.start_abort_requested.store(false, Ordering::SeqCst);
         drop(status);
 
         // Отменяем таймер неактивности если он запущен
@@ -119,6 +122,13 @@ impl TranscriptionService {
             match resume_result {
                 Ok(_) => {
                     log::info!("Successfully resumed keep-alive connection (instant start)");
+                    if self.start_abort_requested.swap(false, Ordering::SeqCst) {
+                        if let Some(mut provider) = self.stt_provider.write().await.take() {
+                            let _ = provider.abort().await;
+                        }
+                        *self.status.write().await = RecordingStatus::Idle;
+                        return Err(anyhow::anyhow!("Recording start aborted"));
+                    }
                 }
                 Err(e) => {
                     log::warn!(
@@ -157,6 +167,12 @@ impl TranscriptionService {
                 return Err(anyhow::Error::new(e).context("Failed to initialize STT provider"));
             }
 
+            if self.start_abort_requested.swap(false, Ordering::SeqCst) {
+                *self.status.write().await = RecordingStatus::Idle;
+                let _ = provider.abort().await;
+                return Err(anyhow::anyhow!("Recording start aborted"));
+            }
+
             if let Err(e) = provider
                 .start_stream(
                     on_partial.clone(),
@@ -171,7 +187,21 @@ impl TranscriptionService {
                 return Err(anyhow::Error::new(e).context("Failed to start STT stream"));
             }
 
+            if self.start_abort_requested.swap(false, Ordering::SeqCst) {
+                *self.status.write().await = RecordingStatus::Idle;
+                let _ = provider.abort().await;
+                return Err(anyhow::anyhow!("Recording start aborted"));
+            }
+
             *self.stt_provider.write().await = Some(provider);
+        }
+
+        if self.start_abort_requested.swap(false, Ordering::SeqCst) {
+            if let Some(mut provider) = self.stt_provider.write().await.take() {
+                let _ = provider.abort().await;
+            }
+            *self.status.write().await = RecordingStatus::Idle;
+            return Err(anyhow::anyhow!("Recording start aborted"));
         }
 
         // Канал для передачи аудио чанков из нативного потока в async контекст.
@@ -503,6 +533,19 @@ impl TranscriptionService {
             return Err(anyhow::anyhow!("Failed to start audio capture: {}", e));
         }
 
+        if self.start_abort_requested.swap(false, Ordering::SeqCst) {
+            let _ = self.audio_capture.write().await.stop_capture().await;
+            if let Some(task) = self.audio_processor_task.write().await.take() {
+                task.abort();
+                let _ = task.await;
+            }
+            if let Some(mut provider) = self.stt_provider.write().await.take() {
+                let _ = provider.abort().await;
+            }
+            *self.status.write().await = RecordingStatus::Idle;
+            return Err(anyhow::anyhow!("Recording start aborted"));
+        }
+
         // Только после успешного запуска audio capture устанавливаем статус Recording
         *self.status.write().await = RecordingStatus::Recording;
 
@@ -649,6 +692,40 @@ impl TranscriptionService {
             log::info!("Recording stopped");
             Ok("Transcription completed".to_string())
         }
+    }
+
+    /// Прерывает старт записи, если сервис ещё в состоянии `Starting`.
+    ///
+    /// Нужно для shared controls: stop во время `Starting` не должен тихо превращаться в `noop`.
+    pub async fn abort_starting(&self) -> Result<String> {
+        {
+            let status = self.status.read().await;
+            if *status != RecordingStatus::Starting {
+                anyhow::bail!("Not starting");
+            }
+        }
+
+        self.start_abort_requested.store(true, Ordering::SeqCst);
+        *self.status.write().await = RecordingStatus::Idle;
+
+        if let Some(task) = self.audio_processor_task.write().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
+
+        if let Some(timer) = self.inactivity_timer_task.write().await.take() {
+            timer.abort();
+            let _ = timer.await;
+        }
+
+        if let Some(mut provider) = self.stt_provider.write().await.take() {
+            let _ = provider.abort().await;
+        }
+
+        let _ = self.audio_capture.write().await.stop_capture().await;
+
+        log::info!("Recording start aborted");
+        Ok("Recording start aborted".to_string())
     }
 
     /// Жёсткая остановка: всегда закрывает STT stream и выкидывает провайдера, без keep-alive.
@@ -1126,6 +1203,116 @@ mod tests {
         let result = service.stop_recording().await;
         assert!(result.is_err());
         assert!(stop_called.load(Ordering::SeqCst));
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+        assert!(provider_aborted.load(Ordering::SeqCst));
+    }
+
+    struct DelayedStartProvider {
+        aborted: Arc<AtomicBool>,
+        start_stream_delay_ms: u64,
+    }
+
+    #[async_trait]
+    impl SttProvider for DelayedStartProvider {
+        async fn initialize(&mut self, _config: &SttConfig) -> SttResult<()> {
+            Ok(())
+        }
+
+        async fn start_stream(
+            &mut self,
+            _on_partial: TranscriptionCallback,
+            _on_final: TranscriptionCallback,
+            _on_error: ErrorCallback,
+            _on_connection_quality: ConnectionQualityCallback,
+        ) -> SttResult<()> {
+            tokio::time::sleep(Duration::from_millis(self.start_stream_delay_ms)).await;
+            Ok(())
+        }
+
+        async fn send_audio(&mut self, _chunk: &crate::domain::AudioChunk) -> SttResult<()> {
+            Ok(())
+        }
+
+        async fn stop_stream(&mut self) -> SttResult<()> {
+            Ok(())
+        }
+
+        async fn abort(&mut self) -> SttResult<()> {
+            self.aborted.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "delayed_start"
+        }
+
+        fn is_online(&self) -> bool {
+            true
+        }
+    }
+
+    struct DelayedStartFactory {
+        aborted: Arc<AtomicBool>,
+        start_stream_delay_ms: u64,
+    }
+
+    impl SttProviderFactory for DelayedStartFactory {
+        fn create(&self, _config: &SttConfig) -> SttResult<Box<dyn SttProvider>> {
+            Ok(Box::new(DelayedStartProvider {
+                aborted: self.aborted.clone(),
+                start_stream_delay_ms: self.start_stream_delay_ms,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn abort_starting_returns_service_to_idle_and_aborts_provider() {
+        let provider_aborted = Arc::new(AtomicBool::new(false));
+        let service = Arc::new(TranscriptionService::new(
+            Box::new(BurstAudioCapture::new(Arc::new(AtomicBool::new(false)), 0)),
+            Arc::new(DelayedStartFactory {
+                aborted: provider_aborted.clone(),
+                start_stream_delay_ms: 150,
+            }),
+        ));
+
+        let on_partial: TranscriptionCallback = Arc::new(|_t| {});
+        let on_final: TranscriptionCallback = Arc::new(|_t| {});
+        let on_audio_level: AudioLevelCallback = Arc::new(|_l| {});
+        let on_audio_spectrum: AudioSpectrumCallback = Arc::new(|_b| {});
+        let on_error: ErrorCallback = Arc::new(|_err: SttError| {});
+        let on_quality: ConnectionQualityCallback = Arc::new(|_q, _r| {});
+
+        let service_for_start = service.clone();
+        let start_handle = tokio::spawn(async move {
+            service_for_start
+                .start_recording(
+                    on_partial,
+                    on_final,
+                    on_audio_level,
+                    on_audio_spectrum,
+                    on_error,
+                    on_quality,
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if service.get_status().await == RecordingStatus::Starting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("service must enter Starting");
+
+        let abort_result = service.abort_starting().await;
+        assert!(abort_result.is_ok());
+
+        let start_result = start_handle.await.expect("start task must join");
+        assert!(start_result.is_err());
         assert_eq!(service.get_status().await, RecordingStatus::Idle);
         assert!(provider_aborted.load(Ordering::SeqCst));
     }

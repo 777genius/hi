@@ -108,10 +108,17 @@ describe('chat store (selection + context)', () => {
 
     await store.requestHaikuFromAnchor();
 
-    expect(invokeMock).toHaveBeenCalledWith('start_haiku_stream', {
-      text: ['ОС: one', 'ОС: two', 'ОС: three', 'ОС: partial'].join('\n'),
-      system_prompt: DEFAULT_PROMPT,
-    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_stream',
+      expect.objectContaining({
+        text: ['ОС: one', 'ОС: two', 'ОС: three', 'ОС: partial'].join('\n'),
+        system_prompt: DEFAULT_PROMPT,
+        companionMeta: expect.objectContaining({
+          insertAfterId: 'stt:live',
+          createdAtMs: expect.any(Number),
+        }),
+      })
+    );
   });
 
   it('clearLlmContext resets tail context floor', async () => {
@@ -129,10 +136,17 @@ describe('chat store (selection + context)', () => {
 
     await store.requestHaikuFromAnchor();
 
-    expect(invokeMock).toHaveBeenCalledWith('start_haiku_stream', {
-      text: 'ОС: new1',
-      system_prompt: DEFAULT_PROMPT,
-    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_stream',
+      expect.objectContaining({
+        text: 'ОС: new1',
+        system_prompt: DEFAULT_PROMPT,
+        companionMeta: expect.objectContaining({
+          insertAfterId: 'stt:1:3:new1',
+          createdAtMs: expect.any(Number),
+        }),
+      })
+    );
   });
 
   it('selection uses only selected messages in chat order', async () => {
@@ -149,10 +163,17 @@ describe('chat store (selection + context)', () => {
 
     await store.requestHaikuFromAnchor();
 
-    expect(invokeMock).toHaveBeenCalledWith('start_haiku_stream', {
-      text: ['ОС: a', 'ОС: c'].join('\n'),
-      system_prompt: DEFAULT_PROMPT,
-    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_stream',
+      expect.objectContaining({
+        text: ['ОС: a', 'ОС: c'].join('\n'),
+        system_prompt: DEFAULT_PROMPT,
+        companionMeta: expect.objectContaining({
+          insertAfterId: 'stt:1:3:c',
+          createdAtMs: expect.any(Number),
+        }),
+      })
+    );
   });
 
   it('selection sets insertAfterId to last selected message', async () => {
@@ -180,10 +201,17 @@ describe('chat store (selection + context)', () => {
 
     await store.requestHaikuFromAnchor();
 
-    expect(invokeMock).toHaveBeenCalledWith('start_haiku_stream', {
-      text: 'ОС: hi',
-      system_prompt: 'custom',
-    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_stream',
+      expect.objectContaining({
+        text: 'ОС: hi',
+        system_prompt: 'custom',
+        companionMeta: expect.objectContaining({
+          insertAfterId: 'stt:1:1:hi',
+          createdAtMs: expect.any(Number),
+        }),
+      })
+    );
   });
 
   it('manual prompt sends context + question to LLM and anchors response after prompt', async () => {
@@ -194,12 +222,20 @@ describe('chat store (selection + context)', () => {
     const store = useChatStore();
     await store.sendPromptToLlm({ text: 'hello', images: [] });
 
-    expect(invokeMock).toHaveBeenCalledWith('start_haiku_chat_stream', {
-      contextText: ['ОС: one', 'ОС: partial'].join('\n'),
-      questionText: 'hello',
-      images: [],
-      systemPrompt: DEFAULT_PROMPT,
-    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_chat_stream',
+      expect.objectContaining({
+        contextText: ['ОС: one', 'ОС: partial'].join('\n'),
+        questionText: 'hello',
+        images: [],
+        systemPrompt: DEFAULT_PROMPT,
+        companionMeta: expect.objectContaining({
+          promptMessageId: expect.any(String),
+          promptCreatedAtMs: expect.any(Number),
+          createdAtMs: expect.any(Number),
+        }),
+      })
+    );
 
     const promptMsg = store.messages.find((m) => m.kind === 'prompt');
     expect(promptMsg?.text).toBe('hello');
@@ -214,10 +250,17 @@ describe('chat store (selection + context)', () => {
     const store = useChatStore();
 
     await store.requestHaikuFromAnchor();
-    expect(invokeMock).toHaveBeenCalledWith('start_haiku_stream', {
-      text: 'ОС: hello',
-      system_prompt: DEFAULT_PROMPT,
-    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_stream',
+      expect.objectContaining({
+        text: 'ОС: hello',
+        system_prompt: DEFAULT_PROMPT,
+        companionMeta: expect.objectContaining({
+          insertAfterId: 'stt:1:1:a',
+          createdAtMs: expect.any(Number),
+        }),
+      })
+    );
 
     // Симулируем завершённый ответ ассистента, чтобы он попал в контекст следующего запроса.
     expect(store.haikuMessages.length).toBe(1);
@@ -229,10 +272,17 @@ describe('chat store (selection + context)', () => {
     invokeMock.mockResolvedValueOnce('r11');
     await store.requestHaikuFromAnchor();
 
-    expect(invokeMock).toHaveBeenLastCalledWith('start_haiku_stream', {
-      text: ['ОС: hello', 'ПОМОЩНИК: answer'].join('\n'),
-      system_prompt: DEFAULT_PROMPT,
-    });
+    expect(invokeMock).toHaveBeenLastCalledWith(
+      'start_haiku_stream',
+      expect.objectContaining({
+        text: ['ОС: hello', 'ПОМОЩНИК: answer'].join('\n'),
+        system_prompt: DEFAULT_PROMPT,
+        companionMeta: expect.objectContaining({
+          insertAfterId: 'stt:1:1:a',
+          createdAtMs: expect.any(Number),
+        }),
+      })
+    );
   });
 
   it('replyToMessageWithAi sends full history (ignores selection) and anchors response after target message', async () => {
@@ -250,12 +300,19 @@ describe('chat store (selection + context)', () => {
 
     await store.replyToMessageWithAi('stt:1:2:b');
 
-    expect(invokeMock).toHaveBeenCalledWith('start_haiku_chat_stream', {
-      contextText: ['ОС: first', 'ОС: second'].join('\n'),
-      questionText: 'second',
-      images: [],
-      systemPrompt: DEFAULT_PROMPT,
-    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_chat_stream',
+      expect.objectContaining({
+        contextText: ['ОС: first', 'ОС: second'].join('\n'),
+        questionText: 'second',
+        images: [],
+        systemPrompt: DEFAULT_PROMPT,
+        companionMeta: expect.objectContaining({
+          insertAfterId: 'stt:1:2:b',
+          createdAtMs: expect.any(Number),
+        }),
+      })
+    );
 
     expect(store.haikuMessages[0]?.insertAfterId).toBe('stt:1:2:b');
   });
@@ -307,4 +364,3 @@ describe('chat store (selection + context)', () => {
     expect(hasSttFinal).toBe(false);
   });
 });
-
