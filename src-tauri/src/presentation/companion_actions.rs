@@ -63,6 +63,17 @@ async fn success(
     })
 }
 
+async fn ok_with_current_snapshot(
+    app_handle: &AppHandle,
+    action_result: &str,
+) -> Result<CompanionActionResponse, String> {
+    Ok(CompanionActionResponse {
+        ok: true,
+        action_result: action_result.to_string(),
+        snapshot: current_snapshot(app_handle).await?,
+    })
+}
+
 async fn acquire_action_lock<'a>(state: &'a AppState) -> Option<MutexGuard<'a, ()>> {
     timeout(
         Duration::from_millis(COMPANION_ACTION_LOCK_TIMEOUT_MS),
@@ -192,7 +203,29 @@ pub async fn ensure_history_cleared(
     let previous_context_floor = state.companion_context_floor_seq.load(Ordering::Relaxed);
     let settled_active_ai =
         crate::presentation::companion_timeline::settle_active_haiku_generation(state).await;
-    if max_seq <= previous_history_floor && max_seq <= previous_context_floor && !settled_active_ai
+    let has_live_system_text = state
+        .partial_transcription
+        .read()
+        .await
+        .clone()
+        .unwrap_or_default()
+        .trim()
+        .len()
+        > 0;
+    let has_live_microphone_text = {
+        let accumulated = state
+            .companion_microphone_accumulated_text
+            .read()
+            .await
+            .clone();
+        let partial = state.companion_microphone_partial_text.read().await.clone();
+        !accumulated.trim().is_empty() || !partial.trim().is_empty()
+    };
+    if max_seq <= previous_history_floor
+        && max_seq <= previous_context_floor
+        && !settled_active_ai
+        && !has_live_system_text
+        && !has_live_microphone_text
     {
         return noop(app_handle, "noop").await;
     }
@@ -208,6 +241,19 @@ pub async fn ensure_history_cleared(
         .fetch_add(1, Ordering::Relaxed);
     *state.partial_transcription.write().await = None;
     *state.final_transcription.write().await = None;
+    crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
+    state
+        .companion_live_system_started_at_ms
+        .store(0, Ordering::Relaxed);
+    state
+        .companion_microphone_dominant_until_ms
+        .store(0, Ordering::Relaxed);
+    state
+        .companion_system_audio_level_bits
+        .store(0.0f32.to_bits(), Ordering::Relaxed);
+    state
+        .companion_microphone_audio_level_bits
+        .store(0.0f32.to_bits(), Ordering::Relaxed);
 
     success(state, app_handle, "cleared_history").await
 }
@@ -278,5 +324,65 @@ pub async fn request_ai(
         .await?;
     }
 
-    success(state, app_handle, "started_ai").await
+    ok_with_current_snapshot(app_handle, "started_ai").await
+}
+
+pub async fn send_prompt(
+    state: &AppState,
+    app_handle: &AppHandle,
+    text: String,
+    images: Vec<commands::LlmImageInput>,
+) -> Result<CompanionActionResponse, String> {
+    let Some(_guard) = acquire_action_lock(state).await else {
+        return busy_transition(app_handle).await;
+    };
+
+    if !*state.is_authenticated.read().await {
+        return rejected_auth(app_handle).await;
+    }
+
+    let command_state = app_handle
+        .try_state::<AppState>()
+        .ok_or_else(|| "AppState не доступен".to_string())?;
+    let prompt_text = text.trim().to_string();
+    let prompt_images = images
+        .into_iter()
+        .filter(|image| {
+            let mime = image.media_type.trim();
+            let data = image.data_base64.trim();
+            mime.starts_with("image/") && !data.is_empty()
+        })
+        .collect::<Vec<_>>();
+
+    if prompt_text.is_empty() && prompt_images.is_empty() {
+        return noop(app_handle, "noop").await;
+    }
+
+    let system_prompt = {
+        let prompt = state.companion_system_prompt.read().await.clone();
+        let trimmed = prompt.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    };
+    let created_at_ms = crate::presentation::companion_timeline::now_ms();
+    let context_text =
+        crate::presentation::companion_timeline::build_context_text(state, false).await;
+    let prompt_message_id = format!("prompt:{}", uuid::Uuid::new_v4());
+
+    commands::start_haiku_chat_stream(
+        command_state,
+        app_handle.clone(),
+        context_text,
+        prompt_text,
+        Some(prompt_images),
+        system_prompt,
+        Some(commands::CompanionAiRequestMeta {
+            insert_after_id: Some(prompt_message_id.clone()),
+            created_at_ms: Some(created_at_ms),
+            prompt_message_id: Some(prompt_message_id),
+            prompt_created_at_ms: Some(created_at_ms),
+        }),
+    )
+    .await?;
+
+    ok_with_current_snapshot(app_handle, "started_prompt").await
 }

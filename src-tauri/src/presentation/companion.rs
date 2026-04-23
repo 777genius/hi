@@ -167,6 +167,15 @@ struct CompanionAiRequestBody {
     text: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CompanionPromptSendBody {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    images: Vec<crate::presentation::commands::LlmImageInput>,
+}
+
 pub fn new_runtime() -> CompanionRuntime {
     let snapshot = CompanionSnapshotEnvelope::default();
     let (sse_tx, _sse_rx) = watch::channel(snapshot.clone());
@@ -549,6 +558,9 @@ async fn route_request(
             handle_mutating_post(app_handle.clone(), req, "history_clear").await
         }
         (Method::POST, "/api/ai/request") => handle_ai_request_post(app_handle.clone(), req).await,
+        (Method::POST, "/api/prompt/send") => {
+            handle_prompt_send_post(app_handle.clone(), req).await
+        }
         (Method::HEAD, path) if path.starts_with("/c/") => {
             let token = path.trim_start_matches("/c/").to_string();
             if is_valid_token(&app_handle, &token).await {
@@ -719,6 +731,56 @@ async fn handle_ai_request_post(
 
     match crate::presentation::companion_actions::request_ai(state.inner(), &app_handle, body.text)
         .await
+    {
+        Ok(response) => {
+            let status = match response.action_result.as_str() {
+                "busy_transition" => StatusCode::CONFLICT,
+                "rejected_auth" => StatusCode::UNAUTHORIZED,
+                _ => StatusCode::OK,
+            };
+            json_response(
+                status,
+                serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+            )
+        }
+        Err(err) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+}
+
+async fn handle_prompt_send_post(
+    app_handle: AppHandle,
+    req: Request<Incoming>,
+) -> Response<CompanionBody> {
+    let Some(token) = parse_header_token(req.headers()) else {
+        return text_response(StatusCode::UNAUTHORIZED, "Missing token");
+    };
+    if !is_valid_token(&app_handle, &token).await {
+        return text_response(StatusCode::FORBIDDEN, "Forbidden");
+    }
+    if !has_json_content_type(req.headers()) {
+        return text_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Expected application/json",
+        );
+    }
+
+    let body = match read_json_body::<CompanionPromptSendBody>(req).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+
+    let state = match app_handle.try_state::<AppState>() {
+        Some(state) => state,
+        None => return text_response(StatusCode::INTERNAL_SERVER_ERROR, "AppState not available"),
+    };
+
+    match crate::presentation::companion_actions::send_prompt(
+        state.inner(),
+        &app_handle,
+        body.text.unwrap_or_default(),
+        body.images,
+    )
+    .await
     {
         Ok(response) => {
             let status = match response.action_result.as_str() {

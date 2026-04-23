@@ -1627,6 +1627,22 @@ pub async fn companion_request_ai(
 }
 
 #[tauri::command]
+pub async fn companion_send_prompt(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    text: String,
+    images: Option<Vec<LlmImageInput>>,
+) -> Result<crate::presentation::companion_actions::CompanionActionResponse, String> {
+    crate::presentation::companion_actions::send_prompt(
+        state.inner(),
+        &app_handle,
+        text,
+        images.unwrap_or_default(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn set_companion_system_prompt(
     state: State<'_, AppState>,
     prompt: String,

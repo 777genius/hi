@@ -19,6 +19,7 @@ import UpdateDialog from './UpdateDialog.vue';
 import AudioVisualizer from './AudioVisualizer.vue';
 import ConversationFeed from './ConversationFeed.vue';
 import { playShowSound, playDoneSound, preloadUiSounds } from '../../utils/sound';
+import { createPromptImageDraft, type PromptImageDraft } from '../../utils/promptImages';
 import { renderMarkdownToSafeHtml } from '@/utils/markdown';
 import { isTauriAvailable } from '../../utils/tauri';
 import {
@@ -35,6 +36,7 @@ import {
   CMD_COMPANION_CLEAR_CONTEXT,
   CMD_COMPANION_CLEAR_HISTORY,
   CMD_COMPANION_REQUEST_AI,
+  CMD_COMPANION_SEND_PROMPT,
   CMD_ENABLE_COMPANION_MODE,
   CMD_GET_COMPANION_SERVER_STATUS,
   CMD_GET_COMPANION_SNAPSHOT,
@@ -107,7 +109,7 @@ const companionHistoryFloorSeq = ref(0);
 const companionContextFloorSeq = ref(0);
 const companionConversationGeneration = ref(0);
 const companionActiveSessionId = ref(0);
-const localTimelineMutationsDisabled = computed(() => chatStore.companionModeEnabled);
+const localCommitMutationsDisabled = computed(() => chatStore.companionModeEnabled);
 const companionMenuOpen = ref(false);
 const companionServerStatus = ref<CompanionServerStatus | null>(null);
 const companionServerBusy = ref(false);
@@ -602,37 +604,40 @@ async function runCompanionClear(commandName: string): Promise<void> {
   }
 }
 
+async function runCompanionPromptSend(input: {
+  text: string;
+  images?: PromptImageDraft[];
+}): Promise<CompanionActionResponse | null> {
+  if (!isTauriAvailable()) return null;
+
+  const response = await invoke<CompanionActionResponse>(CMD_COMPANION_SEND_PROMPT, {
+    text: input.text,
+    images: (input.images ?? []).map((img) => ({
+      mediaType: img.mime,
+      dataBase64: img.dataBase64,
+    })),
+  });
+  if (response.snapshot) {
+    applyCompanionSnapshot(response.snapshot);
+  }
+  return response;
+}
+
 const clearLlmContext = async () => {
   await runCompanionClear(CMD_COMPANION_CLEAR_CONTEXT);
 };
 
-type AskImageDraft = {
-  id: string;
-  mime: string;
-  dataUrl: string;
-  dataBase64: string;
-  size: number;
-};
-
 const askComposerOpen = ref(false);
 const askDraftText = ref('');
-const askDraftImages = ref<AskImageDraft[]>([]);
+const askDraftImages = ref<PromptImageDraft[]>([]);
 const askTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const askSendInFlight = ref(false);
+const askSendStatusText = ref('');
+const askSendStatusTone = ref<'warn' | 'error' | ''>('');
 
 const canSendAsk = computed(() => {
   return askDraftText.value.trim().length > 0 || askDraftImages.value.length > 0;
 });
-
-function createClientId(prefix: string): string {
-  try {
-    const uuid =
-      typeof crypto !== 'undefined' && 'randomUUID' in crypto ? (crypto as any).randomUUID?.() : null;
-    if (uuid) return `${prefix}:${uuid}`;
-  } catch {
-    // ignore
-  }
-  return `${prefix}:${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
 
 function appendAskText(text: string): void {
   const t = String(text ?? '');
@@ -645,40 +650,12 @@ function appendAskText(text: string): void {
   askDraftText.value = `${askDraftText.value}${needsNewline ? '\n' : ''}${t}`;
 }
 
-function blobToDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onerror = () => reject(new Error('Не удалось прочитать изображение'));
-    fr.onload = () => resolve(String(fr.result ?? ''));
-    fr.readAsDataURL(blob);
-  });
-}
-
-function dataUrlToBase64(dataUrl: string): string {
-  const s = String(dataUrl ?? '');
-  const idx = s.indexOf(',');
-  return idx >= 0 ? s.slice(idx + 1).trim() : '';
-}
-
 async function addAskImageFromFile(file: File): Promise<void> {
-  const mime = String(file.type ?? '').trim();
-  if (!mime.startsWith('image/')) return;
-
-  // Защита от случайно огромных вставок.
-  const maxBytes = 8 * 1024 * 1024;
-  if (Number.isFinite(file.size) && file.size > maxBytes) return;
-
-  const dataUrl = await blobToDataUrl(file);
-  const dataBase64 = dataUrlToBase64(dataUrl);
-  if (!dataBase64) return;
-
-  askDraftImages.value.push({
-    id: createClientId('img'),
-    mime,
-    dataUrl,
-    dataBase64,
-    size: file.size ?? 0,
-  });
+  const nextImage = await createPromptImageDraft(file, { prefix: 'img' });
+  if (!nextImage) {
+    throw new Error('Не удалось подготовить изображение к отправке.');
+  }
+  askDraftImages.value.push(nextImage);
 }
 
 async function onPaste(e: ClipboardEvent): Promise<void> {
@@ -710,15 +687,26 @@ async function onPaste(e: ClipboardEvent): Promise<void> {
   askComposerOpen.value = true;
   if (hasText) appendAskText(text);
 
+  let addedImages = 0;
+  let lastImageError = '';
   for (const it of imageItems) {
     const f = it.getAsFile();
     if (!f) continue;
     try {
       // eslint-disable-next-line no-await-in-loop
       await addAskImageFromFile(f);
-    } catch {
-      // ignore
+      addedImages += 1;
+    } catch (error) {
+      lastImageError = error instanceof Error ? error.message : 'Не удалось подготовить изображение к отправке.';
     }
+  }
+
+  if (lastImageError) {
+    askSendStatusTone.value = 'warn';
+    askSendStatusText.value = lastImageError;
+  } else if (addedImages > 0) {
+    askSendStatusTone.value = '';
+    askSendStatusText.value = '';
   }
 
   nextTick(() => {
@@ -727,6 +715,7 @@ async function onPaste(e: ClipboardEvent): Promise<void> {
 }
 
 function removeAskImage(id: string): void {
+  if (askSendInFlight.value) return;
   askDraftImages.value = askDraftImages.value.filter((x) => x.id !== id);
 }
 
@@ -740,19 +729,49 @@ function toggleAskComposer(): void {
 }
 
 async function sendAsk(): Promise<void> {
-  if (!canSendAsk.value) return;
-  await chatStore.sendPromptToLlm({
+  if (!canSendAsk.value || askSendInFlight.value) return;
+  askSendInFlight.value = true;
+  askSendStatusText.value = '';
+  askSendStatusTone.value = '';
+  const payload = {
     text: askDraftText.value,
-    images: askDraftImages.value.map((img) => ({
-      id: img.id,
-      mime: img.mime,
-      dataUrl: img.dataUrl,
-      dataBase64: img.dataBase64,
-    })),
-  });
-  askDraftText.value = '';
-  askDraftImages.value = [];
-  askComposerOpen.value = false;
+    images: askDraftImages.value,
+  };
+  try {
+    if (chatStore.companionModeEnabled) {
+      const response = await runCompanionPromptSend(payload);
+      if (!response?.ok) {
+        switch (response?.actionResult) {
+          case 'busy_transition':
+            askSendStatusTone.value = 'warn';
+            askSendStatusText.value = 'Подожди - предыдущее действие ещё выполняется.';
+            break;
+          case 'rejected_auth':
+            askSendStatusTone.value = 'error';
+            askSendStatusText.value = 'Нужно заново авторизоваться на Mac.';
+            break;
+          default:
+            askSendStatusTone.value = 'error';
+            askSendStatusText.value = 'Не удалось отправить сообщение.';
+            break;
+        }
+        return;
+      }
+    } else {
+      await chatStore.sendPromptToLlm(payload);
+    }
+
+    askDraftText.value = '';
+    askDraftImages.value = [];
+    askComposerOpen.value = false;
+    askSendStatusText.value = '';
+    askSendStatusTone.value = '';
+  } catch (err) {
+    askSendStatusTone.value = 'error';
+    askSendStatusText.value = err instanceof Error ? err.message : 'Не удалось отправить сообщение.';
+  } finally {
+    askSendInFlight.value = false;
+  }
 }
 
 const editingMessageId = ref<string | null>(null);
@@ -789,7 +808,7 @@ function getEditableText(el: HTMLElement | null): string {
 }
 
 const startInlineEdit = (msg: { id: string; kind: string }) => {
-  if (localTimelineMutationsDisabled.value) return;
+  if (localCommitMutationsDisabled.value) return;
   if (msg.kind === 'haiku') return;
   editingMessageId.value = msg.id;
   nextTick(() => {
@@ -804,7 +823,7 @@ const cancelInlineEdit = () => {
 };
 
 const saveInlineEdit = () => {
-  if (localTimelineMutationsDisabled.value) return;
+  if (localCommitMutationsDisabled.value) return;
   const id = editingMessageId.value;
   if (!id) return;
   const el = getEditingEl(id);
@@ -814,14 +833,14 @@ const saveInlineEdit = () => {
 };
 
 const makeQuestion = (msg: { id: string; text: string }) => {
-  if (localTimelineMutationsDisabled.value) return;
+  if (localCommitMutationsDisabled.value) return;
   const trimmed = msg.text.trimEnd();
   const updated = trimmed.endsWith('.') ? trimmed.slice(0, -1) + '?' : trimmed + '?';
   chatStore.editMessageText(msg.id, updated);
 };
 
 const replyWithAi = (msg: { id: string }) => {
-  if (localTimelineMutationsDisabled.value) return;
+  if (localCommitMutationsDisabled.value) return;
   void chatStore.replyToMessageWithAi(msg.id);
 };
 
@@ -1127,9 +1146,7 @@ watch(
   () => chatStore.companionModeEnabled,
   (enabled) => {
     if (!enabled) return;
-    askComposerOpen.value = false;
     editingMessageId.value = null;
-    chatStore.clearSelection();
     hideCodeSelectionUi();
   }
 );
@@ -1206,19 +1223,21 @@ const onChatRowMouseMove = (e: MouseEvent) => {
   row.style.setProperty('--actions-y', `${y}px`);
 };
 
-const onMessageClick = (e: MouseEvent, messageId: string, kind: 'stt' | 'mic' | 'haiku' | 'prompt') => {
-  if (localTimelineMutationsDisabled.value) return;
+const onMessageClick = (
+  e: MouseEvent,
+  message: { id: string; kind: 'stt' | 'mic' | 'haiku' | 'prompt'; status: 'final' | 'streaming' | 'error'; deleted?: boolean },
+) => {
   if (editingMessageId.value) return;
-  if (kind === 'haiku') return;
+  if (message.kind === 'haiku' || message.deleted || message.status !== 'final') return;
   // Если пользователь выделяет текст внутри пузыря — не мешаем.
   const sel = typeof window !== 'undefined' ? window.getSelection?.() : null;
   if (sel && !sel.isCollapsed && sel.toString().trim()) return;
 
   if (isAdditiveSelection(e)) {
-    chatStore.toggleSelection(messageId);
+    chatStore.toggleSelection(message.id);
     return;
   }
-  chatStore.selectOnly(messageId);
+  chatStore.selectOnly(message.id);
 };
 
 const onFeedRowMouseMove = (e: MouseEvent) => {
@@ -1227,9 +1246,9 @@ const onFeedRowMouseMove = (e: MouseEvent) => {
 
 const onFeedMessageClick = (
   e: MouseEvent,
-  msg: { id: string; kind: 'stt' | 'mic' | 'haiku' | 'prompt' },
+  msg: { id: string; kind: 'stt' | 'mic' | 'haiku' | 'prompt'; status: 'final' | 'streaming' | 'error'; deleted?: boolean },
 ) => {
-  onMessageClick(e, msg.id, msg.kind);
+  onMessageClick(e, msg);
 };
 
 const clearMessageSelection = () => {
@@ -1292,7 +1311,6 @@ function updateLasso(clientX: number, clientY: number): void {
 }
 
 const onChatMouseDown = (e: MouseEvent) => {
-  if (localTimelineMutationsDisabled.value) return;
   if (e.button !== 0) return;
   const container = chatScrollRef.value;
   if (!container) return;
@@ -1558,7 +1576,7 @@ const onChatMouseDown = (e: MouseEvent) => {
             />
           </template>
 
-          <template v-if="!localTimelineMutationsDisabled" #actions="{ msg }">
+          <template v-if="!localCommitMutationsDisabled" #actions="{ msg }">
             <template v-if="msg.kind !== 'haiku' && msg.status === 'final'">
               <template v-if="editingMessageId === msg.id">
                 <button class="chat-action-button" title="Сохранить" @click="saveInlineEdit">
@@ -1619,7 +1637,7 @@ const onChatMouseDown = (e: MouseEvent) => {
         </div>
       </div>
 
-      <div v-if="askComposerOpen && !localTimelineMutationsDisabled" class="ask-composer no-drag">
+      <div v-if="askComposerOpen" class="ask-composer no-drag">
         <div class="ask-composer-header">
           <div class="ask-composer-title">Сообщение</div>
           <button class="ask-composer-close" title="Скрыть" @click="askComposerOpen = false">
@@ -1633,21 +1651,29 @@ const onChatMouseDown = (e: MouseEvent) => {
           class="ask-textarea"
           rows="3"
           placeholder="Вставьте текст или изображения и нажмите «Отправить»"
+          :disabled="askSendInFlight"
         />
 
         <div v-if="askDraftImages.length > 0" class="ask-attachments">
           <div v-for="img in askDraftImages" :key="img.id" class="ask-attachment">
             <img class="ask-attachment-img" :src="img.dataUrl" alt="Вложение" />
-            <button class="ask-attachment-remove" title="Удалить" @click="removeAskImage(img.id)">
+            <button class="ask-attachment-remove" title="Удалить" :disabled="askSendInFlight" @click="removeAskImage(img.id)">
               <span class="mdi mdi-close" />
             </button>
           </div>
         </div>
 
         <div class="ask-actions">
-          <button class="ask-send-button" :disabled="!canSendAsk" @click="sendAsk">
+          <div
+            v-if="askSendStatusText"
+            class="ask-status"
+            :class="{ warn: askSendStatusTone === 'warn', error: askSendStatusTone === 'error' }"
+          >
+            {{ askSendStatusText }}
+          </div>
+          <button class="ask-send-button" :disabled="!canSendAsk || askSendInFlight" @click="sendAsk">
             <span class="mdi mdi-send" />
-            Отправить
+            {{ askSendInFlight ? 'Отправка...' : 'Отправить' }}
           </button>
         </div>
       </div>
@@ -1715,7 +1741,7 @@ const onChatMouseDown = (e: MouseEvent) => {
           </v-tooltip>
         </div>
         <div class="controls-right no-drag">
-          <v-tooltip v-if="!localTimelineMutationsDisabled && chatStore.selectedCount > 0" text="Снять выделение" location="top">
+          <v-tooltip v-if="chatStore.selectedCount > 0" text="Снять выделение" location="top">
             <template #activator="{ props: tp }">
               <div v-bind="tp" class="selection-clear-wrapper">
                 <button
@@ -1769,7 +1795,6 @@ const onChatMouseDown = (e: MouseEvent) => {
     <UpdateDialog v-model="showUpdateDialog" />
 
     <button
-      v-if="!localTimelineMutationsDisabled"
       class="ask-fab no-drag"
       :class="{ open: askComposerOpen }"
       title="Сообщение"
@@ -1779,7 +1804,7 @@ const onChatMouseDown = (e: MouseEvent) => {
     </button>
 
     <button
-      v-if="codeSelectionUi.visible && !localTimelineMutationsDisabled"
+      v-if="codeSelectionUi.visible"
       class="code-selection-robot-button no-drag"
       :style="{ left: `${codeSelectionUi.x}px`, top: `${codeSelectionUi.y}px` }"
       title="Спросить про выделенное"
@@ -1937,11 +1962,27 @@ const onChatMouseDown = (e: MouseEvent) => {
   padding: var(--spacing-sm);
   width: 100%;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
   position: relative;
   z-index: 1;
+}
+
+.chat-area {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-area :deep(.scroll-to-bottom-button) {
+  right: 16px;
+  bottom: 84px;
+  z-index: 27;
 }
 
 .header {
@@ -2367,6 +2408,12 @@ const onChatMouseDown = (e: MouseEvent) => {
   transition: transform 0.12s ease, background 0.12s ease;
 }
 
+.ask-attachment-remove:disabled {
+  opacity: 0.45;
+  cursor: default;
+  transform: none;
+}
+
 .ask-attachment-remove:hover {
   transform: scale(1.04);
   background: rgba(0, 0, 0, 0.7);
@@ -2374,7 +2421,24 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 .ask-actions {
   display: flex;
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.ask-status {
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.ask-status.warn {
+  color: #f4c95d;
+}
+
+.ask-status.error {
+  color: #ff9a8f;
 }
 
 .ask-send-button {
@@ -2845,6 +2909,11 @@ const onChatMouseDown = (e: MouseEvent) => {
 }
 
 @media (max-width: 560px) {
+  .chat-area :deep(.scroll-to-bottom-button) {
+    right: 12px;
+    bottom: 74px;
+  }
+
   .popover-content {
     padding: 6px;
   }
@@ -2890,6 +2959,11 @@ const onChatMouseDown = (e: MouseEvent) => {
 }
 
 @media (max-width: 420px) {
+  .chat-area :deep(.scroll-to-bottom-button) {
+    right: 10px;
+    bottom: 68px;
+  }
+
   .popover-content {
     padding: 4px;
   }

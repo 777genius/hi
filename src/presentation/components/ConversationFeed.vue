@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, reactive, ref, useSlots, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, useSlots, watch } from 'vue';
 import type { ConversationFeedMessage } from '../conversationFeed';
 import { renderMarkdownToSafeHtml } from '@/utils/markdown';
 import { highlightMessage, messageHasCode } from '@/utils/codeHighlight';
 import { toggleCodeBlockCollapseFromTarget } from '../feedCodeBlocks';
 
 type HighlightEntry = { sourceText: string; html: string };
+const SCROLL_BOTTOM_THRESHOLD_PX = 72;
 
 const props = withDefaults(defineProps<{
   messages: ConversationFeedMessage[];
@@ -38,9 +39,12 @@ const emit = defineEmits<{
 const slots = useSlots();
 const scrollEl = ref<HTMLElement | null>(null);
 const highlightedById = reactive<Record<string, HighlightEntry>>({});
+const showScrollToBottom = ref(false);
+let scrollStateFrame: number | null = null;
 
 defineExpose({
   scrollEl,
+  scrollToBottom,
 });
 
 const hasActionsSlot = computed(() => !!slots.actions);
@@ -72,6 +76,9 @@ watch(
         .then((html) => {
           if (!hasCurrentHighlightCandidate(item.id, item.text)) return;
           highlightedById[item.id] = { sourceText: item.text, html };
+          void nextTick(() => {
+            scheduleScrollStateUpdate();
+          });
         })
         .catch(() => {});
     }
@@ -107,8 +114,12 @@ function rowClasses(message: ConversationFeedMessage): Record<string, boolean> {
   };
 }
 
+function isMessageClickable(message: ConversationFeedMessage): boolean {
+  return props.messagesClickable && message.kind !== 'haiku' && !message.deleted && message.status === 'final';
+}
+
 function onMessageClick(event: MouseEvent, message: ConversationFeedMessage): void {
-  if (!props.messagesClickable || message.kind === 'haiku') return;
+  if (!isMessageClickable(message)) return;
   emit('message-click', event, message);
 }
 
@@ -120,6 +131,94 @@ function onScrollClickCapture(event: MouseEvent): void {
   }
   emit('scroll-click-capture', event);
 }
+
+function isNearBottom(element: HTMLElement): boolean {
+  const remaining = element.scrollHeight - (element.scrollTop + element.clientHeight);
+  return remaining <= SCROLL_BOTTOM_THRESHOLD_PX;
+}
+
+function updateScrollToBottomVisibility(): void {
+  const element = scrollEl.value;
+  if (!element) {
+    showScrollToBottom.value = false;
+    return;
+  }
+
+  const hasOverflow = (element.scrollHeight - element.clientHeight) > 24;
+  showScrollToBottom.value = hasOverflow && !isNearBottom(element);
+}
+
+function cancelScrollStateFrame(): void {
+  if (scrollStateFrame === null || typeof window === 'undefined') {
+    return;
+  }
+
+  window.cancelAnimationFrame(scrollStateFrame);
+  scrollStateFrame = null;
+}
+
+function scheduleScrollStateUpdate(): void {
+  if (typeof window === 'undefined') {
+    updateScrollToBottomVisibility();
+    return;
+  }
+
+  cancelScrollStateFrame();
+  scrollStateFrame = window.requestAnimationFrame(() => {
+    scrollStateFrame = null;
+    updateScrollToBottomVisibility();
+  });
+}
+
+function onScroll(): void {
+  updateScrollToBottomVisibility();
+}
+
+function scrollToBottom(behavior: ScrollBehavior = 'smooth'): void {
+  const element = scrollEl.value;
+  if (!element) return;
+
+  element.scrollTo({
+    top: element.scrollHeight,
+    behavior,
+  });
+  scheduleScrollStateUpdate();
+}
+
+watch(
+  scrollEl,
+  (element, previous) => {
+    previous?.removeEventListener('scroll', onScroll);
+    element?.addEventListener('scroll', onScroll, { passive: true });
+    scheduleScrollStateUpdate();
+  },
+  { immediate: true }
+);
+
+watch(
+  () => props.messages,
+  () => {
+    void nextTick(() => {
+      scheduleScrollStateUpdate();
+    });
+  },
+  { deep: true, flush: 'post' }
+);
+
+onMounted(() => {
+  scheduleScrollStateUpdate();
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', scheduleScrollStateUpdate);
+  }
+});
+
+onUnmounted(() => {
+  scrollEl.value?.removeEventListener('scroll', onScroll);
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('resize', scheduleScrollStateUpdate);
+  }
+  cancelScrollStateFrame();
+});
 </script>
 
 <template>
@@ -147,7 +246,7 @@ function onScrollClickCapture(event: MouseEvent): void {
       >
         <div
           class="chat-bubble"
-          :class="{ clickable: messagesClickable && msg.kind !== 'haiku', deleted: msg.deleted }"
+          :class="{ clickable: isMessageClickable(msg), deleted: msg.deleted }"
           @click="onMessageClick($event, msg)"
         >
           <template v-if="msg.deleted">
@@ -191,22 +290,38 @@ function onScrollClickCapture(event: MouseEvent): void {
         </div>
       </div>
     </div>
+
+    <button
+      v-show="showScrollToBottom"
+      type="button"
+      class="scroll-to-bottom-button no-drag"
+      title="Прокрутить в самый низ"
+      aria-label="Прокрутить в самый низ"
+      @mousedown.stop.prevent
+      @click.stop="scrollToBottom()"
+    >
+      <span class="mdi mdi-chevron-double-down" />
+    </button>
   </div>
 </template>
 
 <style scoped>
 .chat-area {
   min-height: 60px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   width: 100%;
   box-sizing: border-box;
   overflow: hidden;
   flex: 1;
+  position: relative;
 }
 
 .chat-scroll {
   flex: 1;
+  min-height: 0;
+  min-width: 0;
   width: 100%;
   overflow-y: auto;
   padding: var(--spacing-sm);
@@ -219,6 +334,47 @@ function onScrollClickCapture(event: MouseEvent): void {
 
 .chat-scroll.selecting {
   user-select: none;
+}
+
+.scroll-to-bottom-button {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(17, 21, 29, 0.88);
+  color: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(12px);
+  cursor: pointer;
+  z-index: 6;
+  transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+
+.scroll-to-bottom-button:hover {
+  transform: translateY(-1px);
+  background: rgba(59, 130, 246, 0.22);
+  border-color: rgba(59, 130, 246, 0.4);
+}
+
+.scroll-to-bottom-button:active {
+  transform: translateY(0);
+}
+
+.scroll-to-bottom-button .mdi {
+  font-size: 20px;
+}
+
+:global(.theme-light) .scroll-to-bottom-button {
+  background: rgba(255, 255, 255, 0.95);
+  color: rgba(15, 23, 42, 0.92);
+  border-color: rgba(15, 23, 42, 0.08);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.14);
 }
 
 :slotted(.lasso-rect) {
@@ -241,6 +397,7 @@ function onScrollClickCapture(event: MouseEvent): void {
 
 .chat-row {
   width: 100%;
+  min-width: 0;
   display: flex;
   align-items: flex-start;
   gap: 6px;
@@ -256,7 +413,9 @@ function onScrollClickCapture(event: MouseEvent): void {
 }
 
 .chat-bubble {
+  box-sizing: border-box;
   max-width: calc(92% - 40px);
+  min-width: 0;
   padding: 8px 10px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -265,7 +424,7 @@ function onScrollClickCapture(event: MouseEvent): void {
   line-height: 1.45;
   white-space: pre-wrap;
   word-wrap: break-word;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
   position: relative;
 }
 
@@ -391,6 +550,8 @@ function onScrollClickCapture(event: MouseEvent): void {
 
 .chat-text {
   white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .chat-text-deleted {
@@ -410,12 +571,19 @@ function onScrollClickCapture(event: MouseEvent): void {
 
 .chat-text-highlighted {
   white-space: pre-wrap;
-  display: inline;
+  display: block;
+  max-width: 100%;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .chat-markdown {
   display: block;
+  max-width: 100%;
+  min-width: 0;
   white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .chat-markdown :deep(p) {
@@ -431,6 +599,20 @@ function onScrollClickCapture(event: MouseEvent): void {
   font-weight: 700;
   margin: 6px 0 4px;
   line-height: 1.25;
+}
+
+.chat-markdown :deep(p),
+.chat-markdown :deep(li),
+.chat-markdown :deep(blockquote),
+.chat-markdown :deep(h1),
+.chat-markdown :deep(h2),
+.chat-markdown :deep(h3),
+.chat-markdown :deep(h4),
+.chat-markdown :deep(h5),
+.chat-markdown :deep(h6),
+.chat-markdown :deep(a) {
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .chat-markdown :deep(h1) {
@@ -460,6 +642,7 @@ function onScrollClickCapture(event: MouseEvent): void {
 
 .chat-markdown :deep(.code-block) {
   display: block;
+  max-width: 100%;
   margin: 6px 0;
   border-radius: 8px;
   overflow: hidden;
@@ -487,11 +670,15 @@ function onScrollClickCapture(event: MouseEvent): void {
 
 .chat-markdown :deep(.code-block pre) {
   margin: 0;
+  max-width: 100%;
   padding: 12px 14px;
   overflow-x: auto;
   background: transparent;
   font-size: 12.5px;
   line-height: 1.5;
+  box-sizing: border-box;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .chat-markdown :deep(.code-block pre code) {
@@ -501,6 +688,11 @@ function onScrollClickCapture(event: MouseEvent): void {
   background: transparent;
   padding: 0;
   border-radius: 0;
+  display: block;
+  min-width: max-content;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
 }
 
 .chat-markdown :deep(.code-block-collapsible pre) {
@@ -558,6 +750,9 @@ function onScrollClickCapture(event: MouseEvent): void {
   padding: 1px 5px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.08);
+  white-space: break-spaces;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .chat-markdown :deep(a) {
@@ -571,6 +766,7 @@ function onScrollClickCapture(event: MouseEvent): void {
 
 .chat-text-highlighted :deep(.code-block) {
   display: block;
+  max-width: 100%;
   margin: 6px 0;
   border-radius: 8px;
   overflow: hidden;
@@ -646,12 +842,16 @@ function onScrollClickCapture(event: MouseEvent): void {
 
 .chat-text-highlighted :deep(.shiki) {
   margin: 0;
+  max-width: 100%;
   padding: 12px 14px;
   border-radius: 8px 8px 0 0;
   font-size: 12.5px;
   line-height: 1.5;
   overflow-x: auto;
   tab-size: 2;
+  box-sizing: border-box;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .chat-text-highlighted :deep(.code-block:not(.code-block-collapsible) .shiki) {
@@ -660,7 +860,11 @@ function onScrollClickCapture(event: MouseEvent): void {
 
 .chat-text-highlighted :deep(.shiki code) {
   font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Menlo, Monaco, Consolas, monospace;
+  display: block;
+  min-width: max-content;
   white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
 }
 
 .chat-cursor {
@@ -677,6 +881,13 @@ function onScrollClickCapture(event: MouseEvent): void {
 }
 
 @media (max-width: 560px) {
+  .scroll-to-bottom-button {
+    right: 10px;
+    bottom: 10px;
+    width: 36px;
+    height: 36px;
+  }
+
   .chat-scroll {
     padding: 6px 4px 8px 2px;
     gap: 6px;

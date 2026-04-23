@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import ConversationFeed from '@/presentation/components/ConversationFeed.vue';
 import { buildCompanionConversationFeedMessages } from '@/presentation/companionFeed';
+import { createPromptImageDraft, type PromptImageDraft } from '@/utils/promptImages';
 import {
   classifyCompanionFailureMessage,
   connectionTextForCompanionFailure,
@@ -35,6 +36,8 @@ const actionInFlight = ref(false);
 const syncInFlight = ref(false);
 const aiQuestion = ref('');
 const aiComposerOpen = ref(false);
+const promptImages = ref<PromptImageDraft[]>([]);
+const promptFileInputRef = ref<HTMLInputElement | null>(null);
 
 let eventSource: EventSource | null = null;
 let statusTimer: number | null = null;
@@ -61,7 +64,9 @@ const microphoneSupported = computed(() => !!snapshotData.value?.microphone.supp
 const microphoneMuted = computed(() => !!snapshotData.value?.microphone.muted);
 const recordButtonTitle = computed(() => (canStop.value ? 'Остановить запись' : 'Начать запись'));
 const microphoneToggleTitle = computed(() => (microphoneMuted.value ? 'Включить микрофон' : 'Выключить микрофон'));
-const aiButtonTitle = computed(() => (aiComposerOpen.value ? 'Скрыть сообщение в AI' : 'Сообщение в AI'));
+const aiButtonTitle = computed(() => 'Сгенерировать ответ');
+const promptComposerTitle = computed(() => (aiComposerOpen.value ? 'Скрыть сообщение в AI' : 'Открыть сообщение в AI'));
+const canSendPrompt = computed(() => aiQuestion.value.trim().length > 0 || promptImages.value.length > 0);
 const actionsDisabled = computed(() => (
   !companionAvailable
   || !snapshotReady.value
@@ -162,6 +167,10 @@ function describeActionResult(actionResult?: string | null): string {
       return 'AI контекст очищен';
     case 'cleared_history':
       return 'История очищена';
+    case 'started_ai':
+      return 'Генерирую ответ';
+    case 'started_prompt':
+      return 'Сообщение отправлено';
     case 'busy_transition':
       return 'Подожди, предыдущее действие ещё выполняется';
     case 'rejected_auth':
@@ -409,21 +418,83 @@ async function onRecordClick(): Promise<void> {
   await sendAction('/api/record/start');
 }
 
-async function onAskAi(): Promise<void> {
+async function requestAiReply(): Promise<void> {
+  await sendAction('/api/ai/request', { text: '' });
+}
+
+async function sendPromptDraft(): Promise<void> {
   const text = aiQuestion.value.trim();
-  const applied = await sendAction('/api/ai/request', { text });
+  if (!canSendPrompt.value) {
+    setTemporaryStatus('Добавь текст или фото для отправки', 'warn', 2600);
+    return;
+  }
+  const applied = await sendAction('/api/prompt/send', {
+    text,
+    images: promptImages.value.map((img) => ({
+      mediaType: img.mime,
+      dataBase64: img.dataBase64,
+    })),
+  });
   if (!applied) {
     return;
   }
   aiQuestion.value = '';
+  promptImages.value = [];
   aiComposerOpen.value = false;
 }
 
 function onAiKeydown(event: KeyboardEvent): void {
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
     event.preventDefault();
-    void onAskAi().catch(() => {});
+    void sendPromptDraft().catch(() => {});
   }
+}
+
+function openPromptFilePicker(): void {
+  if (actionsDisabled.value) return;
+  promptFileInputRef.value?.click();
+}
+
+function removePromptImage(id: string): void {
+  promptImages.value = promptImages.value.filter((img) => img.id !== id);
+}
+
+async function onPromptFilesSelected(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement | null;
+  const files = Array.from(input?.files ?? []);
+  if (input) {
+    input.value = '';
+  }
+  if (files.length === 0) return;
+
+  let added = 0;
+  let lastError = '';
+  for (const file of files) {
+    try {
+      const nextImage = await createPromptImageDraft(file, { prefix: 'img' });
+      if (!nextImage) continue;
+      promptImages.value.push(nextImage);
+      added += 1;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : 'Не удалось подготовить фото к отправке.';
+    }
+  }
+
+  if (added === 0) {
+    setTemporaryStatus(
+      lastError || 'Не удалось добавить фото. Проверь формат и размер изображения.',
+      'warn',
+      4200,
+    );
+    return;
+  }
+
+  if (lastError) {
+    setTemporaryStatus(lastError, 'warn', 4200);
+  }
+
+  aiComposerOpen.value = true;
+  await nextTick();
 }
 
 function connectEvents(): void {
@@ -597,29 +668,63 @@ onUnmounted(() => {
         <section v-if="aiComposerOpen" class="ask-card">
           <div class="ask-card-header">
             <div class="summary-label">Сообщение в AI</div>
-            <button class="ask-close-button" title="Скрыть" @click="aiComposerOpen = false">
-              <span class="mdi mdi-close" />
-            </button>
+            <div class="ask-card-header-actions">
+              <button
+                class="ask-icon-button"
+                title="Сфоткать или выбрать фото"
+                :disabled="actionsDisabled"
+                @click="openPromptFilePicker"
+              >
+                <span class="mdi mdi-camera-outline" />
+              </button>
+              <button class="ask-close-button" title="Скрыть" @click="aiComposerOpen = false">
+                <span class="mdi mdi-close" />
+              </button>
+            </div>
           </div>
+
+          <input
+            ref="promptFileInputRef"
+            class="prompt-file-input"
+            type="file"
+            accept="image/*"
+            capture="environment"
+            multiple
+            @change="onPromptFilesSelected"
+          />
 
           <textarea
             v-model="aiQuestion"
             class="ask-textarea"
-            placeholder="Оставь пустым, если хочешь, чтобы backend ответил только по текущему live-контексту."
+            placeholder="Напиши сообщение или прикрепи фото. Можно оставить пустым и отправить только фото."
             :disabled="actionsDisabled"
             @keydown="onAiKeydown"
           />
 
+          <div v-if="promptImages.length > 0" class="prompt-attachments">
+            <div v-for="img in promptImages" :key="img.id" class="prompt-attachment">
+              <img class="prompt-attachment-image" :src="img.dataUrl" alt="Вложенное фото" />
+              <button
+                class="prompt-attachment-remove"
+                title="Удалить фото"
+                :disabled="actionsDisabled"
+                @click="removePromptImage(img.id)"
+              >
+                <span class="mdi mdi-close" />
+              </button>
+            </div>
+          </div>
+
           <div class="ask-footer">
             <div class="ask-hint">
-              Идёт через тот же backend reducer и generation guard, что и companion mode в desktop.
+              Текст и фото уходят через тот же backend prompt path, что и desktop companion.
             </div>
             <button
               class="send-button"
-              :disabled="actionsDisabled"
-              @click="onAskAi().catch(() => {})"
+              :disabled="actionsDisabled || !canSendPrompt"
+              @click="sendPromptDraft().catch(() => {})"
             >
-              Отправить в AI
+              Отправить
             </button>
           </div>
         </section>
@@ -667,12 +772,21 @@ onUnmounted(() => {
 
           <button
             class="dock-circle-button"
-            :class="{ active: aiComposerOpen }"
             :title="aiButtonTitle"
+            :disabled="actionsDisabled"
+            @click="requestAiReply().catch(() => {})"
+          >
+            <span class="mdi mdi-robot-outline" />
+          </button>
+
+          <button
+            class="dock-circle-button"
+            :class="{ active: aiComposerOpen }"
+            :title="promptComposerTitle"
             :disabled="actionsDisabled"
             @click="aiComposerOpen = !aiComposerOpen"
           >
-            <span :class="aiComposerOpen ? 'mdi mdi-close' : 'mdi mdi-robot-outline'" />
+            <span :class="aiComposerOpen ? 'mdi mdi-close' : 'mdi mdi-message-text-outline'" />
           </button>
         </div>
       </section>
@@ -704,6 +818,10 @@ onUnmounted(() => {
   gap: 10px;
 }
 
+.companion-shell > * {
+  min-width: 0;
+}
+
 .feed-card,
 .ask-card {
   border-radius: 20px;
@@ -715,6 +833,7 @@ onUnmounted(() => {
 .feed-card,
 .ask-card {
   padding: 14px;
+  min-width: 0;
 }
 
 .top-connection-status {
@@ -752,15 +871,19 @@ onUnmounted(() => {
 }
 
 .feed-card {
+  display: flex;
   min-height: 340px;
 }
 
 .feed-card :deep(.chat-area) {
   min-height: 0;
+  min-width: 0;
   flex: 1;
 }
 
 .feed-card :deep(.chat-scroll) {
+  min-height: 0;
+  min-width: 0;
   max-height: min(58vh, 760px);
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
@@ -778,6 +901,12 @@ onUnmounted(() => {
   gap: 10px;
 }
 
+.ask-card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .ask-close-button {
   width: 34px;
   height: 34px;
@@ -787,6 +916,27 @@ onUnmounted(() => {
   color: var(--color-text);
   cursor: pointer;
   font-size: 18px;
+}
+
+.ask-icon-button {
+  width: 38px;
+  height: 38px;
+  border: none;
+  border-radius: 12px;
+  background: rgba(59, 130, 246, 0.16);
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.ask-icon-button:disabled,
+.ask-close-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.prompt-file-input {
+  display: none;
 }
 
 .ask-textarea {
@@ -810,6 +960,46 @@ onUnmounted(() => {
 
 .ask-textarea:disabled {
   opacity: 0.55;
+}
+
+.prompt-attachments {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  gap: 10px;
+}
+
+.prompt-attachment {
+  position: relative;
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid var(--glass-border);
+  background: rgba(0, 0, 0, 0.2);
+  aspect-ratio: 1 / 1;
+}
+
+.prompt-attachment-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.prompt-attachment-remove {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.76);
+  color: #fff;
+  cursor: pointer;
+}
+
+.prompt-attachment-remove:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .ask-footer {

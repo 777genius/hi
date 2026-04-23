@@ -378,9 +378,17 @@ export const useChatStore = defineStore('chat', () => {
     return selectedSet.value.has(id);
   }
 
+  function isSelectableMessage(message: ChatMessage | undefined): boolean {
+    return !!message && !message.deleted && message.kind !== 'haiku' && message.status === 'final';
+  }
+
   function filterSelectableIds(ids: string[]): string[] {
     const next = uniqStable(ids);
-    const allowed = new Set(messages.value.map((m) => m.id));
+    const allowed = new Set(
+      messages.value
+        .filter((message) => isSelectableMessage(message))
+        .map((message) => message.id)
+    );
     return next.filter((id) => allowed.has(id));
   }
 
@@ -398,16 +406,18 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function toggleSelection(id: string): void {
-    const ids = selectedMessageIds.value;
-    if (ids.includes(id)) {
-      selectedMessageIds.value = ids.filter((x) => x !== id);
+    const [selectableId] = filterSelectableIds([id]);
+    if (!selectableId) return;
+    const ids = filterSelectableIds(selectedMessageIds.value);
+    if (ids.includes(selectableId)) {
+      selectedMessageIds.value = ids.filter((x) => x !== selectableId);
     } else {
-      selectedMessageIds.value = [...ids, id];
+      selectedMessageIds.value = uniqStable([...ids, selectableId]);
     }
   }
 
   function selectOnly(id: string): void {
-    selectedMessageIds.value = [id];
+    selectedMessageIds.value = filterSelectableIds([id]);
   }
 
   function editMessageText(messageId: string, nextText: string): void {
@@ -1327,11 +1337,7 @@ export const useChatStore = defineStore('chat', () => {
       ? Number(snapshot.live.microphonePartialStartedAtMs || Date.now())
       : 0;
 
-    if (companionModeEnabled.value) {
-      clearSelection();
-    } else {
-      selectedMessageIds.value = filterSelectableIds(selectedMessageIds.value);
-    }
+    selectedMessageIds.value = filterSelectableIds(selectedMessageIds.value);
   }
 
   return {

@@ -192,6 +192,81 @@ describe('chat store (selection + context)', () => {
     expect(store.haikuMessages[0]?.insertAfterId).toBe('stt:1:3:c');
   });
 
+  it('selection ignores non-final and assistant messages', () => {
+    transcriptionProxy.finalUtterances.push({ id: 'stt:1:1:a', sessionId: 1, text: 'alpha', timestamp: 1 });
+    transcriptionProxy.partialText = 'live alpha';
+
+    const store = useChatStore();
+    store.haikuMessages.push({
+      id: 'haiku:1',
+      kind: 'haiku',
+      role: 'outgoing',
+      status: 'final',
+      text: 'answer',
+      createdAtMs: 2,
+      seq: 2,
+    });
+
+    store.setSelection(['stt:live', 'haiku:1', 'stt:1:1:a'], false);
+    expect(store.selectedMessageIds).toEqual(['stt:1:1:a']);
+
+    store.toggleSelection('haiku:1');
+    expect(store.selectedMessageIds).toEqual(['stt:1:1:a']);
+
+    store.toggleSelection('stt:live');
+    expect(store.selectedMessageIds).toEqual(['stt:1:1:a']);
+
+    store.selectOnly('stt:live');
+    expect(store.selectedMessageIds).toEqual([]);
+  });
+
+  it('companion snapshot keeps valid local selection in companion mode', () => {
+    transcriptionProxy.finalUtterances.push(
+      { id: 'stt:1:1:a', sessionId: 1, text: 'first', timestamp: 1 },
+      { id: 'stt:1:2:b', sessionId: 1, text: 'second', timestamp: 2 }
+    );
+
+    const store = useChatStore();
+    store.setSelection(['stt:1:2:b'], false);
+
+    store.hydrateFromCompanionSnapshot({
+      authRequired: false,
+      recording: {
+        status: 'Idle',
+        activeSessionId: 0,
+      },
+      microphone: {
+        muted: false,
+        enabled: true,
+        supported: true,
+        source: 'combined',
+      },
+      controls: {
+        historyFloorSeq: 0,
+        contextFloorSeq: 0,
+        conversationGeneration: 0,
+        companionModeEnabled: true,
+        lastAction: null,
+      },
+      live: {},
+      timeline: [
+        {
+          id: 'prompt:1',
+          kind: 'prompt',
+          role: 'outgoing',
+          status: 'final',
+          text: 'hello',
+          createdAtMs: 3,
+          seq: 3,
+          attachments: [],
+        },
+      ],
+    });
+
+    expect(store.companionModeEnabled).toBe(true);
+    expect(store.selectedMessageIds).toEqual(['stt:1:2:b']);
+  });
+
   it('saved system prompt is used for new requests', async () => {
     transcriptionProxy.finalUtterances.push({ id: 'stt:1:1:hi', sessionId: 1, text: 'hi', timestamp: 1 });
     invokeMock.mockResolvedValue('r4');
