@@ -182,6 +182,11 @@ pub struct AppState {
     /// Фоновая задача refresh токенов (если есть refresh_token).
     pub auth_refresh_task: Arc<RwLock<Option<tauri::async_runtime::JoinHandle<()>>>>,
 
+    /// Сериализует read-modify-write операции над STT конфигом.
+    /// Иначе concurrent save путями (settings/auth/startup) можно перетереть `deepgram_keyterms`
+    /// stale-снапшотом даже если каждое место по отдельности "правильное".
+    pub stt_config_guard: Arc<tokio::sync::Mutex<()>>,
+
     /// Дебаунс для глобального hotkey записи.
     /// Нужен из‑за key repeat / случайных двойных срабатываний, которые выглядят как "мигание" окна.
     pub last_recording_hotkey_ms: AtomicU64,
@@ -274,6 +279,7 @@ impl AppState {
                     companion_microphone_dominant_until_ms: Arc::new(AtomicU64::new(0)),
                     companion_request_generations: Arc::new(RwLock::new(HashMap::new())),
                     auth_refresh_task: Arc::new(RwLock::new(None)),
+                    stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
@@ -358,6 +364,7 @@ impl AppState {
                     companion_microphone_dominant_until_ms: Arc::new(AtomicU64::new(0)),
                     companion_request_generations: Arc::new(RwLock::new(HashMap::new())),
                     auth_refresh_task: Arc::new(RwLock::new(None)),
+                    stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
@@ -453,6 +460,7 @@ impl AppState {
             companion_microphone_dominant_until_ms: Arc::new(AtomicU64::new(0)),
             companion_request_generations: Arc::new(RwLock::new(HashMap::new())),
             auth_refresh_task: Arc::new(RwLock::new(None)),
+            stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
             last_recording_hotkey_ms: AtomicU64::new(0),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
@@ -479,10 +487,18 @@ impl AppState {
             .ok()
     }
 
-    async fn apply_backend_auth_token_to_stt(&self, token: Option<String>) {
+    pub(crate) async fn apply_backend_auth_token_to_stt(&self, token: Option<String>) {
+        let _guard = self.stt_config_guard.lock().await;
+
         // Best-effort: ошибки не должны блокировать UX, но они важны для диагностики.
-        let mut config = ConfigStore::load_config().await.unwrap_or_default();
+        // Важно: берём текущий in-memory config, чтобы не "сбрасывать" keyterms и другие поля
+        // конкурентным чтением старой disk-версии.
+        let mut config = self.transcription_service.get_config().await;
+        if config.backend_auth_token == token {
+            return;
+        }
         config.backend_auth_token = token;
+        self.config.write().await.stt.backend_auth_token = config.backend_auth_token.clone();
         if let Err(e) = ConfigStore::save_config(&config).await {
             log::warn!("Failed to persist STT config token: {}", e);
         }

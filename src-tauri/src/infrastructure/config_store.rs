@@ -261,6 +261,7 @@ mod tests {
         config.auto_copy_to_clipboard = true;
         config.auto_paste_text = true;
         config.vad_silence_timeout_ms = 2500;
+        config.companion_access_token = Some("stable-token".to_string());
 
         ConfigStore::save_app_config(&config).await.unwrap();
         let loaded = ConfigStore::load_app_config().await.unwrap();
@@ -269,6 +270,10 @@ mod tests {
         assert_eq!(loaded.auto_copy_to_clipboard, false);
         assert_eq!(loaded.auto_paste_text, false);
         assert_eq!(loaded.vad_silence_timeout_ms, config.vad_silence_timeout_ms);
+        assert_eq!(
+            loaded.companion_access_token.as_deref(),
+            Some("stable-token")
+        );
 
         ConfigStore::delete_app_config().await.unwrap();
     }

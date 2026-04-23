@@ -34,15 +34,18 @@ class TauriSettingsService {
     return snap.data;
   }
 
-  async updateSttConfig(config: SttConfigData): Promise<void> {
+  async updateSttConfig(
+    config: Partial<SttConfigData> & Pick<SttConfigData, 'provider' | 'language'>
+  ): Promise<void> {
     const args: UpdateSttConfigInvokeArgs = {
       provider: config.provider,
       language: config.language,
-      deepgramApiKey: config.deepgramApiKey,
-      assemblyaiApiKey: config.assemblyaiApiKey,
-      model: config.model,
-      deepgramKeyterms: config.deepgramKeyterms,
     };
+
+    if ('deepgramApiKey' in config) args.deepgramApiKey = config.deepgramApiKey;
+    if ('assemblyaiApiKey' in config) args.assemblyaiApiKey = config.assemblyaiApiKey;
+    if ('model' in config) args.model = config.model;
+    if ('deepgramKeyterms' in config) args.deepgramKeyterms = config.deepgramKeyterms;
 
     await invokeUpdateSttConfig(args);
   }

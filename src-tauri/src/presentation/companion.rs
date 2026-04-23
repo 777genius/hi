@@ -180,6 +180,35 @@ pub fn new_runtime() -> CompanionRuntime {
     }
 }
 
+fn normalize_persisted_security_token(candidate: Option<String>) -> Option<String> {
+    candidate
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+async fn ensure_persisted_security_token(state: &AppState) -> Result<String, String> {
+    let existing = {
+        let config = state.config.read().await;
+        normalize_persisted_security_token(config.companion_access_token.clone())
+    };
+    if let Some(token) = existing {
+        return Ok(token);
+    }
+
+    let token = generate_security_token();
+    let config_snapshot = {
+        let mut config = state.config.write().await;
+        config.companion_access_token = Some(token.clone());
+        config.clone()
+    };
+
+    crate::infrastructure::ConfigStore::save_app_config(&config_snapshot)
+        .await
+        .map_err(|e| format!("Failed to persist companion token: {}", e))?;
+
+    Ok(token)
+}
+
 pub async fn reset_session_timeline(state: &AppState) {
     crate::presentation::companion_timeline::reset_session_state(state).await;
     state.history.write().await.clear();
@@ -304,9 +333,10 @@ pub async fn enable_mode(app_handle: &AppHandle) -> Result<CompanionServerStatus
         .map_err(|e| format!("Failed to resolve companion server address: {}", e))?
         .port();
 
+    let token = ensure_persisted_security_token(state.inner()).await?;
     *runtime.enabled.write().await = true;
     *runtime.port.write().await = Some(port);
-    *runtime.security_token.write().await = generate_security_token();
+    *runtime.security_token.write().await = token;
 
     let app_handle_for_task = app_handle.clone();
     let task = tauri::async_runtime::spawn(async move {
@@ -338,7 +368,6 @@ pub async fn disable_mode(app_handle: &AppHandle) -> Result<(), String> {
     let runtime = state.companion_runtime.read().await.clone();
     *runtime.enabled.write().await = false;
     *runtime.port.write().await = None;
-    *runtime.security_token.write().await = generate_security_token();
 
     drop(_guard);
     let _ = publish_snapshot(app_handle).await;
@@ -534,29 +563,28 @@ async fn route_request(
         (Method::GET, path) if path.starts_with("/c/") => {
             let token = path.trim_start_matches("/c/").to_string();
             if is_valid_token(&app_handle, &token).await {
-                redirect_response(&format!("/companion.html?token={}", urlencoding::encode(&token)))
+                redirect_response(&format!(
+                    "/companion.html?token={}",
+                    urlencoding::encode(&token)
+                ))
             } else {
                 text_response(StatusCode::FORBIDDEN, "Forbidden")
             }
         }
-        (Method::HEAD, "/companion.html") => {
-            match parse_query_token(req.uri()) {
-                Some(token) if is_valid_token(&app_handle, &token).await => {
-                    without_body(serve_companion_frontend(&app_handle, req.uri()).await)
-                }
-                Some(_) => text_response(StatusCode::FORBIDDEN, "Forbidden"),
-                None => text_response(StatusCode::UNAUTHORIZED, "Missing token"),
+        (Method::HEAD, "/companion.html") => match parse_query_token(req.uri()) {
+            Some(token) if is_valid_token(&app_handle, &token).await => {
+                without_body(serve_companion_frontend(&app_handle, req.uri()).await)
             }
-        }
-        (Method::GET, "/companion.html") => {
-            match parse_query_token(req.uri()) {
-                Some(token) if is_valid_token(&app_handle, &token).await => {
-                    serve_companion_frontend(&app_handle, req.uri()).await
-                }
-                Some(_) => text_response(StatusCode::FORBIDDEN, "Forbidden"),
-                None => text_response(StatusCode::UNAUTHORIZED, "Missing token"),
+            Some(_) => text_response(StatusCode::FORBIDDEN, "Forbidden"),
+            None => text_response(StatusCode::UNAUTHORIZED, "Missing token"),
+        },
+        (Method::GET, "/companion.html") => match parse_query_token(req.uri()) {
+            Some(token) if is_valid_token(&app_handle, &token).await => {
+                serve_companion_frontend(&app_handle, req.uri()).await
             }
-        }
+            Some(_) => text_response(StatusCode::FORBIDDEN, "Forbidden"),
+            None => text_response(StatusCode::UNAUTHORIZED, "Missing token"),
+        },
         (Method::HEAD, path) if is_companion_frontend_asset_path(path) => {
             without_body(serve_companion_frontend(&app_handle, req.uri()).await)
         }
@@ -820,7 +848,10 @@ async fn proxy_companion_frontend_dev(
     uri: &hyper::Uri,
 ) -> Response<CompanionBody> {
     let Some(base_url) = app_handle.config().build.dev_url.clone() else {
-        return text_response(StatusCode::BAD_GATEWAY, "Companion dev frontend is not configured");
+        return text_response(
+            StatusCode::BAD_GATEWAY,
+            "Companion dev frontend is not configured",
+        );
     };
 
     let mut target_url = match base_url.join(uri.path().trim_start_matches('/')) {
@@ -844,7 +875,8 @@ async fn proxy_companion_frontend_dev(
         }
     };
 
-    let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -898,10 +930,7 @@ async fn proxy_companion_frontend_dev(
     )
 }
 
-fn serve_companion_frontend_asset(
-    app_handle: &AppHandle,
-    path: &str,
-) -> Response<CompanionBody> {
+fn serve_companion_frontend_asset(app_handle: &AppHandle, path: &str) -> Response<CompanionBody> {
     let asset_key = if path == "/" || path.is_empty() {
         "companion.html".to_string()
     } else {
@@ -912,8 +941,7 @@ fn serve_companion_frontend_asset(
         Some(asset) => {
             let mime_type = asset.mime_type().to_string();
             let csp_header = asset.csp_header().map(str::to_string);
-            let mut response =
-                bytes_response(StatusCode::OK, Bytes::from(asset.bytes), &mime_type);
+            let mut response = bytes_response(StatusCode::OK, Bytes::from(asset.bytes), &mime_type);
             if path == "/companion.html" || path == "/" || path.is_empty() {
                 let _ = response
                     .headers_mut()
@@ -1124,11 +1152,7 @@ fn full_body(body: String) -> CompanionBody {
 }
 
 fn bytes_response(status: StatusCode, body: Bytes, content_type: &str) -> Response<CompanionBody> {
-    let mut response = Response::new(
-        Full::new(body)
-            .map_err(|never| match never {})
-            .boxed(),
-    );
+    let mut response = Response::new(Full::new(body).map_err(|never| match never {}).boxed());
     *response.status_mut() = status;
     let _ = response
         .headers_mut()

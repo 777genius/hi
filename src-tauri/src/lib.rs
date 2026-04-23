@@ -377,13 +377,8 @@ pub fn run() {
                             *state.is_authenticated.write().await = store.is_authenticated();
 
                             // Держим STT token синхронизированным с access token из сессии
-                            let mut stt = crate::infrastructure::ConfigStore::load_config()
-                                .await
-                                .unwrap_or_default();
-                            stt.backend_auth_token = store.session.as_ref().map(|s| s.access_token.clone());
-                            let _ = crate::infrastructure::ConfigStore::save_config(&stt).await;
-                            let _ = state.transcription_service.update_config(stt.clone()).await;
-                            let _ = state.microphone_transcription_service.update_config(stt).await;
+                            let stt_token = store.session.as_ref().map(|s| s.access_token.clone());
+                            state.apply_backend_auth_token_to_stt(stt_token).await;
 
                             // Запускаем фоновый refresh (если возможен).
                             state.restart_auth_refresh_task(app_handle.clone()).await;

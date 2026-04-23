@@ -245,29 +245,38 @@ export function useSettings() {
       // только что отпустил слайдер и сразу нажал "Сохранить").
       await nextTick();
 
+      const normalizeKeyterms = (v: string | null | undefined): string | null => {
+        const s = String(v ?? '').trim();
+        return s ? s : null;
+      };
+
       // Сохраняем STT конфиг
-      const sttConfigData: SttConfigData = {
+      const expectedKeyterms = normalizeKeyterms(store.deepgramKeyterms);
+      const sttConfigData: Partial<SttConfigData> & Pick<SttConfigData, 'provider' | 'language'> = {
         // Выбор провайдера выключен: всегда Backend
         provider: SttProviderType.Backend,
         language: store.language,
         deepgramApiKey: null,
         assemblyaiApiKey: null,
         model: null,
-        deepgramKeyterms: store.deepgramKeyterms || null,
+        deepgramKeyterms: expectedKeyterms,
       };
 
       await tauriSettingsService.updateSttConfig(sttConfigData);
 
-      // Проверяем, что язык реально применился в Rust SoT.
-      // Иначе UI может переключиться (syncLocale), но запись останется на старом языке.
+      // Проверяем, что STT настройки реально применились в Rust SoT.
       try {
         const stt1 = await tauriSettingsService.getSttConfig();
-        if (stt1.language !== store.language) {
+        const isApplied = (stt: Awaited<ReturnType<typeof tauriSettingsService.getSttConfig>>) =>
+          stt.language === store.language &&
+          normalizeKeyterms(stt.deepgram_keyterms) === expectedKeyterms;
+
+        if (!isApplied(stt1)) {
           await tauriSettingsService.updateSttConfig(sttConfigData);
           const stt2 = await tauriSettingsService.getSttConfig();
-          if (stt2.language !== store.language) {
+          if (!isApplied(stt2)) {
             throw new Error(
-              `Язык распознавания не сохранился: ожидали ${store.language}, получили ${stt2.language}`,
+              `STT настройки не сохранились: ожидали language=${store.language}, deepgram_keyterms=${expectedKeyterms ?? 'null'}, получили language=${stt2.language}, deepgram_keyterms=${normalizeKeyterms(stt2.deepgram_keyterms) ?? 'null'}`,
             );
           }
         }

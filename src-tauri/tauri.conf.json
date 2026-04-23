@@ -14,7 +14,7 @@
         "windows": [{
                 "label": "main",
                 "title": "Voice to Text",
-                "width": 960,
+                "width": 320,
                 "height": 720,
                 "minWidth": 250,
                 "minHeight": 480,

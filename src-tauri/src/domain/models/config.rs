@@ -163,6 +163,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub selected_output_audio_device: Option<String>,
 
+    /// Stable token for companion phone link.
+    /// Keeps `/c/<token>` persistent across restarts and re-enabling companion mode.
+    #[serde(default)]
+    pub companion_access_token: Option<String>,
+
     /// Keep history of transcriptions
     pub keep_history: bool,
 
@@ -182,6 +187,7 @@ impl Default for AppConfig {
             microphone_sensitivity: 95, // Очень высокая чувствительность по умолчанию (порог ~1638)
             selected_audio_device: None, // По умолчанию используем системное устройство
             selected_output_audio_device: None,
+            companion_access_token: None,
             keep_history: true,
             max_history_items: 20,
         }

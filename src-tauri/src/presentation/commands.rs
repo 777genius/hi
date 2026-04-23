@@ -1285,7 +1285,10 @@ pub async fn update_stt_config(
     deepgram_api_key: Option<String>,
     assemblyai_api_key: Option<String>,
     model: Option<String>,
-    deepgram_keyterms: Option<String>,
+    // Важно: двойной Option позволяет отличить "поле не прислали" (None)
+    // от "поле прислали как null" (Some(None)). Это нужно, чтобы
+    // частичные обновления (например, только language) не затирали keyterms.
+    deepgram_keyterms: Option<Option<String>>,
 ) -> Result<(), String> {
     log::info!(
         "Command: update_stt_config - provider: {}, language: {}, model: {:?}",
@@ -1294,18 +1297,17 @@ pub async fn update_stt_config(
         model
     );
 
+    let _guard = state.stt_config_guard.lock().await;
+
     // Выбор провайдера отключён — всегда используем Backend.
     // Параметр provider оставлен, чтобы не ломать совместимость API.
     let _ = provider;
     let provider_type = SttProviderType::Backend;
 
-    // Запоминаем текущие значения для проверки изменений
-    let (old_language, old_keyterms) = {
+    // Снимаем текущее состояние для сравнения после сохранения
+    let old_stt = {
         let config = state.config.read().await;
-        (
-            config.stt.language.clone(),
-            config.stt.deepgram_keyterms.clone(),
-        )
+        config.stt.clone()
     };
 
     // Загружаем существующую конфигурацию из файла (если есть)
@@ -1339,8 +1341,13 @@ pub async fn update_stt_config(
     config.deepgram_api_key = None;
     config.assemblyai_api_key = None;
 
-    // Keyterms для улучшения распознавания
-    config.deepgram_keyterms = deepgram_keyterms;
+    // Keyterms для улучшения распознавания Deepgram
+    // - None: не меняем существующее значение
+    // - Some(None): очищаем
+    // - Some(Some(v)): устанавливаем v
+    if let Some(next) = deepgram_keyterms {
+        config.deepgram_keyterms = next;
+    }
 
     // Обновляем конфигурацию в сервисе
     state
@@ -1370,10 +1377,12 @@ pub async fn update_stt_config(
         .await
         .map_err(|e| format!("Failed to save config: {}", e))?;
 
-    // Синхронизация между окнами — только при реальных изменениях
-    let language_changed = config.language != old_language;
-    let keyterms_changed = config.deepgram_keyterms != old_keyterms;
-    if language_changed || keyterms_changed {
+    // Синхронизация между окнами — бампим ревизию при любых изменениях STT конфига,
+    // чтобы state-sync корректно подтягивал актуальный snapshot (включая keyterms и т.д.)
+    let stt_changed = config.language != old_stt.language
+        || config.deepgram_keyterms != old_stt.deepgram_keyterms
+        || config.provider != old_stt.provider;
+    if stt_changed {
         let revision = AppState::bump_revision(&state.stt_config_revision).await;
         let _ = app_handle.emit(
             EVENT_STATE_SYNC_INVALIDATION,
@@ -3952,24 +3961,7 @@ pub async fn set_auth_session(
 
     // 3) Обновляем токен для STT (чтобы hotkey start_recording всегда имел актуальный access)
     let stt_token = next.session.as_ref().map(|s| s.access_token.clone());
-    let mut stt = ConfigStore::load_config().await.unwrap_or_default();
-    stt.backend_auth_token = stt_token;
-    if let Err(e) = ConfigStore::save_config(&stt).await {
-        log::warn!("Failed to persist STT config token: {}", e);
-    }
-    if let Err(e) = state.transcription_service.update_config(stt.clone()).await {
-        log::warn!("Failed to update transcription service config token: {}", e);
-    }
-    if let Err(e) = state
-        .microphone_transcription_service
-        .update_config(stt)
-        .await
-    {
-        log::warn!(
-            "Failed to update microphone transcription config token: {}",
-            e
-        );
-    }
+    state.apply_backend_auth_token_to_stt(stt_token).await;
 
     // 4) Bump revisions + invalidations
     // auth-state только если поменялся флаг
@@ -4028,18 +4020,13 @@ pub async fn set_authenticated(
         // Токен мог обновиться — проверяем и обновляем тихо (без bump revision)
         if authenticated {
             if let Some(ref t) = token {
-                let mut config = ConfigStore::load_config().await.unwrap_or_default();
-                if config.backend_auth_token.as_deref() != Some(t.as_str()) {
-                    config.backend_auth_token = Some(t.clone());
-                    let _ = ConfigStore::save_config(&config).await;
-                    let _ = state
-                        .transcription_service
-                        .update_config(config.clone())
-                        .await;
-                    let _ = state
-                        .microphone_transcription_service
-                        .update_config(config)
-                        .await;
+                let current_token = state
+                    .transcription_service
+                    .get_config()
+                    .await
+                    .backend_auth_token;
+                if current_token.as_deref() != Some(t.as_str()) {
+                    state.apply_backend_auth_token_to_stt(Some(t.clone())).await;
                 }
             }
         }
@@ -4048,34 +4035,21 @@ pub async fn set_authenticated(
 
     *state.is_authenticated.write().await = authenticated;
 
-    // Сохраняем или очищаем backend auth token в конфиге
-    let mut config = ConfigStore::load_config().await.unwrap_or_default();
+    // Обновляем только токен в текущем in-memory STT конфиге, чтобы не перетирать keyterms
+    // и другие поля конкурентным чтением старой disk-версии.
     if authenticated {
         if let Some(ref t) = token {
             log::info!("set_authenticated: received token with len: {}", t.len());
-            config.backend_auth_token = Some(t.clone());
+            state.apply_backend_auth_token_to_stt(Some(t.clone())).await;
             log::info!("Backend auth token saved to config");
         } else {
             log::warn!("set_authenticated: authenticated=true but token is None!");
+            state.apply_backend_auth_token_to_stt(None).await;
         }
     } else {
-        // При логауте очищаем токен
-        config.backend_auth_token = None;
+        state.apply_backend_auth_token_to_stt(None).await;
         log::info!("Backend auth token cleared from config");
     }
-
-    // Сохраняем конфиг и обновляем сервис
-    ConfigStore::save_config(&config)
-        .await
-        .map_err(|e| format!("Failed to save config: {}", e))?;
-    let _ = state
-        .transcription_service
-        .update_config(config.clone())
-        .await;
-    let _ = state
-        .microphone_transcription_service
-        .update_config(config)
-        .await;
 
     // Синхронизация между окнами через state-sync
     let revision = AppState::bump_revision(&state.auth_state_revision).await;
