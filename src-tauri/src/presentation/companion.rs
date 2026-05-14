@@ -1,5 +1,7 @@
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+#[cfg(any(unix, target_os = "windows"))]
+use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,7 +18,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpListener;
 use tokio::sync::{watch, RwLock};
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 use crate::domain::RecordingStatus;
 use crate::presentation::events::{
@@ -24,7 +26,9 @@ use crate::presentation::events::{
 };
 use crate::presentation::AppState;
 
-const COMPANION_PORT_CANDIDATES: [u16; 3] = [43821, 43822, 43823];
+const COMPANION_PORT: u16 = 43821;
+const COMPANION_FALLBACK_PORT_CANDIDATES: [u16; 2] = [43822, 43823];
+const COMPANION_PORT_RECLAIM_GRACE_MS: u64 = 350;
 const COMPANION_SSE_RETRY_MS: u64 = 1500;
 const COMPANION_SSE_HEARTBEAT_SECS: u64 = 15;
 const COMPANION_TOPIC: &str = "companion-ui";
@@ -387,14 +391,15 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
     let runtime = state.companion_runtime.read().await.clone();
     let companion_mode_enabled = *runtime.enabled.read().await;
 
-    let microphone_payload = crate::presentation::commands::get_microphone_mute_state()
-        .await
-        .unwrap_or(MicrophoneMuteStatePayload {
-            muted: false,
-            supported: false,
-            source: "unknown".to_string(),
-            detail: None,
-        });
+    let microphone_payload =
+        crate::presentation::commands::get_effective_microphone_mute_state(state)
+            .await
+            .unwrap_or(MicrophoneMuteStatePayload {
+                muted: false,
+                supported: false,
+                source: "unknown".to_string(),
+                detail: None,
+            });
 
     let recording_status = state.transcription_service.get_status().await;
     let active_session_id = state
@@ -1109,16 +1114,206 @@ async fn emit_invalidation(app_handle: &AppHandle, revision: String) {
 }
 
 async fn bind_listener() -> std::io::Result<TcpListener> {
-    for port in COMPANION_PORT_CANDIDATES {
-        match TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await {
-            Ok(listener) => return Ok(listener),
+    match bind_companion_port(COMPANION_PORT).await {
+        Ok(listener) => return Ok(listener),
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+            log::warn!(
+                "Companion fixed port 0.0.0.0:{} is busy; attempting to reclaim it",
+                COMPANION_PORT
+            );
+            match reclaim_companion_port(COMPANION_PORT).await {
+                Ok(pids) if pids.is_empty() => {
+                    log::warn!(
+                        "Companion fixed port {} is busy, but no listener PID was found",
+                        COMPANION_PORT
+                    );
+                }
+                Ok(pids) => {
+                    log::warn!(
+                        "Companion attempted to terminate listener PID(s) {:?} on port {}",
+                        pids,
+                        COMPANION_PORT
+                    );
+                }
+                Err(reclaim_err) => {
+                    log::warn!(
+                        "Companion failed to reclaim fixed port {}: {}",
+                        COMPANION_PORT,
+                        reclaim_err
+                    );
+                }
+            }
+
+            match bind_companion_port(COMPANION_PORT).await {
+                Ok(listener) => return Ok(listener),
+                Err(retry_err) => {
+                    log::warn!(
+                        "Companion fixed port 0.0.0.0:{} is still unavailable after reclaim: {}",
+                        COMPANION_PORT,
+                        retry_err
+                    );
+                }
+            }
+        }
+        Err(err) => {
+            log::warn!(
+                "Companion failed to bind fixed port 0.0.0.0:{}: {}",
+                COMPANION_PORT,
+                err
+            );
+        }
+    }
+
+    for port in COMPANION_FALLBACK_PORT_CANDIDATES {
+        match bind_companion_port(port).await {
+            Ok(listener) => {
+                log::warn!(
+                    "Companion falling back to port {} because fixed port {} is unavailable",
+                    port,
+                    COMPANION_PORT
+                );
+                return Ok(listener);
+            }
             Err(err) => {
-                log::warn!("Companion server failed to bind 0.0.0.0:{}: {}", port, err);
+                log::warn!("Companion failed to bind fallback port {}: {}", port, err);
             }
         }
     }
 
-    TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .map_err(|err| {
+            log::error!("Companion failed to bind any available port: {}", err);
+            err
+        })?;
+    if let Ok(addr) = listener.local_addr() {
+        log::warn!(
+            "Companion falling back to random port {} because fixed port {} is unavailable",
+            addr.port(),
+            COMPANION_PORT
+        );
+    }
+    Ok(listener)
+}
+
+async fn bind_companion_port(port: u16) -> std::io::Result<TcpListener> {
+    TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await
+}
+
+async fn reclaim_companion_port(port: u16) -> Result<Vec<u32>, String> {
+    let pids = find_port_listener_pids(port)?;
+    if pids.is_empty() {
+        return Ok(pids);
+    }
+
+    terminate_port_listener_pids(&pids, false)?;
+    sleep(Duration::from_millis(COMPANION_PORT_RECLAIM_GRACE_MS)).await;
+
+    let remaining = find_port_listener_pids(port)?;
+    if !remaining.is_empty() {
+        terminate_port_listener_pids(&remaining, true)?;
+        sleep(Duration::from_millis(COMPANION_PORT_RECLAIM_GRACE_MS)).await;
+    }
+
+    Ok(pids)
+}
+
+#[cfg(unix)]
+fn find_port_listener_pids(port: u16) -> Result<Vec<u32>, String> {
+    let selector = format!("-iTCP:{}", port);
+    let output = Command::new("lsof")
+        .args(["-nP", "-t", selector.as_str(), "-sTCP:LISTEN"])
+        .output()
+        .map_err(|err| format!("failed to run lsof: {}", err))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pids = parse_process_ids(&stdout);
+
+    if output.status.success() || output.status.code() == Some(1) || !pids.is_empty() {
+        return Ok(pids);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!("lsof failed: {}", stderr.trim()))
+}
+
+#[cfg(target_os = "windows")]
+fn find_port_listener_pids(port: u16) -> Result<Vec<u32>, String> {
+    let script = format!(
+        "Get-NetTCPConnection -LocalPort {} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique",
+        port
+    );
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script.as_str(),
+        ])
+        .output()
+        .map_err(|err| format!("failed to run powershell: {}", err))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pids = parse_process_ids(&stdout);
+
+    if output.status.success() {
+        return Ok(pids);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!("powershell port lookup failed: {}", stderr.trim()))
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn find_port_listener_pids(_port: u16) -> Result<Vec<u32>, String> {
+    Err("port listener PID lookup is not supported on this platform".to_string())
+}
+
+#[cfg(unix)]
+fn terminate_port_listener_pids(pids: &[u32], force: bool) -> Result<(), String> {
+    let signal = if force { "-KILL" } else { "-TERM" };
+    for pid in pids {
+        let status = Command::new("kill")
+            .arg(signal)
+            .arg(pid.to_string())
+            .status()
+            .map_err(|err| format!("failed to run kill for PID {}: {}", pid, err))?;
+        if !status.success() {
+            log::warn!("kill {} {} exited with status {}", signal, pid, status);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_port_listener_pids(pids: &[u32], _force: bool) -> Result<(), String> {
+    for pid in pids {
+        let status = Command::new("taskkill")
+            .arg("/PID")
+            .arg(pid.to_string())
+            .arg("/T")
+            .arg("/F")
+            .status()
+            .map_err(|err| format!("failed to run taskkill for PID {}: {}", pid, err))?;
+        if !status.success() {
+            log::warn!("taskkill /PID {} /T /F exited with status {}", pid, status);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn terminate_port_listener_pids(_pids: &[u32], _force: bool) -> Result<(), String> {
+    Err("port listener termination is not supported on this platform".to_string())
+}
+
+fn parse_process_ids(output: &str) -> Vec<u32> {
+    let mut pids = output
+        .split_whitespace()
+        .filter_map(|value| value.parse::<u32>().ok())
+        .collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
 }
 
 fn sse_snapshot_bytes(snapshot: &CompanionSnapshotEnvelope) -> Bytes {
@@ -1235,6 +1430,15 @@ fn empty_body() -> CompanionBody {
 }
 
 fn detect_primary_ipv4() -> Option<Ipv4Addr> {
+    #[cfg(target_os = "windows")]
+    if let Some(ip) = detect_windows_lan_ipv4() {
+        return Some(ip);
+    }
+
+    detect_routed_ipv4()
+}
+
+fn detect_routed_ipv4() -> Option<Ipv4Addr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
     socket.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
 
@@ -1242,4 +1446,140 @@ fn detect_primary_ipv4() -> Option<Ipv4Addr> {
         IpAddr::V4(ip) => Some(ip),
         IpAddr::V6(_) => None,
     }
+}
+
+#[cfg(target_os = "windows")]
+fn detect_windows_lan_ipv4() -> Option<Ipv4Addr> {
+    let script = r#"
+$ErrorActionPreference='SilentlyContinue'
+Get-NetIPConfiguration | Where-Object { $_.IPv4Address } | ForEach-Object {
+  $ip = ($_.IPv4Address | Where-Object {
+    $_.IPAddress -and $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notlike '169.254.*'
+  } | Select-Object -First 1 -ExpandProperty IPAddress)
+  $gateway = ($_.IPv4DefaultGateway | Select-Object -First 1 -ExpandProperty NextHop)
+  if ($ip) {
+    '{0}|{1}|{2}|{3}' -f $_.InterfaceAlias, $_.InterfaceDescription, $ip, $gateway
+  }
+}
+"#;
+
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut best: Option<(i32, Ipv4Addr, String)> = None;
+
+    for line in stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+
+        let alias = parts[0].trim();
+        let description = parts[1].trim();
+        let Ok(ip) = parts[2].trim().parse::<Ipv4Addr>() else {
+            continue;
+        };
+        let gateway = parts[3].trim();
+
+        if !is_usable_companion_ipv4(ip) {
+            continue;
+        }
+
+        let label = format!("{} {}", alias, description).to_lowercase();
+        if is_virtual_or_vpn_adapter(&label) {
+            continue;
+        }
+
+        let mut score = 0;
+        if !gateway.is_empty() {
+            score += 100;
+        }
+        if label.contains("wi-fi")
+            || label.contains("wifi")
+            || label.contains("wireless")
+            || label.contains("wlan")
+            || label.contains("беспровод")
+        {
+            score += 50;
+        }
+        if label.contains("ethernet")
+            || label.contains("gigabit")
+            || label.contains("controller")
+            || label.contains("killer")
+        {
+            score += 30;
+        }
+        if ip.octets()[0] == 192 && ip.octets()[1] == 168 {
+            score += 20;
+        } else if ip.octets()[0] == 172 && (16..=31).contains(&ip.octets()[1]) {
+            score += 15;
+        } else if ip.octets()[0] == 10 {
+            score += 10;
+        }
+
+        let candidate_label = format!("{} ({})", ip, alias);
+        if best
+            .as_ref()
+            .map_or(true, |(best_score, _, _)| score > *best_score)
+        {
+            best = Some((score, ip, candidate_label));
+        }
+    }
+
+    if let Some((_, ip, label)) = best {
+        log::info!("Companion selected LAN IPv4 for phone QR: {}", label);
+        Some(ip)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_virtual_or_vpn_adapter(label: &str) -> bool {
+    [
+        "vpn",
+        "wireguard",
+        "wintun",
+        "tap",
+        "tun ",
+        "tailscale",
+        "zerotier",
+        "hamachi",
+        "vmware",
+        "virtualbox",
+        "host-only",
+        "virtual",
+        "hyper-v",
+        "wsl",
+        "docker",
+        "loopback",
+        "bluetooth",
+        "npcap",
+        "container",
+        "vethernet",
+    ]
+    .iter()
+    .any(|needle| label.contains(needle))
+}
+
+#[cfg(target_os = "windows")]
+fn is_usable_companion_ipv4(ip: Ipv4Addr) -> bool {
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast())
 }

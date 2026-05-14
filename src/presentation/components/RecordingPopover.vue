@@ -252,9 +252,9 @@ const companionLanUrl = computed(() => companionServerStatus.value?.localNetwork
 const companionLoopbackUrl = computed(() => companionServerStatus.value?.localUrl || '');
 const companionReady = computed(() => companionPrimaryUrl.value.length > 0);
 const companionStatusLine = computed(() => {
-  if (companionServerBusy.value) return 'Поднимаю companion на Mac';
+  if (companionServerBusy.value) return 'Поднимаю companion на компьютере';
   if (companionLanUrl.value) return 'Готово - открой QR с телефона в той же Wi-Fi сети';
-  if (companionLoopbackUrl.value) return 'Companion активен локально на этом Mac';
+  if (companionLoopbackUrl.value) return 'Companion активен локально на этом компьютере';
   if (companionServerStatus.value?.enabled) return 'Companion включён, но адрес ещё определяется';
   return 'Companion пока не включён';
 });
@@ -698,11 +698,11 @@ watch(
     try {
       companionQrDataUrl.value = await toQrDataUrl(url, {
         errorCorrectionLevel: 'M',
-        margin: 1,
+        margin: 2,
         width: 220,
         color: {
-          dark: '#0f172a',
-          light: '#0000',
+          dark: '#000000',
+          light: '#ffffff',
         },
       });
     } catch (err) {
@@ -873,7 +873,7 @@ async function sendAsk(): Promise<void> {
             break;
           case 'rejected_auth':
             askSendStatusTone.value = 'error';
-            askSendStatusText.value = 'Нужно заново авторизоваться на Mac.';
+            askSendStatusText.value = 'Нужно заново авторизоваться на компьютере.';
             break;
           default:
             askSendStatusTone.value = 'error';
@@ -1580,7 +1580,7 @@ const onChatMouseDown = (e: MouseEvent) => {
               <v-divider />
               <v-card-text class="companion-menu-content">
                 <div class="companion-menu-note">
-                  На Mac окно можно свернуть. Телефон будет работать через локальный companion server.
+                  На компьютере окно можно свернуть. Телефон будет работать через локальный companion server.
                 </div>
 
                 <div v-if="companionQrDataUrl" class="companion-qr-shell">
@@ -2955,8 +2955,8 @@ const onChatMouseDown = (e: MouseEvent) => {
   justify-content: center;
   border-radius: 16px;
   padding: 12px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
 }
 
 .companion-qr-image {

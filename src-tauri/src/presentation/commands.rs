@@ -22,6 +22,7 @@ pub struct AudioPermissionStatus {
 }
 
 const DEFAULT_MICROPHONE_MUTE_HOTKEY: &str = "Alt+Z";
+const APP_MICROPHONE_MUTE_SOURCE: &str = "app-microphone-toggle";
 
 #[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -96,6 +97,42 @@ fn to_microphone_mute_state_payload(
     }
 }
 
+fn app_microphone_mute_status(
+    state: &AppState,
+) -> crate::infrastructure::microphone_mute::MicrophoneMuteStatus {
+    let enabled = state
+        .microphone_transcription_enabled
+        .load(Ordering::Relaxed);
+
+    crate::infrastructure::microphone_mute::MicrophoneMuteStatus {
+        muted: !enabled,
+        supported: true,
+        source: APP_MICROPHONE_MUTE_SOURCE.to_string(),
+    }
+}
+
+fn effective_microphone_mute_status(
+    state: &AppState,
+    os_status: crate::infrastructure::microphone_mute::MicrophoneMuteStatus,
+) -> crate::infrastructure::microphone_mute::MicrophoneMuteStatus {
+    if os_status.supported {
+        os_status
+    } else {
+        app_microphone_mute_status(state)
+    }
+}
+
+pub async fn get_effective_microphone_mute_state(
+    state: &AppState,
+) -> Result<MicrophoneMuteStatePayload, String> {
+    let os_status = crate::infrastructure::microphone_mute::get_microphone_mute_status()
+        .map_err(|e| format!("Не удалось получить статус микрофона: {}", e))?;
+    Ok(to_microphone_mute_state_payload(
+        effective_microphone_mute_status(state, os_status),
+        None,
+    ))
+}
+
 async fn emit_microphone_mute_state(app_handle: &AppHandle, payload: &MicrophoneMuteStatePayload) {
     let _ = app_handle.emit(EVENT_MICROPHONE_MUTE_STATE, payload.clone());
 }
@@ -148,13 +185,21 @@ pub async fn set_microphone_muted_raw(
     app_handle: AppHandle,
     muted: bool,
 ) -> Result<MicrophoneMuteStatePayload, String> {
-    let current = crate::infrastructure::microphone_mute::get_microphone_mute_status()
+    let os_current = crate::infrastructure::microphone_mute::get_microphone_mute_status()
         .map_err(|e| format!("Не удалось получить статус микрофона: {}", e))?;
+    let current = effective_microphone_mute_status(state, os_current.clone());
     if current.muted == muted {
         let payload = to_microphone_mute_state_payload(current, None);
         emit_microphone_mute_state(&app_handle, &payload).await;
         sync_microphone_transcription_enabled_internal(state, app_handle.clone(), !payload.muted)
             .await?;
+        return Ok(payload);
+    }
+
+    if !os_current.supported {
+        sync_microphone_transcription_enabled_internal(state, app_handle.clone(), !muted).await?;
+        let payload = to_microphone_mute_state_payload(app_microphone_mute_status(state), None);
+        emit_microphone_mute_state(&app_handle, &payload).await;
         return Ok(payload);
     }
 
@@ -219,16 +264,15 @@ pub async fn toggle_microphone_muted_internal(
     state: &AppState,
     app_handle: AppHandle,
 ) -> Result<MicrophoneMuteStatePayload, String> {
-    let current = crate::infrastructure::microphone_mute::get_microphone_mute_status()
-        .map_err(|e| format!("Не удалось получить статус микрофона: {}", e))?;
+    let current = get_effective_microphone_mute_state(state).await?;
     set_microphone_muted_raw(state, app_handle, !current.muted).await
 }
 
 #[tauri::command]
-pub async fn get_microphone_mute_state() -> Result<MicrophoneMuteStatePayload, String> {
-    let status = crate::infrastructure::microphone_mute::get_microphone_mute_status()
-        .map_err(|e| format!("Не удалось получить статус микрофона: {}", e))?;
-    Ok(to_microphone_mute_state_payload(status, None))
+pub async fn get_microphone_mute_state(
+    state: State<'_, AppState>,
+) -> Result<MicrophoneMuteStatePayload, String> {
+    get_effective_microphone_mute_state(state.inner()).await
 }
 
 #[tauri::command]
@@ -246,7 +290,7 @@ pub async fn set_microphone_muted(
     match response.action_result.as_str() {
         "busy_transition" => Err("Transition in progress".to_string()),
         "rejected_auth" => Err("Authentication required".to_string()),
-        _ => get_microphone_mute_state().await,
+        _ => get_effective_microphone_mute_state(state.inner()).await,
     }
 }
 
@@ -255,7 +299,7 @@ pub async fn toggle_microphone_muted(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<MicrophoneMuteStatePayload, String> {
-    let current = get_microphone_mute_state().await?;
+    let current = get_effective_microphone_mute_state(state.inner()).await?;
     let response = crate::presentation::companion_actions::ensure_microphone_muted(
         state.inner(),
         &app_handle,
@@ -265,7 +309,7 @@ pub async fn toggle_microphone_muted(
     match response.action_result.as_str() {
         "busy_transition" => Err("Transition in progress".to_string()),
         "rejected_auth" => Err("Authentication required".to_string()),
-        _ => get_microphone_mute_state().await,
+        _ => get_effective_microphone_mute_state(state.inner()).await,
     }
 }
 

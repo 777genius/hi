@@ -35,28 +35,33 @@ describe('normalizeCompanionRequestError', () => {
       hidden: false,
     });
 
-    expect(error.message).toContain('Не удалось подключиться к Mac');
+    expect(error.message).toContain('Не удалось подключиться к компьютеру');
   });
 });
 
 describe('companion failure classification', () => {
   it('marks temporary network failures as recoverable warnings', () => {
-    const kind = classifyCompanionFailureMessage('Mac не ответил вовремя');
+    const kind = classifyCompanionFailureMessage('Компьютер не ответил вовремя');
 
     expect(kind).toBe('timeout');
     expect(toneForCompanionFailure(kind)).toBe('warn');
     expect(shouldRecoverCompanionConnection(kind)).toBe(true);
-    expect(connectionTextForCompanionFailure(kind, 'Пытаюсь восстановить связь с Mac...'))
-      .toBe('Пытаюсь восстановить связь с Mac...');
+    expect(connectionTextForCompanionFailure(kind, 'Пытаюсь восстановить связь с компьютером...'))
+      .toBe('Пытаюсь восстановить связь с компьютером...');
+  });
+
+  it('keeps classifying legacy Mac wording during transition', () => {
+    expect(classifyCompanionFailureMessage('Mac не ответил вовремя')).toBe('timeout');
+    expect(classifyCompanionFailureMessage('Не удалось подключиться к Mac')).toBe('network');
   });
 
   it('marks expired token as non-recoverable disconnect', () => {
-    const kind = classifyCompanionFailureMessage('Ссылка устарела или companion перезапустился. Открой QR из окна на Mac заново.');
+    const kind = classifyCompanionFailureMessage('Ссылка устарела или companion перезапустился. Открой QR из окна приложения заново.');
 
     expect(kind).toBe('expired');
     expect(toneForCompanionFailure(kind)).toBe('error');
     expect(shouldRecoverCompanionConnection(kind)).toBe(false);
     expect(connectionTextForCompanionFailure(kind, 'fallback'))
-      .toBe('Ссылка устарела. Открой QR из окна на Mac заново.');
+      .toBe('Ссылка устарела. Открой QR из окна приложения заново.');
   });
 });

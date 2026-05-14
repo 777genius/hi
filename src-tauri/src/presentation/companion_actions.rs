@@ -147,7 +147,7 @@ pub async fn ensure_microphone_muted(
         return rejected_auth(app_handle).await;
     }
 
-    let current = commands::get_microphone_mute_state().await?;
+    let current = commands::get_effective_microphone_mute_state(state).await?;
     if current.muted == muted {
         return noop(app_handle, "noop").await;
     }
