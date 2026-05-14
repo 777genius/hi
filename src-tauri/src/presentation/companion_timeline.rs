@@ -980,17 +980,12 @@ pub async fn on_microphone_partial(state: &AppState, payload: &PartialTranscript
         return;
     }
 
-    let accumulated = state
-        .companion_microphone_accumulated_text
-        .read()
-        .await
-        .clone();
-    if !accumulated.trim().is_empty() {
-        append_microphone_message(state, payload.session_id, &accumulated, payload.timestamp).await;
+    let previous_partial = state.companion_microphone_partial_text.read().await.clone();
+    if !previous_partial.trim().is_empty() {
+        let mut accumulated = state.companion_microphone_accumulated_text.write().await;
+        *accumulated = merge_transcript_text(accumulated.trim(), &previous_partial);
     }
 
-    *state.companion_microphone_accumulated_text.write().await = String::new();
-    *state.companion_microphone_last_finalized_text.write().await = String::new();
     *state
         .companion_microphone_current_utterance_start
         .write()

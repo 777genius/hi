@@ -541,6 +541,67 @@ describe('chat store (selection + context)', () => {
     expect(micFinal?.text).toBe('my number is two two two two three');
   });
 
+  it('does not finalize microphone text before speech_final when Deepgram segment start changes', async () => {
+    const store = useChatStore();
+    await store.initialize();
+
+    const micLevelCb = listenMock.mock.calls.find((c) => c[0] === 'microphone:level')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const sysLevelCb = listenMock.mock.calls.find((c) => c[0] === 'audio:level')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const partialCb = listenMock.mock.calls.find((c) => c[0] === 'transcription:partial')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const finalCb = listenMock.mock.calls.find((c) => c[0] === 'transcription:final')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+
+    sysLevelCb?.({ payload: { level: 0 } });
+    micLevelCb?.({ payload: { level: 0.6 } });
+
+    partialCb?.({
+      payload: {
+        session_id: 1,
+        source: 'microphone',
+        text: 'my number is two two',
+        timestamp: Date.now(),
+        is_segment_final: true,
+        start: 0,
+        duration: 3.26,
+      },
+    });
+    partialCb?.({
+      payload: {
+        session_id: 1,
+        source: 'microphone',
+        text: 'two two three',
+        timestamp: Date.now() + 50,
+        is_segment_final: false,
+        start: 3.26,
+        duration: 1.74,
+      },
+    });
+
+    expect(store.messages.some((m) => m.kind === 'mic' && m.status === 'final')).toBe(false);
+    expect(store.messages.find((m) => m.id === 'mic:live')?.text).toBe('my number is two two three');
+
+    finalCb?.({
+      payload: {
+        session_id: 1,
+        source: 'microphone',
+        text: 'two two three',
+        timestamp: Date.now() + 100,
+        start: 3.26,
+        duration: 1.74,
+      },
+    });
+
+    const micFinal = store.messages.find((m) => m.kind === 'mic' && m.status === 'final');
+    expect(micFinal?.text).toBe('my number is two two two two three');
+  });
+
   it('does not duplicate microphone final when it repeats the last finalized range', async () => {
     const store = useChatStore();
     await store.initialize();

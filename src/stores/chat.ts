@@ -1159,21 +1159,15 @@ export const useChatStore = defineStore('chat', () => {
           return;
         }
 
-        // Utterance start changed without finalization — flush accumulated if any.
-        if (micAccumulatedText.value) {
-          micMessages.value.push({
-            id: `mic:${event.payload.session_id}:${micMessages.value.length}`,
-            kind: 'mic',
-            role: 'outgoing',
-            status: 'final',
-            text: micAccumulatedText.value,
-            createdAtMs: event.payload.timestamp,
-            seq: 1_000_000 + micMessages.value.length,
-          });
+        // Deepgram can move to the next segment start before speech_final.
+        // Keep it live until the real final/finalize event closes the utterance.
+        if (micPartialText.value) {
+          micAccumulatedText.value = mergeTranscriptText(
+            micAccumulatedText.value,
+            micPartialText.value
+          );
         }
 
-        micAccumulatedText.value = '';
-        micLastFinalizedText.value = '';
         micCurrentUtteranceStart.value = event.payload.start;
         micPartialText.value = event.payload.text;
       }
