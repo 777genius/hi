@@ -1309,6 +1309,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn system_live_text_does_not_duplicate_overlapping_interim_after_segment_final() {
+        let state = AppState::default();
+
+        on_system_partial(
+            &state,
+            &PartialTranscriptionPayload {
+                session_id: 1,
+                source: "system".to_string(),
+                text: "Ты слышишь, что я говорю?".to_string(),
+                timestamp: 100,
+                is_segment_final: true,
+                start: 0.0,
+                duration: 2.0,
+            },
+        )
+        .await;
+
+        on_system_partial(
+            &state,
+            &PartialTranscriptionPayload {
+                session_id: 1,
+                source: "system".to_string(),
+                text: "Ты слышишь, что".to_string(),
+                timestamp: 120,
+                is_segment_final: false,
+                start: 2.0,
+                duration: 0.7,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            visible_system_partial_text(&state).await.as_deref(),
+            Some("Ты слышишь, что я говорю?")
+        );
+    }
+
+    #[tokio::test]
     async fn system_partial_keeps_repeated_short_segment_finals_when_segment_changes() {
         let state = AppState::default();
 
