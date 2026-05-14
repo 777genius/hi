@@ -6,6 +6,7 @@ pub mod clipboard; // Кроссплатформенная работа с clipb
 pub mod config_store;
 pub mod embedded_keys; // API ключи встроенные в build
 pub mod factory;
+pub mod focus_copy_helper;
 pub mod hotkey; // Нормализация/миграция хоткеев
 pub mod llm;
 pub mod llm_factory;

@@ -33,6 +33,50 @@ pub fn check_accessibility_permission() -> bool {
     true
 }
 
+/// Запрашивает Accessibility через системный prompt, если macOS готов его показать.
+#[cfg(target_os = "macos")]
+pub fn prompt_accessibility_permission() -> bool {
+    use cocoa::base::{id, nil};
+    use objc::{class, msg_send, sel, sel_impl};
+    use std::ffi::{c_void, CString};
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+    }
+
+    unsafe {
+        let key = CString::new("AXTrustedCheckOptionPrompt")
+            .expect("static Accessibility prompt key must be valid CString");
+        let ns_key: id = msg_send![class!(NSString), stringWithUTF8String: key.as_ptr()];
+        if ns_key == nil {
+            log::warn!("Failed to create AXTrustedCheckOptionPrompt NSString");
+            return check_accessibility_permission();
+        }
+
+        let ns_prompt: id = msg_send![class!(NSNumber), numberWithBool: true];
+        let options: id = msg_send![
+            class!(NSDictionary),
+            dictionaryWithObject: ns_prompt
+            forKey: ns_key
+        ];
+
+        if options == nil {
+            log::warn!("Failed to create Accessibility prompt options dictionary");
+            return check_accessibility_permission();
+        }
+
+        let trusted = AXIsProcessTrustedWithOptions(options as *const c_void);
+        log::info!("Accessibility prompt requested; trusted={}", trusted);
+        trusted
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn prompt_accessibility_permission() -> bool {
+    true
+}
+
 /// Открывает системные настройки macOS в разделе Privacy & Security > Accessibility
 /// На других платформах ничего не делает
 #[cfg(target_os = "macos")]
@@ -61,6 +105,19 @@ pub fn open_accessibility_settings() -> Result<()> {
     // На Windows/Linux настройки Accessibility не существуют
     log::warn!("open_accessibility_settings called on non-macOS platform");
     Ok(())
+}
+
+/// Запрашивает Accessibility и открывает настройки, если разрешение ещё не выдано.
+#[cfg(target_os = "macos")]
+pub fn request_accessibility_permission() -> Result<bool> {
+    let trusted = prompt_accessibility_permission();
+    open_accessibility_settings()?;
+    Ok(trusted)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_accessibility_permission() -> Result<bool> {
+    Ok(true)
 }
 
 /// Получает bundle ID активного приложения (для macOS)

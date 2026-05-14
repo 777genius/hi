@@ -151,6 +151,9 @@ pub fn run() {
             commands::start_code_explain_stream,
             commands::check_accessibility_permission,
             commands::request_accessibility_permission,
+            commands::get_focus_copy_helper_info,
+            commands::check_focus_copy_helper_accessibility,
+            commands::reveal_focus_copy_helper,
             commands::auto_paste_text,
             commands::copy_to_clipboard_native,
             commands::show_auth_window,
@@ -206,6 +209,17 @@ pub fn run() {
 
                     // Пропускаем всю остальную инициализацию — демо не нуждается в tray, hotkeys и т.д.
                     return Ok(());
+                }
+            }
+
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            if !is_e2e {
+                if let Some(supervisor) =
+                    crate::infrastructure::focus_copy_helper::start_focus_copy_helper_supervisor(
+                        app.handle().clone(),
+                    )
+                {
+                    app.manage(supervisor);
                 }
             }
 

@@ -2,10 +2,11 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, useSlots, watch } from 'vue';
 import type { ConversationFeedMessage } from '../conversationFeed';
 import { renderMarkdownToSafeHtml } from '@/utils/markdown';
-import { highlightMessage, messageHasCode } from '@/utils/codeHighlight';
+import { highlightMessage, highlightRawCodeBlock, messageHasCode } from '@/utils/codeHighlight';
 import { toggleCodeBlockCollapseFromTarget } from '../feedCodeBlocks';
 
-type HighlightEntry = { sourceText: string; html: string };
+type HighlightEntry = { sourceText: string; html: string; expanded: boolean };
+type HighlightCandidate = { id: string; text: string; forceCode: boolean; expanded: boolean };
 const SCROLL_BOTTOM_THRESHOLD_PX = 72;
 
 const props = withDefaults(defineProps<{
@@ -40,6 +41,8 @@ const slots = useSlots();
 const scrollEl = ref<HTMLElement | null>(null);
 const highlightedById = reactive<Record<string, HighlightEntry>>({});
 const showScrollToBottom = ref(false);
+const expandedMessageIds = reactive(new Set<string>());
+const collapsedMessageIds = reactive(new Set<string>());
 let scrollStateFrame: number | null = null;
 
 defineExpose({
@@ -49,10 +52,28 @@ defineExpose({
 
 const hasActionsSlot = computed(() => !!slots.actions);
 
+const latestAssistantMessageId = computed(() => {
+  for (let index = props.messages.length - 1; index >= 0; index -= 1) {
+    const message = props.messages[index];
+    if (message.kind === 'haiku' && !message.deleted) {
+      return message.id;
+    }
+  }
+  return null;
+});
+
 const highlightCandidates = computed(() => {
   return props.messages
-    .filter((message) => message.kind !== 'haiku' && !!message.text && messageHasCode(message.text))
-    .map((message) => ({ id: message.id, text: message.text }));
+    .filter((message) => {
+      if (message.kind === 'haiku' || !message.text) return false;
+      return isFocusCopyMessage(message) || messageHasCode(message.text);
+    })
+    .map((message): HighlightCandidate => ({
+      id: message.id,
+      text: message.text,
+      forceCode: isFocusCopyMessage(message),
+      expanded: isMessageExpanded(message),
+    }));
 });
 
 function hasCurrentHighlightCandidate(id: string, text: string): boolean {
@@ -71,11 +92,14 @@ watch(
 
     for (const item of items) {
       const existing = highlightedById[item.id];
-      if (existing?.sourceText === item.text) continue;
-      void highlightMessage(item.text)
+      if (existing?.sourceText === item.text && existing.expanded === item.expanded) continue;
+      const highlighted = item.forceCode
+        ? highlightRawCodeBlock(item.text, { compact: true, collapsed: !item.expanded })
+        : highlightMessage(item.text);
+      void highlighted
         .then((html) => {
           if (!hasCurrentHighlightCandidate(item.id, item.text)) return;
-          highlightedById[item.id] = { sourceText: item.text, html };
+          highlightedById[item.id] = { sourceText: item.text, html, expanded: item.expanded };
           void nextTick(() => {
             scheduleScrollStateUpdate();
           });
@@ -87,10 +111,55 @@ watch(
 );
 
 function getHighlightedHtml(message: ConversationFeedMessage): string | null {
-  if (!message.text || !messageHasCode(message.text)) return null;
+  if (!message.text || (!isFocusCopyMessage(message) && !messageHasCode(message.text))) return null;
   const entry = highlightedById[message.id];
   if (!entry || entry.sourceText !== message.text) return null;
   return entry.html;
+}
+
+function isFocusCopyMessage(message: ConversationFeedMessage): boolean {
+  return message.id.startsWith('focus-copy:');
+}
+
+function isCollapsibleMessage(message: ConversationFeedMessage): boolean {
+  return isFocusCopyMessage(message) || message.kind === 'haiku';
+}
+
+function isMessageExpanded(message: ConversationFeedMessage): boolean {
+  if (!isCollapsibleMessage(message)) return true;
+  if (expandedMessageIds.has(message.id)) return true;
+  if (collapsedMessageIds.has(message.id)) return false;
+  return message.kind === 'haiku' && message.id === latestAssistantMessageId.value;
+}
+
+function isMessageCollapsed(message: ConversationFeedMessage): boolean {
+  return isCollapsibleMessage(message) && !isMessageExpanded(message);
+}
+
+function toggleMessageCollapse(message: ConversationFeedMessage): void {
+  if (!isCollapsibleMessage(message)) return;
+  if (isMessageExpanded(message)) {
+    expandedMessageIds.delete(message.id);
+    collapsedMessageIds.add(message.id);
+  } else {
+    collapsedMessageIds.delete(message.id);
+    expandedMessageIds.add(message.id);
+  }
+  void nextTick(() => {
+    scheduleScrollStateUpdate();
+  });
+}
+
+function expandCollapsedMessage(message: ConversationFeedMessage, event: MouseEvent): void {
+  if (!isMessageCollapsed(message)) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  collapsedMessageIds.delete(message.id);
+  expandedMessageIds.add(message.id);
+  void nextTick(() => {
+    scheduleScrollStateUpdate();
+  });
 }
 
 function renderHaikuMarkdown(text: string): string {
@@ -111,6 +180,8 @@ function rowClasses(message: ConversationFeedMessage): Record<string, boolean> {
     selected: props.isSelected(message.id),
     'out-of-context': props.isOutOfContext(message),
     error: message.status === 'error',
+    'focus-copy': isFocusCopyMessage(message),
+    collapsed: isMessageCollapsed(message),
   };
 }
 
@@ -123,10 +194,38 @@ function onMessageClick(event: MouseEvent, message: ConversationFeedMessage): vo
   emit('message-click', event, message);
 }
 
+function elementFromTarget(target: EventTarget | null): Element | null {
+  const value = target as (Element & { parentElement?: Element | null }) | null;
+  if (!value) return null;
+  if (value.nodeType === 1 && typeof value.closest === 'function') return value;
+  return value.parentElement ?? null;
+}
+
+function messageFromTarget(target: EventTarget | null): ConversationFeedMessage | null {
+  const element = elementFromTarget(target);
+  const row = element?.closest?.('.chat-row');
+  const messageId = row?.getAttribute('data-msg-id');
+  return props.messages.find((message) => message.id === messageId) ?? null;
+}
+
 function onScrollClickCapture(event: MouseEvent): void {
+  const element = elementFromTarget(event.target);
+  if (element?.closest?.('.code-block-toggle')) {
+    const message = messageFromTarget(event.target);
+    if (message && isFocusCopyMessage(message)) {
+      toggleMessageCollapse(message);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+  }
+
   if (toggleCodeBlockCollapseFromTarget(event.target)) {
     event.preventDefault();
     event.stopPropagation();
+    void nextTick(() => {
+      scheduleScrollStateUpdate();
+    });
     return;
   }
   emit('scroll-click-capture', event);
@@ -198,6 +297,13 @@ watch(
 watch(
   () => props.messages,
   () => {
+    const liveIds = new Set(props.messages.map((message) => message.id));
+    for (const id of Array.from(expandedMessageIds)) {
+      if (!liveIds.has(id)) expandedMessageIds.delete(id);
+    }
+    for (const id of Array.from(collapsedMessageIds)) {
+      if (!liveIds.has(id)) collapsedMessageIds.delete(id);
+    }
     void nextTick(() => {
       scheduleScrollStateUpdate();
     });
@@ -266,8 +372,22 @@ onUnmounted(() => {
               >{{ msg.text }}</span>
             </template>
             <template v-else>
-              <div v-if="msg.kind === 'haiku'" class="chat-markdown" v-html="renderHaikuMarkdown(msg.text)" />
-              <span
+              <div
+                v-if="msg.kind === 'haiku'"
+                class="chat-collapsible-message"
+                :class="{ collapsed: isMessageCollapsed(msg) }"
+                @click="expandCollapsedMessage(msg, $event)"
+              >
+                <div class="chat-collapsible-content chat-markdown" v-html="renderHaikuMarkdown(msg.text)" />
+                <button
+                  type="button"
+                  class="chat-collapse-toggle no-drag"
+                  @click.stop="toggleMessageCollapse(msg)"
+                >
+                  {{ isMessageCollapsed(msg) ? 'More' : 'Hide' }}
+                </button>
+              </div>
+              <div
                 v-else-if="getHighlightedHtml(msg)"
                 class="chat-text chat-text-highlighted"
                 v-html="getHighlightedHtml(msg)"
@@ -307,6 +427,8 @@ onUnmounted(() => {
 
 <style scoped>
 .chat-area {
+  --chat-sticky-footer-bottom: 0px;
+
   min-height: 60px;
   min-width: 0;
   display: flex;
@@ -478,6 +600,12 @@ onUnmounted(() => {
   max-width: calc(100% - 18px);
 }
 
+.chat-row.focus-copy .chat-bubble {
+  width: calc(100% - 18px);
+  max-width: calc(100% - 18px);
+  color: var(--color-text);
+}
+
 .chat-row.assistant-response .chat-actions {
   right: 10px;
 }
@@ -577,6 +705,72 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
 }
 
+.chat-row.focus-copy .chat-text-highlighted {
+  white-space: normal;
+}
+
+.chat-collapsible-message {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  position: relative;
+  overscroll-behavior: contain;
+}
+
+.chat-collapsible-message:not(.collapsed) {
+  overflow: visible;
+}
+
+.chat-collapsible-message.collapsed .chat-collapsible-content {
+  max-height: 100px;
+  overflow: hidden;
+}
+
+.chat-collapsible-message.collapsed {
+  cursor: pointer;
+}
+
+.chat-collapse-toggle {
+  position: sticky;
+  bottom: var(--chat-sticky-footer-bottom);
+  z-index: 2;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 6px 0;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0 0 8px 8px;
+  background: rgba(31, 35, 42, 0.94);
+  color: rgba(255, 255, 255, 0.62);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-collapsible-message.collapsed .chat-collapse-toggle {
+  position: static;
+  bottom: auto;
+}
+
+.chat-collapse-toggle:hover {
+  color: rgba(255, 255, 255, 0.88);
+  background: rgba(43, 48, 57, 0.96);
+}
+
+:global(.theme-light) .chat-collapse-toggle {
+  background: rgba(248, 250, 252, 0.94);
+  color: rgba(15, 23, 42, 0.62);
+  border-top-color: rgba(15, 23, 42, 0.08);
+}
+
+:global(.theme-light) .chat-collapse-toggle:hover {
+  color: rgba(15, 23, 42, 0.88);
+  background: rgba(241, 245, 249, 0.96);
+}
+
 .chat-markdown {
   display: block;
   max-width: 100%;
@@ -655,19 +849,6 @@ onUnmounted(() => {
   margin-bottom: 0;
 }
 
-.chat-markdown :deep(.code-block::before) {
-  content: attr(data-lang);
-  position: absolute;
-  top: 6px;
-  right: 10px;
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.35);
-  text-transform: uppercase;
-  pointer-events: none;
-  font-family: inherit;
-  z-index: 1;
-}
-
 .chat-markdown :deep(.code-block pre) {
   margin: 0;
   max-width: 100%;
@@ -700,19 +881,20 @@ onUnmounted(() => {
 }
 
 .chat-markdown :deep(.code-block-collapsible.collapsed pre) {
-  max-height: calc(37.5em + 24px);
+  max-height: 100px;
   overflow: hidden;
 }
 
-.chat-markdown :deep(.code-block-collapsible.collapsed::after) {
-  content: '';
-  position: absolute;
-  bottom: 36px;
-  left: 0;
-  right: 0;
-  height: 88px;
-  background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.65));
-  pointer-events: none;
+.chat-markdown :deep(.code-block-collapsible),
+.chat-text-highlighted :deep(.code-block-collapsible) {
+  max-height: min(70vh, 720px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.chat-markdown :deep(.code-block-collapsible pre),
+.chat-text-highlighted :deep(.code-block-collapsible .shiki) {
+  padding-bottom: 44px;
 }
 
 .chat-markdown :deep(.code-block-toggle) {
@@ -723,25 +905,28 @@ onUnmounted(() => {
   padding: 6px 0;
   border: none;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(31, 35, 42, 0.94);
   color: rgba(255, 255, 255, 0.55);
   font-size: 12px;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
   font-family: inherit;
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
 }
 
 .chat-markdown :deep(.code-block-toggle:hover) {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(43, 48, 57, 0.96);
   color: rgba(255, 255, 255, 0.85);
 }
 
 .chat-markdown :deep(.collapsed .code-block-toggle::before) {
-  content: 'Показать полностью ▾';
+  content: 'More';
 }
 
 .chat-markdown :deep(.code-block-collapsible:not(.collapsed) .code-block-toggle::before) {
-  content: 'Свернуть ▴';
+  content: 'Hide';
 }
 
 .chat-markdown :deep(code) {
@@ -777,19 +962,6 @@ onUnmounted(() => {
   margin-bottom: 0;
 }
 
-.chat-text-highlighted :deep(.code-block::before) {
-  content: attr(data-lang);
-  position: absolute;
-  top: 6px;
-  right: 10px;
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.35);
-  text-transform: uppercase;
-  pointer-events: none;
-  font-family: inherit;
-  z-index: 1;
-}
-
 .chat-text-highlighted :deep(.code-block-collapsible .shiki) {
   transition: max-height 0.3s ease;
 }
@@ -799,16 +971,8 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.chat-text-highlighted :deep(.code-block-collapsible.collapsed::after) {
-  content: '';
-  position: absolute;
-  bottom: 36px;
-  left: 0;
-  right: 0;
-  height: 80px;
-  background: linear-gradient(to bottom, transparent, #24292e);
-  pointer-events: none;
-  border-radius: 0 0 8px 8px;
+.chat-text-highlighted :deep(.code-block-compact.code-block-collapsible.collapsed .shiki) {
+  max-height: 100px;
 }
 
 .chat-text-highlighted :deep(.code-block-toggle) {
@@ -819,25 +983,41 @@ onUnmounted(() => {
   padding: 6px 0;
   border: none;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(31, 35, 42, 0.94);
   color: rgba(255, 255, 255, 0.55);
   font-size: 12px;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
   font-family: inherit;
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
 }
 
 .chat-text-highlighted :deep(.code-block-toggle:hover) {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(43, 48, 57, 0.96);
   color: rgba(255, 255, 255, 0.85);
 }
 
+:global(.theme-light) .chat-markdown :deep(.code-block-toggle),
+:global(.theme-light) .chat-text-highlighted :deep(.code-block-toggle) {
+  background: rgba(248, 250, 252, 0.94);
+  color: rgba(15, 23, 42, 0.62);
+  border-top-color: rgba(15, 23, 42, 0.08);
+}
+
+:global(.theme-light) .chat-markdown :deep(.code-block-toggle:hover),
+:global(.theme-light) .chat-text-highlighted :deep(.code-block-toggle:hover) {
+  background: rgba(241, 245, 249, 0.96);
+  color: rgba(15, 23, 42, 0.88);
+}
+
 .chat-text-highlighted :deep(.collapsed .code-block-toggle::before) {
-  content: 'Показать полностью ▾';
+  content: 'More';
 }
 
 .chat-text-highlighted :deep(.code-block-collapsible:not(.collapsed) .code-block-toggle::before) {
-  content: 'Свернуть ▴';
+  content: 'Hide';
 }
 
 .chat-text-highlighted :deep(.shiki) {

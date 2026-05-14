@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "HackInterview Focus Copy Bridge",
+  "version": "0.1.0",
+  "description": "Keeps the focused editable text cached locally for the macOS Ctrl+Shift+A copy helper.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAz+ezww7ZQQ9J8fRLkxkF5/kXQJyo/MOXPd5QSb8+SiQ3qRxEF/r3DhUbg67m6T8jKGOngboYfD9x39hPlVpxELP7V3X5BVaoITTKJxwhmEd6wm5DSFKORJny82333zBOGNPpi3nUCuERZNQNtFhTDBmWPE4aVkuFsnXyhd5F5MTJDb3o1m1+fnwy/l3HsCBCZ86xR3QVo2RZT5WY1DKOcAzhRxsTOwSqjkCcNUfKZ2i+MOrFvtvmId9sTpkf7ukQ/sCVWxtWaiw+CLVHtHKSEey9iAVmgvEAA5KBOqBtjcbFZ58z4uvBzqs53CyRYeelXldFnNNmDyRGPYJHuua5PwIDAQAB",
+  "permissions": [
+    "nativeMessaging",
+    "debugger",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "page-bridge.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_start"
+    }
+  ],
+  "minimum_chrome_version": "116"
+}

@@ -3621,7 +3621,156 @@ pub async fn check_accessibility_permission() -> Result<bool, String> {
 #[tauri::command]
 pub async fn request_accessibility_permission() -> Result<(), String> {
     log::info!("Command: request_accessibility_permission");
-    crate::infrastructure::auto_paste::open_accessibility_settings().map_err(|e| e.to_string())
+    crate::infrastructure::auto_paste::request_accessibility_permission()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct FocusCopyHelperInfo {
+    pub app_bundle_path: String,
+    pub executable_path: String,
+    pub accessibility_target_path: String,
+    pub accessibility_target_exists: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn focus_copy_helper_info() -> FocusCopyHelperInfo {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let helper_root = repo_root.join("tools").join("macos-focus-copy-helper");
+    let app_bundle = helper_root.join("dist").join("Telegram.app");
+    let executable = helper_root
+        .join(".build")
+        .join("release")
+        .join("MacOSFocusCopyHelper");
+    let accessibility_target = if app_bundle.exists() {
+        app_bundle.clone()
+    } else {
+        executable.clone()
+    };
+
+    FocusCopyHelperInfo {
+        app_bundle_path: app_bundle.to_string_lossy().to_string(),
+        executable_path: executable.to_string_lossy().to_string(),
+        accessibility_target_exists: accessibility_target.exists(),
+        accessibility_target_path: accessibility_target.to_string_lossy().to_string(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn focus_copy_helper_check_executable() -> std::path::PathBuf {
+    let info = focus_copy_helper_info();
+    let app_executable = std::path::PathBuf::from(&info.app_bundle_path)
+        .join("Contents")
+        .join("MacOS")
+        .join("Telegram");
+
+    if app_executable.exists() {
+        app_executable
+    } else {
+        std::path::PathBuf::from(info.executable_path)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn focus_copy_helper_info() -> FocusCopyHelperInfo {
+    FocusCopyHelperInfo {
+        app_bundle_path: String::new(),
+        executable_path: String::new(),
+        accessibility_target_path: String::new(),
+        accessibility_target_exists: false,
+    }
+}
+
+#[tauri::command]
+pub async fn get_focus_copy_helper_info() -> Result<FocusCopyHelperInfo, String> {
+    Ok(focus_copy_helper_info())
+}
+
+#[tauri::command]
+pub async fn check_focus_copy_helper_accessibility() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        let executable = focus_copy_helper_check_executable();
+        if !executable.exists() {
+            return Err(format!(
+                "Focus copy helper is not built: {}",
+                executable.to_string_lossy()
+            ));
+        }
+
+        let output = Command::new(&executable)
+            .arg("--check-accessibility")
+            .output()
+            .map_err(|e| {
+                format!(
+                    "Failed to run helper accessibility check '{}': {}",
+                    executable.to_string_lossy(),
+                    e
+                )
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::info!(
+            "Focus copy helper accessibility check: status={:?}, stdout={}, stderr={}",
+            output.status.code(),
+            stdout.trim(),
+            stderr.trim()
+        );
+
+        return Ok(output.status.success());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(true)
+    }
+}
+
+#[tauri::command]
+pub async fn reveal_focus_copy_helper() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        let info = focus_copy_helper_info();
+        let target = std::path::PathBuf::from(&info.accessibility_target_path);
+        if target.exists() {
+            let status = Command::new("open")
+                .arg("-R")
+                .arg(&target)
+                .status()
+                .map_err(|e| format!("Failed to reveal helper in Finder: {}", e))?;
+
+            if !status.success() {
+                return Err("Failed to reveal helper in Finder".to_string());
+            }
+            return Ok(());
+        }
+
+        let fallback_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("tools")
+            .join("macos-focus-copy-helper");
+        let status = Command::new("open")
+            .arg(&fallback_dir)
+            .status()
+            .map_err(|e| format!("Failed to open helper folder: {}", e))?;
+
+        if !status.success() {
+            return Err("Failed to open helper folder".to_string());
+        }
+    }
+
+    Ok(())
 }
 
 /// Автоматически вставляет текст в последнее активное окно

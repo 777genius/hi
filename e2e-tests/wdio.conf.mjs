@@ -14,9 +14,9 @@ function resolveAppBinaryPath() {
   const base = path.resolve(__dirname, '../src-tauri/target/debug');
   // На Windows бинарь с .exe
   if (process.platform === 'win32') {
-    return path.resolve(base, 'voice-to-text.exe');
+    return path.resolve(base, 'Telegram.exe');
   }
-  return path.resolve(base, 'voice-to-text');
+  return path.resolve(base, 'Telegram');
 }
 
 export const config = {
@@ -109,4 +109,3 @@ function onShutdown(fn) {
 onShutdown(() => {
   closeTauriDriver();
 });
-

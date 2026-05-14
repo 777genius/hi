@@ -1,6 +1,7 @@
 {
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-    "productName": "Voice to Text",
+    "productName": "Telegram",
+    "mainBinaryName": "Telegram",
     "version": "0.9.4",
     "identifier": "com.voicetotext.app",
     "build": {
@@ -13,7 +14,7 @@
         "withGlobalTauri": true,
         "windows": [{
                 "label": "main",
-                "title": "Voice to Text",
+                "title": "Telegram",
                 "width": 320,
                 "height": 720,
                 "minWidth": 250,
@@ -34,7 +35,7 @@
             },
             {
                 "label": "auth",
-                "title": "Voice to Text",
+                "title": "Telegram",
                 "width": 460,
                 "height": 580,
                 "visible": false,
@@ -49,7 +50,7 @@
             },
             {
                 "label": "profile",
-                "title": "Voice to Text - Profile",
+                "title": "Telegram - Profile",
                 "width": 460,
                 "height": 580,
                 "visible": false,
@@ -64,7 +65,7 @@
             },
             {
                 "label": "settings",
-                "title": "Voice to Text - Settings",
+                "title": "Telegram - Settings",
                 "width": 860,
                 "height": 680,
                 "minWidth": 720,

@@ -88,6 +88,34 @@ type Segment = TextSegment | CodeSegment;
 const CODE_BLOCK_RE = /```(\w+)?\n([\s\S]*?)```/g;
 const COLLAPSE_THRESHOLD = 20;
 
+function inferRawCodeLanguage(text: string): string {
+  const source = String(text ?? '');
+  if (
+    /\b(import|export)\s+(type\s+)?[{*\w]/.test(source) ||
+    /\b(function|const|let|var|class|interface|type|enum|implements|extends|async|await)\b/.test(source) ||
+    /=>/.test(source) ||
+    /\b(console|document|window)\./.test(source)
+  ) {
+    return 'typescript';
+  }
+  if (/^\s*(from\s+\w+\s+import|import\s+\w+|def\s+\w+|class\s+\w+.*:|print\()/m.test(source)) {
+    return 'python';
+  }
+  if (/^\s*(fn\s+\w+|let\s+mut\s+|use\s+\w+::|println!)/m.test(source)) {
+    return 'rust';
+  }
+  if (/^\s*(package\s+\w+|func\s+\w+\(|import\s+\()/m.test(source)) {
+    return 'go';
+  }
+  if (/^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER)\b/im.test(source)) {
+    return 'sql';
+  }
+  if (/^\s*(#!\/|npm\s+|pnpm\s+|yarn\s+|cd\s+|export\s+\w+=)/m.test(source)) {
+    return 'bash';
+  }
+  return 'plaintext';
+}
+
 function parseSegments(text: string): Segment[] {
   const segments: Segment[] = [];
   let lastIndex = 0;
@@ -150,6 +178,32 @@ export async function highlightMessage(text: string): Promise<string> {
   }
 
   return parts.join('');
+}
+
+export async function highlightRawCodeBlock(
+  text: string,
+  options: { lang?: string; compact?: boolean; collapsed?: boolean } = {},
+): Promise<string> {
+  const lang = String(options.lang || inferRawCodeLanguage(text)).toLowerCase();
+  const highlighter = await getHighlighter();
+  const resolvedLang = await ensureLanguage(highlighter, lang);
+  const content = String(text ?? '').replace(/\n$/, '');
+  const html = highlighter.codeToHtml(content, {
+    lang: resolvedLang,
+    theme: 'github-dark',
+  });
+  const lineCount = Math.max(1, content.split('\n').length);
+  const compactClass = options.compact ? ' code-block-compact' : '';
+  const collapsedClass = options.collapsed === false ? '' : ' collapsed';
+
+  return [
+    `<div class="code-block code-block-collapsible${compactClass}${collapsedClass}"`,
+    ` data-lang="${escapeHtml(lang)}"`,
+    ` data-lines="${lineCount}">`,
+    html,
+    '<button class="code-block-toggle" type="button" aria-label="Показать или свернуть код"></button>',
+    '</div>',
+  ].join('');
 }
 
 export function messageHasCode(text: string): boolean {

@@ -16,6 +16,15 @@
     "tauri:build": "tauri build",
     "tauri:dev:whisper": "tauri dev --features whisper",
     "tauri:build:whisper": "tauri build --features whisper",
+    "copy-helper:build": "tools/macos-focus-copy-helper/scripts/build-app.sh",
+    "copy-helper:run": "tools/macos-focus-copy-helper/scripts/start-supervisor.sh",
+    "copy-helper:stop": "tools/macos-focus-copy-helper/scripts/stop-supervisor.sh",
+    "copy-helper:status": "tools/macos-focus-copy-helper/scripts/status-supervisor.sh",
+    "copy-helper:check": "tools/macos-focus-copy-helper/scripts/check-accessibility.sh",
+    "copy-helper:logs": "tail -n 200 -f \"$HOME/Library/Logs/HackInterview/MacOSFocusCopyHelper.log\"",
+    "copy-helper:browser-extension:install": "tools/browser-focus-copy-extension/install-native-host.sh",
+    "copy-helper:brave:open-cdp": "tools/browser-focus-copy-extension/open-brave-silent-debugger.sh open",
+    "copy-helper:brave:restart-cdp": "tools/browser-focus-copy-extension/open-brave-silent-debugger.sh restart",
     "e2e:tauri": "node e2e-tests/run-e2e.mjs"
   },
   "dependencies": {

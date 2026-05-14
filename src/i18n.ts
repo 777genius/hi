@@ -3,7 +3,7 @@ import { createI18n } from 'vue-i18n';
 const messages = {
   en: {
     app: {
-      title: 'Voice to Text',
+      title: 'Telegram',
     },
     main: {
       minimize: 'Minimize',
@@ -343,7 +343,7 @@ const messages = {
   },
   ru: {
     app: {
-      title: 'Voice to Text',
+      title: 'Telegram',
     },
     main: {
       minimize: 'Свернуть',
@@ -683,7 +683,7 @@ const messages = {
   },
   es: {
     app: {
-      title: 'Voice to Text',
+      title: 'Telegram',
     },
     main: {
       minimize: 'Minimizar',
@@ -1010,7 +1010,7 @@ const messages = {
   },
   fr: {
     app: {
-      title: 'Voice to Text',
+      title: 'Telegram',
     },
     main: {
       minimize: 'Réduire',
@@ -1337,7 +1337,7 @@ const messages = {
   },
   de: {
     app: {
-      title: 'Voice to Text',
+      title: 'Telegram',
     },
     main: {
       minimize: 'Minimieren',
@@ -1664,7 +1664,7 @@ const messages = {
   },
   uk: {
     app: {
-      title: 'Voice to Text',
+      title: 'Telegram',
     },
     main: {
       minimize: 'Згорнути',

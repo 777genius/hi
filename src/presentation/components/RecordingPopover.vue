@@ -91,6 +91,131 @@ const shouldShowMicrophonePermissionWarning = computed(() => {
   return chatStore.microphoneEnabled && !audioPermissions.microphoneGranted.value;
 });
 
+type FocusCopyHelperInfo = {
+  app_bundle_path: string;
+  executable_path: string;
+  accessibility_target_path: string;
+  accessibility_target_exists: boolean;
+};
+
+const hasAccessibilityPermission = ref(true);
+const accessibilityPermissionBusy = ref(false);
+const accessibilityPermissionError = ref('');
+const accessibilityPermissionStatus = ref('');
+const focusCopyHelperInfo = ref<FocusCopyHelperInfo | null>(null);
+const focusCopyHelperRevealBusy = ref(false);
+let accessibilityPermissionRefreshTimer: number | null = null;
+
+const shouldShowAccessibilityPermissionBanner = computed(() => {
+  return isMac && !hasAccessibilityPermission.value;
+});
+
+const accessibilityPermissionTooltip = computed(() => {
+  return hasAccessibilityPermission.value
+    ? 'Открыть Accessibility'
+    : 'Запросить Accessibility';
+});
+
+const accessibilityPermissionTitle = computed(() => {
+  return hasAccessibilityPermission.value
+    ? 'Accessibility: Ctrl+Shift+A'
+    : 'Нужен Accessibility';
+});
+
+const accessibilityPermissionText = computed(() => {
+  if (!focusCopyHelperInfo.value?.accessibility_target_exists) {
+    return 'Сначала соберите Telegram.app через pnpm copy-helper:build, потом добавьте её в Accessibility.';
+  }
+
+  return hasAccessibilityPermission.value
+    ? 'Если Telegram не копирует текст, добавьте .app ниже в Accessibility.'
+    : 'Доступ нужен для чтения текста в активном поле и восстановления caret.';
+});
+
+const accessibilityPermissionButtonLabel = computed(() => {
+  if (accessibilityPermissionBusy.value) return 'Открываю...';
+  return hasAccessibilityPermission.value ? 'Открыть доступ' : 'Запросить доступ';
+});
+
+async function refreshAccessibilityPermission(): Promise<void> {
+  if (!isTauriAvailable() || !isMac) {
+    hasAccessibilityPermission.value = true;
+    accessibilityPermissionError.value = '';
+    accessibilityPermissionStatus.value = '';
+    return;
+  }
+
+  try {
+    hasAccessibilityPermission.value = await invoke<boolean>('check_focus_copy_helper_accessibility');
+    accessibilityPermissionError.value = '';
+    accessibilityPermissionStatus.value = `${hasAccessibilityPermission.value ? 'Helper доступ есть' : 'Helper доступа нет'} - ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+  } catch (err) {
+    hasAccessibilityPermission.value = false;
+    accessibilityPermissionError.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function loadFocusCopyHelperInfo(): Promise<void> {
+  if (!isTauriAvailable() || !isMac) {
+    focusCopyHelperInfo.value = null;
+    return;
+  }
+
+  try {
+    focusCopyHelperInfo.value = await invoke<FocusCopyHelperInfo>('get_focus_copy_helper_info');
+  } catch (err) {
+    accessibilityPermissionError.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function revealFocusCopyHelper(): Promise<void> {
+  if (focusCopyHelperRevealBusy.value) return;
+  focusCopyHelperRevealBusy.value = true;
+  accessibilityPermissionError.value = '';
+
+  try {
+    await invoke('reveal_focus_copy_helper');
+    await loadFocusCopyHelperInfo();
+  } catch (err) {
+    accessibilityPermissionError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    focusCopyHelperRevealBusy.value = false;
+  }
+}
+
+function scheduleAccessibilityPermissionRefresh(delayMs: number): void {
+  if (accessibilityPermissionRefreshTimer !== null) {
+    window.clearTimeout(accessibilityPermissionRefreshTimer);
+  }
+
+  accessibilityPermissionRefreshTimer = window.setTimeout(() => {
+    accessibilityPermissionRefreshTimer = null;
+    void refreshAccessibilityPermission();
+  }, delayMs);
+}
+
+async function requestAccessibilityPermission(): Promise<void> {
+  if (accessibilityPermissionBusy.value) return;
+  accessibilityPermissionBusy.value = true;
+  accessibilityPermissionError.value = '';
+
+  try {
+    await refreshAccessibilityPermission();
+    if (hasAccessibilityPermission.value) {
+      return;
+    }
+
+    await invoke('request_accessibility_permission');
+    await refreshAccessibilityPermission();
+    await loadFocusCopyHelperInfo();
+    scheduleAccessibilityPermissionRefresh(2000);
+  } catch (err) {
+    accessibilityPermissionError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    accessibilityPermissionBusy.value = false;
+  }
+}
+
 // Debouncing для hotkey - блокирует повторные вызовы в течение 500ms
 let hotkeyDebounceTimeout: number | null = null;
 let isHotkeyProcessing = false;
@@ -908,6 +1033,8 @@ onMounted(async () => {
   await chatStore.initialize();
   await appConfigStore.startSync();
   await sttConfigStore.startSync();
+  await loadFocusCopyHelperInfo();
+  await refreshAccessibilityPermission();
   await refreshCompanionSnapshot();
   await refreshCompanionServerStatus();
   scheduleCompanionStatusRetry();
@@ -918,6 +1045,8 @@ onMounted(async () => {
     void auth.initialize({ silent: true });
     void appConfigStore.refresh();
     void chatStore.syncMicrophoneMuteState();
+    void loadFocusCopyHelperInfo();
+    void refreshAccessibilityPermission();
     await refreshCompanionSnapshot();
 
     // Если UI рассинхронизировался (например окно было скрыто и JS "заморозили"),
@@ -1045,6 +1174,10 @@ onUnmounted(() => {
   if (unlistenCodeExplainDelta) unlistenCodeExplainDelta();
   if (unlistenCodeExplainDone) unlistenCodeExplainDone();
   if (unlistenCodeExplainError) unlistenCodeExplainError();
+  if (accessibilityPermissionRefreshTimer !== null) {
+    window.clearTimeout(accessibilityPermissionRefreshTimer);
+    accessibilityPermissionRefreshTimer = null;
+  }
   unlistenCodeExplainDelta = null;
   unlistenCodeExplainDone = null;
   unlistenCodeExplainError = null;
@@ -1523,6 +1656,21 @@ const onChatMouseDown = (e: MouseEvent) => {
               </v-card-actions>
             </v-card>
           </v-menu>
+          <v-tooltip :text="accessibilityPermissionTooltip" location="bottom">
+            <template #activator="{ props: tp }">
+              <button
+                v-if="isMac && !hasAccessibilityPermission"
+                v-bind="tp"
+                class="accessibility-button no-drag"
+                :class="{ active: !hasAccessibilityPermission }"
+                :title="accessibilityPermissionTooltip"
+                :disabled="accessibilityPermissionBusy"
+                @click="requestAccessibilityPermission"
+              >
+                <span class="mdi mdi-shield-key-outline"></span>
+              </button>
+            </template>
+          </v-tooltip>
           <v-tooltip :text="t('main.settings')" location="bottom">
             <template #activator="{ props: tp }">
               <button v-bind="tp" class="settings-button no-drag" data-testid="open-settings" @click="openSettings">
@@ -1532,6 +1680,56 @@ const onChatMouseDown = (e: MouseEvent) => {
           </v-tooltip>
         </div>
       </div>
+
+      <transition name="banner-fade">
+        <div v-if="shouldShowAccessibilityPermissionBanner" class="accessibility-permission-banner no-drag">
+          <span class="mdi mdi-shield-key-outline accessibility-permission-icon" />
+          <div class="accessibility-permission-copy">
+            <div class="accessibility-permission-title">
+              {{ accessibilityPermissionTitle }}
+            </div>
+            <div class="accessibility-permission-text">
+              {{ accessibilityPermissionText }}
+              <span v-if="accessibilityPermissionError">
+                {{ accessibilityPermissionError }}
+              </span>
+            </div>
+            <div
+              v-if="focusCopyHelperInfo?.accessibility_target_path"
+              class="accessibility-permission-path"
+              :title="focusCopyHelperInfo.accessibility_target_path"
+            >
+              {{ focusCopyHelperInfo.accessibility_target_path }}
+            </div>
+            <div v-if="accessibilityPermissionStatus" class="accessibility-permission-status">
+              {{ accessibilityPermissionStatus }}
+            </div>
+          </div>
+          <div class="accessibility-permission-actions">
+            <button
+              class="accessibility-permission-btn accessibility-permission-btn-secondary"
+              :disabled="accessibilityPermissionBusy"
+              @click="refreshAccessibilityPermission"
+            >
+              Проверить
+            </button>
+            <button
+              class="accessibility-permission-btn accessibility-permission-btn-secondary"
+              :disabled="focusCopyHelperRevealBusy"
+              @click="revealFocusCopyHelper"
+            >
+              {{ focusCopyHelperRevealBusy ? 'Открываю...' : 'Показать Telegram' }}
+            </button>
+            <button
+              class="accessibility-permission-btn"
+              :disabled="accessibilityPermissionBusy"
+              @click="requestAccessibilityPermission"
+            >
+              {{ accessibilityPermissionButtonLabel }}
+            </button>
+          </div>
+        </div>
+      </transition>
 
       <!-- Connection Warning Banner -->
       <transition name="banner-fade">
@@ -1972,6 +2170,8 @@ const onChatMouseDown = (e: MouseEvent) => {
 }
 
 .chat-area {
+  --chat-sticky-footer-bottom: 0px;
+
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -2011,6 +2211,114 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 :global(.theme-light) .header {
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.accessibility-permission-banner {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  grid-template-areas:
+    "icon copy"
+    "icon actions";
+  align-items: start;
+  column-gap: 10px;
+  row-gap: 8px;
+  margin: 0 var(--spacing-sm) var(--spacing-sm);
+  padding: 10px;
+  border: 1px solid rgba(245, 158, 11, 0.38);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--color-text);
+}
+
+:global(.theme-light) .accessibility-permission-banner {
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(180, 83, 9, 0.28);
+}
+
+.accessibility-permission-icon {
+  grid-area: icon;
+  flex: 0 0 auto;
+  font-size: 20px;
+  color: rgba(245, 158, 11, 0.95);
+  margin-top: 1px;
+}
+
+.accessibility-permission-copy {
+  grid-area: copy;
+  min-width: 0;
+}
+
+.accessibility-permission-title {
+  font-size: 13px;
+  line-height: 1.25;
+  font-weight: 700;
+}
+
+.accessibility-permission-text {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.32;
+  opacity: 0.78;
+}
+
+.accessibility-permission-path {
+  margin-top: 6px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.3;
+  opacity: 0.72;
+}
+
+.accessibility-permission-status {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.25;
+  opacity: 0.74;
+}
+
+.accessibility-permission-actions {
+  grid-area: actions;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.accessibility-permission-btn {
+  min-width: 96px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(245, 158, 11, 0.62);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.94);
+  color: #111827;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.accessibility-permission-btn:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 1);
+}
+
+.accessibility-permission-btn:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
+.accessibility-permission-btn-secondary {
+  min-width: 74px;
+  background: transparent;
+  color: var(--color-text);
+}
+
+.accessibility-permission-btn-secondary:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 0.12);
 }
 
 .title {
@@ -2119,6 +2427,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 .minimize-button,
 .companion-button,
+.accessibility-button,
 .settings-button,
 .profile-button {
   background: none;
@@ -2142,6 +2451,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 .minimize-button:hover,
 .companion-button:hover,
+.accessibility-button:hover,
 .settings-button:hover,
 .profile-button:hover {
   opacity: 1;
@@ -2154,9 +2464,16 @@ const onChatMouseDown = (e: MouseEvent) => {
   color: rgba(255, 255, 255, 0.95);
 }
 
+.accessibility-button.active {
+  opacity: 1;
+  background: rgba(245, 158, 11, 0.18);
+  color: rgba(245, 158, 11, 0.95);
+}
+
 
 :global(.theme-light) .minimize-button:hover,
 :global(.theme-light) .companion-button:hover,
+:global(.theme-light) .accessibility-button:hover,
 :global(.theme-light) .settings-button:hover,
 :global(.theme-light) .profile-button:hover {
   background: rgba(0, 0, 0, 0.06);
@@ -2180,6 +2497,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 :global(.os-windows) .minimize-button,
 :global(.os-windows) .companion-button,
+:global(.os-windows) .accessibility-button,
 :global(.os-windows) .settings-button {
   padding: 2px 4px;
 }

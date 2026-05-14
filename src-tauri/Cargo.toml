@@ -15,7 +15,7 @@ name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "voice-to-text"
+name = "Telegram"
 path = "src/main.rs"
 test = false
 bench = false

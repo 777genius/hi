@@ -383,6 +383,60 @@ pub async fn append_system_final(
         .store(0, Ordering::Relaxed);
 }
 
+pub async fn append_focus_copy_system_final(
+    state: &AppState,
+    text: String,
+    created_at_ms: i64,
+    source_id: Option<String>,
+) -> Option<String> {
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let seq = next_seq(state);
+    let stt_index = state
+        .companion_next_stt_index
+        .fetch_add(1, Ordering::Relaxed);
+    let generation = state
+        .companion_conversation_generation
+        .load(Ordering::Relaxed);
+    let message_id = source_id
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| format!("focus-copy:{}:{}", created_at_ms, seq));
+
+    let mut timeline = state.companion_timeline.write().await;
+    timeline.push(CompanionMessage {
+        id: message_id.clone(),
+        seq,
+        kind: "stt".to_string(),
+        role: "incoming".to_string(),
+        status: "final".to_string(),
+        text,
+        created_at_ms,
+        session_id: None,
+        request_id: None,
+        generation: Some(generation),
+        insert_after_id: None,
+        stt_index: Some(stt_index),
+        deleted: false,
+        attachments: None,
+    });
+
+    for item in timeline.iter_mut() {
+        if item.kind == "haiku" && item.insert_after_id.as_deref() == Some(LIVE_STT_MESSAGE_ID) {
+            item.insert_after_id = Some(message_id.clone());
+        }
+    }
+    drop(timeline);
+
+    prune_timeline(state).await;
+    state
+        .companion_live_system_started_at_ms
+        .store(0, Ordering::Relaxed);
+
+    Some(message_id)
+}
+
 pub async fn append_prompt_message(state: &AppState, prompt: CompanionPromptDraft) {
     if prompt.id.trim().is_empty() {
         return;
@@ -890,6 +944,32 @@ mod tests {
             .expect("haiku message");
 
         assert_eq!(haiku.insert_after_id.as_deref(), Some(stt.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn focus_copy_system_final_is_incoming_stt_without_session() {
+        let state = AppState::default();
+
+        let message_id = append_focus_copy_system_final(
+            &state,
+            "void main() {\n  print('hi');\n}".to_string(),
+            123,
+            Some("focus-copy:test".to_string()),
+        )
+        .await
+        .expect("focus copy message id");
+
+        let timeline = state.companion_timeline.read().await;
+        let message = timeline
+            .iter()
+            .find(|message| message.id == message_id)
+            .expect("focus copy message");
+
+        assert_eq!(message.kind, "stt");
+        assert_eq!(message.role, "incoming");
+        assert_eq!(message.status, "final");
+        assert_eq!(message.session_id, None);
+        assert_eq!(message.text, "void main() {\n  print('hi');\n}");
     }
 
     #[tokio::test]
