@@ -25,14 +25,14 @@ export function normalizeCompanionRequestError(
     if (options.hidden) {
       return new Error('Страница была скрыта, обновлю состояние после возврата');
     }
-    return new Error('Mac не ответил вовремя');
+    return new Error('Компьютер не ответил вовремя');
   }
 
   if (
     error instanceof TypeError
     || (error instanceof Error && NETWORK_ERROR_PATTERN.test(error.message))
   ) {
-    return new Error('Не удалось подключиться к Mac. Проверь, что телефон и Mac в одной сети, а приложение запущено.');
+    return new Error('Не удалось подключиться к компьютеру. Проверь, что телефон и компьютер в одной сети, а приложение запущено.');
   }
 
   if (error instanceof Error) {
@@ -52,10 +52,16 @@ export function classifyCompanionFailureMessage(message: string): CompanionFailu
   if (message.includes('Телефон офлайн')) {
     return 'offline';
   }
-  if (message.includes('Не удалось подключиться к Mac')) {
+  if (
+    message.includes('Не удалось подключиться к компьютеру')
+    || message.includes('Не удалось подключиться к Mac')
+  ) {
     return 'network';
   }
-  if (message.includes('Mac не ответил вовремя')) {
+  if (
+    message.includes('Компьютер не ответил вовремя')
+    || message.includes('Mac не ответил вовремя')
+  ) {
     return 'timeout';
   }
   return 'other';
@@ -81,7 +87,7 @@ export function connectionTextForCompanionFailure(
 ): string {
   switch (kind) {
     case 'expired':
-      return 'Ссылка устарела. Открой QR из окна на Mac заново.';
+      return 'Ссылка устарела. Открой QR из окна приложения заново.';
     case 'offline':
       return 'Телефон офлайн. Жду восстановления сети...';
     case 'network':
