@@ -1477,8 +1477,8 @@ pub async fn get_app_config_snapshot(
     let data = AppConfigSnapshotData {
         microphone_sensitivity: config.microphone_sensitivity,
         recording_hotkey: config.recording_hotkey,
-        auto_copy_to_clipboard: config.auto_copy_to_clipboard,
-        auto_paste_text: config.auto_paste_text,
+        auto_copy_to_clipboard: false,
+        auto_paste_text: false,
         selected_audio_device: config.selected_audio_device,
         selected_output_audio_device: config.selected_output_audio_device,
     };

@@ -26,8 +26,9 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   function applySnapshot(data: AppConfigSnapshotData, rev: string): void {
     revision.value = rev;
     recordingHotkey.value = data.recording_hotkey ?? recordingHotkey.value;
-    autoCopyToClipboard.value = data.auto_copy_to_clipboard ?? autoCopyToClipboard.value;
-    autoPasteText.value = data.auto_paste_text ?? autoPasteText.value;
+    // Auto-copy/auto-paste intentionally stay disabled even if an old config snapshot has them enabled.
+    autoCopyToClipboard.value = false;
+    autoPasteText.value = false;
     microphoneSensitivity.value = data.microphone_sensitivity ?? microphoneSensitivity.value;
     selectedAudioDevice.value = data.selected_audio_device ?? '';
     selectedOutputAudioDevice.value = data.selected_output_audio_device ?? '';
