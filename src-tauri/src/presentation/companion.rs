@@ -1,5 +1,7 @@
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+#[cfg(target_os = "windows")]
+use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -24,7 +26,7 @@ use crate::presentation::events::{
 };
 use crate::presentation::AppState;
 
-const COMPANION_PORT_CANDIDATES: [u16; 3] = [43821, 43822, 43823];
+const COMPANION_PORT: u16 = 43821;
 const COMPANION_SSE_RETRY_MS: u64 = 1500;
 const COMPANION_SSE_HEARTBEAT_SECS: u64 = 15;
 const COMPANION_TOPIC: &str = "companion-ui";
@@ -387,14 +389,15 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
     let runtime = state.companion_runtime.read().await.clone();
     let companion_mode_enabled = *runtime.enabled.read().await;
 
-    let microphone_payload = crate::presentation::commands::get_microphone_mute_state()
-        .await
-        .unwrap_or(MicrophoneMuteStatePayload {
-            muted: false,
-            supported: false,
-            source: "unknown".to_string(),
-            detail: None,
-        });
+    let microphone_payload =
+        crate::presentation::commands::get_effective_microphone_mute_state(state)
+            .await
+            .unwrap_or(MicrophoneMuteStatePayload {
+                muted: false,
+                supported: false,
+                source: "unknown".to_string(),
+                detail: None,
+            });
 
     let recording_status = state.transcription_service.get_status().await;
     let active_session_id = state
@@ -1109,16 +1112,16 @@ async fn emit_invalidation(app_handle: &AppHandle, revision: String) {
 }
 
 async fn bind_listener() -> std::io::Result<TcpListener> {
-    for port in COMPANION_PORT_CANDIDATES {
-        match TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await {
-            Ok(listener) => return Ok(listener),
-            Err(err) => {
-                log::warn!("Companion server failed to bind 0.0.0.0:{}: {}", port, err);
-            }
-        }
-    }
-
-    TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await
+    TcpListener::bind((Ipv4Addr::UNSPECIFIED, COMPANION_PORT))
+        .await
+        .map_err(|err| {
+            log::error!(
+                "Companion server failed to bind fixed port 0.0.0.0:{}: {}",
+                COMPANION_PORT,
+                err
+            );
+            err
+        })
 }
 
 fn sse_snapshot_bytes(snapshot: &CompanionSnapshotEnvelope) -> Bytes {
@@ -1235,6 +1238,15 @@ fn empty_body() -> CompanionBody {
 }
 
 fn detect_primary_ipv4() -> Option<Ipv4Addr> {
+    #[cfg(target_os = "windows")]
+    if let Some(ip) = detect_windows_lan_ipv4() {
+        return Some(ip);
+    }
+
+    detect_routed_ipv4()
+}
+
+fn detect_routed_ipv4() -> Option<Ipv4Addr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
     socket.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
 
@@ -1242,4 +1254,139 @@ fn detect_primary_ipv4() -> Option<Ipv4Addr> {
         IpAddr::V4(ip) => Some(ip),
         IpAddr::V6(_) => None,
     }
+}
+
+#[cfg(target_os = "windows")]
+fn detect_windows_lan_ipv4() -> Option<Ipv4Addr> {
+    let script = r#"
+$ErrorActionPreference='SilentlyContinue'
+Get-NetIPConfiguration | Where-Object { $_.IPv4Address } | ForEach-Object {
+  $ip = ($_.IPv4Address | Where-Object {
+    $_.IPAddress -and $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notlike '169.254.*'
+  } | Select-Object -First 1 -ExpandProperty IPAddress)
+  $gateway = ($_.IPv4DefaultGateway | Select-Object -First 1 -ExpandProperty NextHop)
+  if ($ip) {
+    '{0}|{1}|{2}|{3}' -f $_.InterfaceAlias, $_.InterfaceDescription, $ip, $gateway
+  }
+}
+"#;
+
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut best: Option<(i32, Ipv4Addr, String)> = None;
+
+    for line in stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+
+        let alias = parts[0].trim();
+        let description = parts[1].trim();
+        let Ok(ip) = parts[2].trim().parse::<Ipv4Addr>() else {
+            continue;
+        };
+        let gateway = parts[3].trim();
+
+        if !is_usable_companion_ipv4(ip) {
+            continue;
+        }
+
+        let label = format!("{} {}", alias, description).to_lowercase();
+        if is_virtual_or_vpn_adapter(&label) {
+            continue;
+        }
+
+        let mut score = 0;
+        if !gateway.is_empty() {
+            score += 100;
+        }
+        if label.contains("wi-fi")
+            || label.contains("wifi")
+            || label.contains("wireless")
+            || label.contains("wlan")
+            || label.contains("беспровод")
+        {
+            score += 50;
+        }
+        if label.contains("ethernet")
+            || label.contains("gigabit")
+            || label.contains("controller")
+            || label.contains("killer")
+        {
+            score += 30;
+        }
+        if ip.octets()[0] == 192 && ip.octets()[1] == 168 {
+            score += 20;
+        } else if ip.octets()[0] == 172 && (16..=31).contains(&ip.octets()[1]) {
+            score += 15;
+        } else if ip.octets()[0] == 10 {
+            score += 10;
+        }
+
+        let candidate_label = format!("{} ({})", ip, alias);
+        if best
+            .as_ref()
+            .map_or(true, |(best_score, _, _)| score > *best_score)
+        {
+            best = Some((score, ip, candidate_label));
+        }
+    }
+
+    if let Some((_, ip, label)) = best {
+        log::info!("Companion selected LAN IPv4 for phone QR: {}", label);
+        Some(ip)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_virtual_or_vpn_adapter(label: &str) -> bool {
+    [
+        "vpn",
+        "wireguard",
+        "wintun",
+        "tap",
+        "tun ",
+        "tailscale",
+        "zerotier",
+        "hamachi",
+        "vmware",
+        "virtualbox",
+        "host-only",
+        "virtual",
+        "hyper-v",
+        "wsl",
+        "docker",
+        "loopback",
+        "bluetooth",
+        "npcap",
+        "container",
+        "vethernet",
+    ]
+    .iter()
+    .any(|needle| label.contains(needle))
+}
+
+fn is_usable_companion_ipv4(ip: Ipv4Addr) -> bool {
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast())
 }

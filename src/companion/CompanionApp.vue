@@ -24,11 +24,13 @@ type ConnectionState = 'idle' | 'connected' | 'reconnecting' | 'disconnected';
 
 const token = new URLSearchParams(window.location.search).get('token')?.trim() ?? '';
 const companionAvailable = token.length > 0;
+const REQUEST_TIMEOUT_MS = 9000;
+const ACTION_REQUEST_TIMEOUT_MS = 30000;
 
 const companionFeedRef = ref<{ scrollEl: HTMLElement | null } | null>(null);
 const snapshot = ref<TauriSnapshotEnvelope<CompanionSnapshotData> | null>(null);
 const connectionState = ref<ConnectionState>(companionAvailable ? 'idle' : 'disconnected');
-const connectionText = ref(companionAvailable ? 'Подключаюсь к Mac...' : 'Ссылка не содержит token');
+const connectionText = ref(companionAvailable ? 'Подключаюсь к компьютеру...' : 'Ссылка не содержит token');
 const actionStatusText = ref('');
 const actionStatusTone = ref<StatusTone>('');
 const currentRevision = ref(0);
@@ -53,9 +55,9 @@ const connectionReady = computed(() => connectionState.value === 'connected');
 const authRequired = computed(() => !!snapshotData.value?.authRequired);
 const topConnectionText = computed(() => actionStatusText.value || connectionText.value);
 const emptyFeedText = computed(() => {
-  if (!companionAvailable) return 'Некорректная companion-ссылка. Открой QR из окна на Mac заново.';
-  if (authRequired.value) return 'Сначала авторизуйся в приложении на Mac.';
-  return 'Сообщений пока нет. Запусти запись на Mac и список появится здесь.';
+  if (!companionAvailable) return 'Некорректная companion-ссылка. Открой QR из окна приложения заново.';
+  if (authRequired.value) return 'Сначала авторизуйся в приложении на компьютере.';
+  return 'Сообщений пока нет. Запусти запись на компьютере и список появится здесь.';
 });
 
 const recordingStatus = computed<CompanionRecordingStatus>(() => snapshotData.value?.recording.status ?? 'Idle');
@@ -174,7 +176,7 @@ function describeActionResult(actionResult?: string | null): string {
     case 'busy_transition':
       return 'Подожди, предыдущее действие ещё выполняется';
     case 'rejected_auth':
-      return 'Авторизуйся на Mac и открой ссылку заново';
+      return 'Авторизуйся на компьютере и открой ссылку заново';
     case 'noop':
       return 'Состояние уже актуально';
     case undefined:
@@ -195,7 +197,7 @@ function extractErrorMessage(status: number, payload: CompanionActionResponse | 
     return describeActionResult(payload.actionResult);
   }
   if (status === 401 || status === 403) {
-    return 'Ссылка устарела или companion перезапустился. Открой QR из окна на Mac заново.';
+    return 'Ссылка устарела или companion перезапустился. Открой QR из окна приложения заново.';
   }
   return raw || `Запрос завершился ошибкой: ${status}`;
 }
@@ -235,7 +237,7 @@ function disposeEventSource(): void {
   source.close();
 }
 
-async function requestJson<T>(path: string, init: RequestInit = {}): Promise<{
+async function requestJson<T>(path: string, init: RequestInit = {}, timeoutMs = REQUEST_TIMEOUT_MS): Promise<{
   response: Response;
   json: T | null;
   raw: string;
@@ -246,7 +248,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<{
 
   const controller = new AbortController();
   requestControllers.add(controller);
-  const timeoutId = window.setTimeout(() => controller.abort(), 9000);
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(path, {
@@ -283,7 +285,7 @@ async function refreshSnapshot(): Promise<void> {
     await requestJson<TauriSnapshotEnvelope<CompanionSnapshotData>>(`/api/state?token=${encodeURIComponent(token)}`);
 
   if (response.status === 401 || response.status === 403) {
-    throw new Error('Ссылка устарела или companion перезапустился. Открой QR из окна на Mac заново.');
+    throw new Error('Ссылка устарела или companion перезапустился. Открой QR из окна приложения заново.');
   }
   if (!response.ok || !json) {
     throw new Error(raw || `Не удалось получить состояние: ${response.status}`);
@@ -313,7 +315,7 @@ async function resyncConnection(options: {
         connectEvents();
       }
 
-      setConnection('connected', options.successStatusText || 'Связь с Mac активна');
+      setConnection('connected', options.successStatusText || 'Связь с компьютером активна');
       if (!actionInFlight.value) {
         setStatus('');
       }
@@ -355,11 +357,11 @@ async function sendAction(path: string, body: Record<string, unknown> = {}): Pro
         'X-Companion-Token': token,
       },
       body: JSON.stringify(body),
-    });
+    }, ACTION_REQUEST_TIMEOUT_MS);
 
     if (response.status === 401 || response.status === 403) {
       disposeEventSource();
-      setConnection('disconnected', 'Ссылка устарела. Открой её из окна на Mac заново.');
+      setConnection('disconnected', 'Ссылка устарела. Открой её из окна приложения заново.');
       throw new Error(extractErrorMessage(response.status, json, raw));
     }
 
@@ -389,7 +391,7 @@ async function sendAction(path: string, body: Record<string, unknown> = {}): Pro
 
     if (shouldRecoverCompanionConnection(kind)) {
       disposeEventSource();
-      setConnection('reconnecting', connectionTextForCompanionFailure(kind, 'Пытаюсь восстановить связь с Mac...'));
+      setConnection('reconnecting', connectionTextForCompanionFailure(kind, 'Пытаюсь восстановить связь с компьютером...'));
     }
 
     setStatus(message, toneForCompanionFailure(kind));
@@ -400,7 +402,7 @@ async function sendAction(path: string, body: Record<string, unknown> = {}): Pro
       && document.visibilityState === 'visible'
     ) {
       void resyncConnection({ reconnect: true }).catch((resyncError) => {
-        handleResyncFailure(resyncError, 'Пытаюсь восстановить связь с Mac...');
+        handleResyncFailure(resyncError, 'Пытаюсь восстановить связь с компьютером...');
       });
     }
 
@@ -506,7 +508,7 @@ function connectEvents(): void {
 
   source.onopen = () => {
     if (eventSource !== source) return;
-    setConnection('connected', 'Связь с Mac активна');
+    setConnection('connected', 'Связь с компьютером активна');
     if (!actionInFlight.value) {
       setStatus('');
     }
@@ -519,7 +521,7 @@ function connectEvents(): void {
         const next = JSON.parse(event.data) as TauriSnapshotEnvelope<CompanionSnapshotData>;
         await applySnapshot(next);
         if (eventSource !== source) return;
-        setConnection('connected', 'Связь с Mac активна');
+        setConnection('connected', 'Связь с компьютером активна');
         if (!actionInFlight.value) {
           setStatus('');
         }
@@ -528,10 +530,10 @@ function connectEvents(): void {
           return;
         }
         disposeEventSource();
-        setConnection('reconnecting', 'Поток обновлений прервался, обновляю состояние с Mac...');
+        setConnection('reconnecting', 'Поток обновлений прервался, обновляю состояние с компьютера...');
         setStatus('Live update повредился, пробую восстановить состояние...', 'warn');
         void resyncConnection({ reconnect: true }).catch((resyncError) => {
-          handleResyncFailure(resyncError, 'Не удалось восстановить поток обновлений с Mac');
+          handleResyncFailure(resyncError, 'Не удалось восстановить поток обновлений с компьютером');
         });
       }
     })();
@@ -544,11 +546,11 @@ function connectEvents(): void {
       return;
     }
     void (async () => {
-      setConnection('reconnecting', 'Пытаюсь переподключиться к Mac...');
+      setConnection('reconnecting', 'Пытаюсь переподключиться к компьютеру...');
       try {
         await resyncConnection({ reconnect: true });
       } catch (error) {
-        handleResyncFailure(error, 'Пытаюсь переподключиться к Mac...');
+        handleResyncFailure(error, 'Пытаюсь переподключиться к компьютеру...');
       }
     })();
   };
@@ -563,7 +565,7 @@ function onVisibilityChange(): void {
 
   if (document.visibilityState === 'visible') {
     void resyncConnection({ reconnect: true }).catch((error) => {
-      handleResyncFailure(error, 'Связь с Mac временно потеряна');
+      handleResyncFailure(error, 'Связь с компьютером временно потеряна');
     });
   }
 }
@@ -573,7 +575,7 @@ function onOnline(): void {
     return;
   }
   void resyncConnection({ reconnect: true }).catch((error) => {
-    handleResyncFailure(error, 'Пытаюсь восстановить связь с Mac...');
+    handleResyncFailure(error, 'Пытаюсь восстановить связь с компьютером...');
   });
 }
 
@@ -606,12 +608,12 @@ function onPageHide(): void {
 async function bootstrap(): Promise<void> {
   if (!companionAvailable) {
     setConnection('disconnected', 'Companion ссылка некорректна');
-    setStatus('Ссылка не содержит token. Открой QR из окна на Mac заново.', 'error');
+    setStatus('Ссылка не содержит token. Открой QR из окна приложения заново.', 'error');
     return;
   }
 
   if (!pageVisible()) {
-    setConnection('idle', 'Страница скрыта. Подключусь к Mac после открытия.');
+    setConnection('idle', 'Страница скрыта. Подключусь к компьютеру после открытия.');
     return;
   }
 
@@ -622,9 +624,9 @@ async function bootstrap(): Promise<void> {
   }
 
   try {
-    await resyncConnection({ reconnect: true, successStatusText: 'Связь с Mac активна' });
+    await resyncConnection({ reconnect: true, successStatusText: 'Связь с компьютером активна' });
   } catch (error) {
-    handleResyncFailure(error, 'Не удалось подключиться к Mac');
+    handleResyncFailure(error, 'Не удалось подключиться к компьютеру');
   }
 }
 
@@ -796,8 +798,11 @@ onUnmounted(() => {
 
 <style scoped>
 .companion-page {
+  height: 100vh;
+  height: 100dvh;
   min-height: 100vh;
   min-height: 100dvh;
+  overflow: hidden;
   background:
     radial-gradient(circle at top, rgba(74, 158, 255, 0.16), transparent 34%),
     var(--color-bg);
@@ -806,6 +811,8 @@ onUnmounted(() => {
 
 .companion-shell {
   width: min(940px, 100%);
+  height: 100vh;
+  height: 100dvh;
   min-height: 100vh;
   min-height: 100dvh;
   margin: 0 auto;
@@ -815,11 +822,15 @@ onUnmounted(() => {
     calc(132px + env(safe-area-inset-bottom, 0px))
     calc(12px + env(safe-area-inset-left, 0px));
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 10px;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .companion-shell > * {
   min-width: 0;
+  min-height: 0;
 }
 
 .feed-card,
@@ -873,6 +884,7 @@ onUnmounted(() => {
 .feed-card {
   display: flex;
   min-height: 340px;
+  overflow: hidden;
 }
 
 .feed-card :deep(.chat-area) {
@@ -884,8 +896,11 @@ onUnmounted(() => {
 .feed-card :deep(.chat-scroll) {
   min-height: 0;
   min-width: 0;
-  max-height: min(58vh, 760px);
+  height: 100%;
+  max-height: 100%;
+  overflow-y: auto;
   overscroll-behavior: contain;
+  touch-action: pan-y;
   -webkit-overflow-scrolling: touch;
 }
 
@@ -1177,6 +1192,10 @@ onUnmounted(() => {
       calc(10px + env(safe-area-inset-right, 0px))
       calc(148px + env(safe-area-inset-bottom, 0px))
       calc(10px + env(safe-area-inset-left, 0px));
+  }
+
+  .feed-card {
+    min-height: 0;
   }
 
   .feed-card :deep(.chat-scroll) {
