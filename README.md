@@ -34,6 +34,23 @@ pnpm install
 pnpm tauri:dev
 ```
 
+### Запуск с продовым backend на Render и Brave CDP
+
+Для проверки desktop frontend на продовом backend с включённым real Brave/CDP focus-copy:
+
+```bash
+pnpm copy-helper:brave:restart-cdp
+FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+```
+
+Продовый backend задеплоен через Render. Для проверки деплоя, логов и состояния продового backend можно использовать Render MCP.
+
+Для локального тестирования backend VoicetextAI:
+
+```text
+/Users/belief/dev/projects/VoicetextAI/backend
+```
+
 Либо только фронтенд (если бэкенд уже поднят):
 
 ```bash
