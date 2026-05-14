@@ -798,11 +798,14 @@ pub async fn stop_recording_raw(
         log::debug!("Microphone transcription stop skipped/failed: {}", e);
     }
 
-    *state.partial_transcription.write().await = None;
-    state
-        .companion_live_system_started_at_ms
-        .store(0, Ordering::Relaxed);
-    crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
+    crate::presentation::companion_timeline::finalize_or_clear_system_live_on_stop(
+        state, session_id,
+    )
+    .await;
+    crate::presentation::companion_timeline::finalize_or_clear_microphone_live_on_stop(
+        state, session_id,
+    )
+    .await;
 
     // Emit status change
     log::debug!("Emitting status: Idle (stopped_via_hotkey: false)");

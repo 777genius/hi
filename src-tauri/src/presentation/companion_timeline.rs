@@ -115,6 +115,64 @@ pub async fn clear_microphone_live_buffers(state: &AppState) {
         .store(0, Ordering::Relaxed);
 }
 
+pub async fn finalize_or_clear_system_live_on_stop(
+    state: &AppState,
+    session_id: u64,
+) -> Option<crate::domain::Transcription> {
+    let text = state.companion_system_accumulated_text.read().await.clone();
+    let text = text.trim().to_string();
+
+    if session_id == 0 || text.is_empty() {
+        clear_system_live_buffers(state).await;
+        return None;
+    }
+
+    let started_at = state
+        .companion_live_system_started_at_ms
+        .load(Ordering::Relaxed);
+    let timestamp = if started_at > 0 {
+        started_at as i64
+    } else {
+        now_ms()
+    };
+
+    let mut transcription = crate::domain::Transcription::final_result(text);
+    transcription.timestamp = timestamp;
+    append_system_final(state, session_id, &transcription).await;
+    clear_system_live_buffers(state).await;
+    Some(transcription)
+}
+
+pub async fn finalize_or_clear_microphone_live_on_stop(
+    state: &AppState,
+    session_id: u64,
+) -> Option<String> {
+    let text = state
+        .companion_microphone_accumulated_text
+        .read()
+        .await
+        .clone();
+    let text = text.trim().to_string();
+
+    if session_id == 0 || text.is_empty() {
+        clear_microphone_live_buffers(state).await;
+        return None;
+    }
+
+    let started_at = state
+        .companion_live_microphone_started_at_ms
+        .load(Ordering::Relaxed);
+    let timestamp = if started_at > 0 {
+        started_at as i64
+    } else {
+        now_ms()
+    };
+
+    append_microphone_message(state, session_id, &text, timestamp).await;
+    clear_microphone_live_buffers(state).await;
+    Some(text)
+}
+
 pub fn update_system_audio_level(state: &AppState, level: f32) {
     state
         .companion_system_audio_level_bits
@@ -1347,6 +1405,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_promotes_only_finalized_system_chunks_when_finalize_returns_nothing() {
+        let state = AppState::default();
+
+        *state.companion_system_accumulated_text.write().await = "stable segment".to_string();
+        *state.partial_transcription.write().await = Some("unstable interim".to_string());
+        state
+            .companion_live_system_started_at_ms
+            .store(1234, Ordering::Relaxed);
+
+        let canonical = finalize_or_clear_system_live_on_stop(&state, 7)
+            .await
+            .expect("finalized live system text");
+
+        assert_eq!(canonical.text, "stable segment");
+        assert_eq!(canonical.timestamp, 1234);
+        assert!(visible_system_partial_text(&state).await.is_none());
+
+        let timeline = state.companion_timeline.read().await;
+        let stt = timeline
+            .iter()
+            .find(|message| message.kind == "stt")
+            .expect("stt message");
+        assert_eq!(stt.text, "stable segment");
+    }
+
+    #[tokio::test]
+    async fn stop_drops_unfinalized_system_interim_when_finalize_returns_nothing() {
+        let state = AppState::default();
+
+        *state.partial_transcription.write().await = Some("unstable interim".to_string());
+
+        let canonical = finalize_or_clear_system_live_on_stop(&state, 7).await;
+
+        assert!(canonical.is_none());
+        assert!(visible_system_partial_text(&state).await.is_none());
+        assert!(state.companion_timeline.read().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn system_partial_keeps_repeated_short_segment_finals_when_segment_changes() {
         let state = AppState::default();
 
@@ -1384,6 +1481,32 @@ mod tests {
             visible_microphone_partial_text(&state).await.as_deref(),
             Some("Ты слышишь, что я говорю?")
         );
+    }
+
+    #[tokio::test]
+    async fn stop_promotes_only_finalized_microphone_chunks_when_finalize_returns_nothing() {
+        let state = AppState::default();
+        state
+            .microphone_transcription_enabled
+            .store(true, Ordering::Relaxed);
+
+        *state.companion_microphone_accumulated_text.write().await =
+            "stable microphone".to_string();
+        *state.companion_microphone_partial_text.write().await = "unstable mic".to_string();
+
+        let flushed = finalize_or_clear_microphone_live_on_stop(&state, 7)
+            .await
+            .expect("finalized live microphone text");
+
+        assert_eq!(flushed, "stable microphone");
+        assert!(visible_microphone_partial_text(&state).await.is_none());
+
+        let timeline = state.companion_timeline.read().await;
+        let mic = timeline
+            .iter()
+            .find(|message| message.kind == "mic")
+            .expect("mic message");
+        assert_eq!(mic.text, "stable microphone");
     }
 
     #[test]
