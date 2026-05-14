@@ -1406,10 +1406,11 @@ impl DeepgramProvider {
                                 // - is_final=true, speech_final=false: сегмент завершен, но речь продолжается
                                 // - is_final=true, speech_final=true: вся речь завершена
 
+                                let closes_utterance = speech_final || from_finalize;
                                 let transcription = Transcription {
                                     text: text.to_string(),
                                     confidence,
-                                    is_final, // передаем оригинальный флаг is_final из Deepgram
+                                    is_final: is_final || closes_utterance,
                                     language: detected_language,
                                     timestamp: std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
@@ -1425,7 +1426,7 @@ impl DeepgramProvider {
                                     is_final, speech_final, from_finalize, text, confidence, start, duration);
 
                                 // Отправляем как final когда речь завершена или пришёл flush от Finalize.
-                                if speech_final || from_finalize {
+                                if closes_utterance {
                                     log::info!(
                                         "✅ Final transcript: '{}' → вызываем on_final callback",
                                         text
@@ -1745,6 +1746,7 @@ mod tests {
     fn test_handle_message_speech_final_without_is_final_is_final() {
         let partial_called = Arc::new(std::sync::Mutex::new(false));
         let final_called = Arc::new(std::sync::Mutex::new(false));
+        let final_transcription = Arc::new(std::sync::Mutex::new(None::<Transcription>));
 
         let p_called = partial_called.clone();
         let on_partial: TranscriptionCallback = Arc::new(move |_: Transcription| {
@@ -1752,8 +1754,10 @@ mod tests {
         });
 
         let f_called = final_called.clone();
-        let on_final: TranscriptionCallback = Arc::new(move |_: Transcription| {
+        let f_transcription = final_transcription.clone();
+        let on_final: TranscriptionCallback = Arc::new(move |t: Transcription| {
             *f_called.lock().unwrap() = true;
+            *f_transcription.lock().unwrap() = Some(t);
         });
 
         let json = json!({
@@ -1773,6 +1777,9 @@ mod tests {
         DeepgramProvider::handle_message(json, &on_partial, &on_final);
         assert!(!*partial_called.lock().unwrap());
         assert!(*final_called.lock().unwrap());
+        let final_transcription = final_transcription.lock().unwrap();
+        let final_transcription = final_transcription.as_ref().unwrap();
+        assert!(final_transcription.is_final);
     }
 
     #[test]
