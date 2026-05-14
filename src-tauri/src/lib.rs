@@ -415,8 +415,8 @@ pub fn run() {
 
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         // Backend-only режим: по умолчанию держим соединение живым между сессиями записи.
-                        // TTL короткий (см. stt_config.keep_alive_ttl_secs), чтобы не держать "висящие" коннекты в фоне
-                        // и не упереться в лимиты параллельных соединений провайдера (например Deepgram).
+                        // TTL держим чуть ниже backend audio idle timeout, чтобы клиент закрывал idle WS
+                        // до серверного timeout и не пытался переиспользовать поток на границе закрытия.
                         let mut config_migrated = false;
                         if saved_config.provider == crate::domain::SttProviderType::Backend
                             && !saved_config.keep_connection_alive
@@ -429,14 +429,13 @@ pub fn run() {
                             );
                         }
 
-                        // UX: keep-alive должен быть заметно полезным для частых hotkey-сессий.
-                        // Если TTL слишком маленький, пользователь снова увидит "Подключение..." уже через минуту-две.
-                        // Поэтому для backend провайдера держим минимум 5 минут.
-                        const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 300;
+                        // UX: keep-alive должен быть заметно полезным для частых hotkey-сессий,
+                        // но idle Deepgram streams не должны занимать concurrency slots надолго.
+                        const BACKEND_KEEPALIVE_TTL_SECS: u64 = 105;
                         if saved_config.provider == crate::domain::SttProviderType::Backend
-                            && saved_config.keep_alive_ttl_secs < MIN_BACKEND_KEEPALIVE_TTL_SECS
+                            && saved_config.keep_alive_ttl_secs != BACKEND_KEEPALIVE_TTL_SECS
                         {
-                            saved_config.keep_alive_ttl_secs = MIN_BACKEND_KEEPALIVE_TTL_SECS;
+                            saved_config.keep_alive_ttl_secs = BACKEND_KEEPALIVE_TTL_SECS;
                             config_migrated = true;
                             log::info!(
                                 "Migrated keep_alive_ttl_secs for backend provider to {}s",

@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 use crate::domain::{
     AudioCapture, AudioConfig, AudioLevelCallback, AudioSpectrumCallback,
     ConnectionQualityCallback, ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider,
-    SttProviderFactory, TranscriptionCallback,
+    SttProviderFactory, SttProviderType, TranscriptionCallback,
 };
 
 use crate::application::AudioSpectrumAnalyzer;
@@ -94,7 +94,7 @@ impl TranscriptionService {
             if let Some(provider) = provider_opt.as_ref() {
                 provider.supports_keep_alive()
                     && provider.is_connection_alive()
-                    && config.keep_connection_alive
+                    && (config.keep_connection_alive || config.provider == SttProviderType::Backend)
             } else {
                 false
             }
@@ -592,7 +592,8 @@ impl TranscriptionService {
         let should_keep_alive = {
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
-                provider.supports_keep_alive() && config.keep_connection_alive
+                provider.supports_keep_alive()
+                    && (config.keep_connection_alive || config.provider == SttProviderType::Backend)
             } else {
                 false
             }
@@ -789,6 +790,56 @@ impl TranscriptionService {
 
     /// Update STT configuration
     pub async fn update_config(&self, config: SttConfig) -> Result<()> {
+        let prev_config = self.config.read().await.clone();
+
+        let mut config = config;
+        if config.provider == SttProviderType::Backend {
+            config.keep_connection_alive = true;
+            const BACKEND_KEEPALIVE_TTL_SECS: u64 = 105;
+            if config.keep_alive_ttl_secs != BACKEND_KEEPALIVE_TTL_SECS {
+                config.keep_alive_ttl_secs = BACKEND_KEEPALIVE_TTL_SECS;
+            }
+        }
+
+        let config_requires_new_connection = prev_config.provider != config.provider
+            || prev_config.language != config.language
+            || prev_config.deepgram_keyterms != config.deepgram_keyterms;
+
+        if config_requires_new_connection {
+            let status = *self.status.read().await;
+            if status == RecordingStatus::Idle {
+                let has_keep_alive_connection = {
+                    let provider_opt = self.stt_provider.read().await;
+                    provider_opt
+                        .as_ref()
+                        .map(|p| p.supports_keep_alive() && p.is_connection_alive())
+                        .unwrap_or(false)
+                };
+
+                if has_keep_alive_connection {
+                    if let Some(timer) = self.inactivity_timer_task.write().await.take() {
+                        timer.abort();
+                        let _ = timer.await;
+                    }
+
+                    if let Some(mut provider) = self.stt_provider.write().await.take() {
+                        if let Err(e) = provider.stop_stream().await {
+                            log::warn!(
+                                "Failed to stop keep-alive stream on config change, aborting: {}",
+                                e
+                            );
+                            let _ = provider.abort().await;
+                        }
+                    }
+                }
+            } else {
+                log::info!(
+                    "STT config updated while status={:?}; keep-alive connection will not be reset until idle",
+                    status
+                );
+            }
+        }
+
         *self.config.write().await = config;
         Ok(())
     }
@@ -1007,6 +1058,28 @@ mod tests {
                 aborted: self.aborted.clone(),
             }))
         }
+    }
+
+    #[tokio::test]
+    async fn backend_config_forces_keep_alive_and_short_ttl() {
+        let provider_aborted = Arc::new(AtomicBool::new(false));
+        let service = TranscriptionService::new(
+            Box::new(BurstAudioCapture::new(Arc::new(AtomicBool::new(false)), 0)),
+            Arc::new(TestFactory {
+                aborted: provider_aborted,
+            }),
+        );
+
+        let mut config = SttConfig::default();
+        config.provider = SttProviderType::Backend;
+        config.keep_connection_alive = false;
+        config.keep_alive_ttl_secs = 300;
+
+        service.update_config(config).await.unwrap();
+
+        let stored = service.get_config().await;
+        assert!(stored.keep_connection_alive);
+        assert_eq!(stored.keep_alive_ttl_secs, 105);
     }
 
     #[tokio::test]
