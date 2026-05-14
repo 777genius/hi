@@ -1383,6 +1383,7 @@ fn is_virtual_or_vpn_adapter(label: &str) -> bool {
     .any(|needle| label.contains(needle))
 }
 
+#[cfg(target_os = "windows")]
 fn is_usable_companion_ipv4(ip: Ipv4Addr) -> bool {
     !(ip.is_loopback()
         || ip.is_unspecified()
