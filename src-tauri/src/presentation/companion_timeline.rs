@@ -77,6 +77,9 @@ pub async fn reset_session_state(state: &AppState) {
     state
         .companion_microphone_audio_level_bits
         .store(0.0f32.to_bits(), Ordering::Relaxed);
+    *state.companion_system_accumulated_text.write().await = String::new();
+    *state.companion_system_current_utterance_start.write().await = None;
+    *state.companion_system_last_finalized_text.write().await = String::new();
     *state.companion_last_action.write().await = None;
     *state.companion_microphone_partial_text.write().await = String::new();
     *state.companion_microphone_accumulated_text.write().await = String::new();
@@ -87,6 +90,16 @@ pub async fn reset_session_state(state: &AppState) {
     *state.companion_microphone_last_finalized_text.write().await = String::new();
     state.companion_request_generations.write().await.clear();
     state.companion_timeline.write().await.clear();
+}
+
+pub async fn clear_system_live_buffers(state: &AppState) {
+    *state.partial_transcription.write().await = None;
+    *state.companion_system_accumulated_text.write().await = String::new();
+    *state.companion_system_current_utterance_start.write().await = None;
+    *state.companion_system_last_finalized_text.write().await = String::new();
+    state
+        .companion_live_system_started_at_ms
+        .store(0, Ordering::Relaxed);
 }
 
 pub async fn clear_microphone_live_buffers(state: &AppState) {
@@ -162,11 +175,136 @@ async fn live_mic_text(state: &AppState) -> String {
         .await
         .clone();
     let partial = state.companion_microphone_partial_text.read().await.clone();
-    [accumulated, partial]
-        .into_iter()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+    merge_transcript_text(&accumulated, &partial)
+        .trim()
+        .to_string()
+}
+
+fn normalize_spaces(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_merge_word(word: &str) -> String {
+    word.to_lowercase()
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || *ch == '+' || *ch == '#')
+        .collect::<String>()
+}
+
+fn tokenize_for_merge(value: &str) -> (Vec<String>, Vec<String>) {
+    let mut raw = Vec::new();
+    let mut normalized = Vec::new();
+    for word in normalize_spaces(value).split_whitespace() {
+        let norm = normalize_merge_word(word);
+        if norm.is_empty() {
+            continue;
+        }
+        raw.push(word.to_string());
+        normalized.push(norm);
+    }
+    (raw, normalized)
+}
+
+fn normalized_merge_text(value: &str) -> String {
+    tokenize_for_merge(value).1.join(" ")
+}
+
+fn merge_overlap_words(a_norm: &[String], b_norm: &[String]) -> usize {
+    let max = a_norm.len().min(b_norm.len());
+    for count in (1..=max).rev() {
+        let mut matches = true;
+        for offset in 0..count {
+            if a_norm[a_norm.len() - count + offset] != b_norm[offset] {
+                matches = false;
+                break;
+            }
+        }
+        if matches {
+            return count;
+        }
+    }
+    0
+}
+
+fn merge_transcript_text(base: &str, next: &str) -> String {
+    let a = normalize_spaces(base);
+    let b = normalize_spaces(next);
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
+    if a == b {
+        return a;
+    }
+
+    let normalized_a = normalized_merge_text(&a);
+    let normalized_b = normalized_merge_text(&b);
+    if !normalized_a.is_empty() && !normalized_b.is_empty() {
+        if normalized_a == normalized_b {
+            return if a.len() >= b.len() { a } else { b };
+        }
+
+        let a_words = normalized_a.split_whitespace().count();
+        let b_words = normalized_b.split_whitespace().count();
+        let can_use_containment = (a_words >= 3 && b_words >= 3)
+            || (normalized_a.len() >= 18 && normalized_b.len() >= 18);
+        if can_use_containment {
+            if normalized_b.contains(&normalized_a) && normalized_b.len() >= normalized_a.len() {
+                return b;
+            }
+            if normalized_a.contains(&normalized_b) && normalized_a.len() >= normalized_b.len() {
+                return a;
+            }
+        }
+    }
+
+    let (_, a_norm) = tokenize_for_merge(&a);
+    let (b_raw, b_norm) = tokenize_for_merge(&b);
+    let overlap = merge_overlap_words(&a_norm, &b_norm);
+    let accept_overlap =
+        overlap >= 2 || (overlap == 1 && b_norm.first().map_or(false, |w| w.len() >= 6));
+    if accept_overlap {
+        let suffix = b_raw[overlap..].join(" ");
+        if suffix.is_empty() {
+            return a;
+        }
+        return normalize_spaces(&format!("{} {}", a, suffix));
+    }
+
+    normalize_spaces(&format!("{} {}", a, b))
+}
+
+fn append_transcript_text(base: &str, next: &str) -> String {
+    let a = normalize_spaces(base);
+    let b = normalize_spaces(next);
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
+
+    normalize_spaces(&format!("{} {}", a, b))
+}
+
+fn finalized_range_key(start: f64, duration: f64) -> String {
+    if !start.is_finite() || !duration.is_finite() || duration <= 0.0 {
+        return String::new();
+    }
+    format!("{:.3}|{:.3}", start, duration)
+}
+
+async fn live_system_text(state: &AppState) -> String {
+    let accumulated = state.companion_system_accumulated_text.read().await.clone();
+    let partial = state
+        .partial_transcription
+        .read()
+        .await
+        .clone()
+        .unwrap_or_default();
+    merge_transcript_text(&accumulated, &partial)
         .trim()
         .to_string()
 }
@@ -299,22 +437,12 @@ async fn is_mic_text_duplicate_of_system(state: &AppState, text: &str, now: i64)
     }
     drop(timeline);
 
-    let sys_live = state
-        .partial_transcription
-        .read()
-        .await
-        .clone()
-        .unwrap_or_default();
+    let sys_live = live_system_text(state).await;
     !sys_live.trim().is_empty() && is_near_duplicate_text(candidate, &sys_live)
 }
 
 pub async fn visible_system_partial_text(state: &AppState) -> Option<String> {
-    let text = state
-        .partial_transcription
-        .read()
-        .await
-        .clone()
-        .unwrap_or_default();
+    let text = live_system_text(state).await;
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
         return None;
@@ -323,6 +451,144 @@ pub async fn visible_system_partial_text(state: &AppState) -> Option<String> {
         return None;
     }
     Some(trimmed)
+}
+
+pub async fn has_system_live_text(state: &AppState) -> bool {
+    !live_system_text(state).await.trim().is_empty()
+}
+
+pub async fn on_system_partial(state: &AppState, payload: &PartialTranscriptionPayload) {
+    let new_text = payload.text.trim().to_string();
+    let now = now_ms();
+
+    if payload.is_segment_final {
+        if new_text.is_empty() {
+            return;
+        }
+        let segment_key = finalized_range_key(payload.start, payload.duration);
+        if !segment_key.is_empty()
+            && *state.companion_system_last_finalized_text.read().await == segment_key
+        {
+            return;
+        }
+
+        let mut accumulated = state.companion_system_accumulated_text.write().await;
+        *accumulated = append_transcript_text(accumulated.trim(), &new_text);
+        drop(accumulated);
+
+        *state.companion_system_last_finalized_text.write().await = segment_key;
+        *state.partial_transcription.write().await = None;
+        if state
+            .companion_live_system_started_at_ms
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            state
+                .companion_live_system_started_at_ms
+                .store(now.max(0) as u64, Ordering::Relaxed);
+        }
+        return;
+    }
+
+    let utterance_start = payload.start;
+    let current_start = *state.companion_system_current_utterance_start.read().await;
+
+    if current_start.is_none() || current_start == Some(utterance_start) {
+        *state.companion_system_current_utterance_start.write().await = Some(utterance_start);
+        *state.partial_transcription.write().await = if new_text.is_empty() {
+            None
+        } else {
+            Some(new_text.clone())
+        };
+        if !new_text.is_empty()
+            && state
+                .companion_live_system_started_at_ms
+                .load(Ordering::Relaxed)
+                == 0
+        {
+            state
+                .companion_live_system_started_at_ms
+                .store(now.max(0) as u64, Ordering::Relaxed);
+        }
+        return;
+    }
+
+    let previous_partial = state
+        .partial_transcription
+        .read()
+        .await
+        .clone()
+        .unwrap_or_default();
+    if !previous_partial.trim().is_empty() {
+        let mut accumulated = state.companion_system_accumulated_text.write().await;
+        *accumulated = merge_transcript_text(accumulated.trim(), &previous_partial);
+    }
+
+    *state.companion_system_current_utterance_start.write().await = Some(utterance_start);
+    *state.partial_transcription.write().await = if new_text.is_empty() {
+        None
+    } else {
+        Some(new_text.clone())
+    };
+    if !new_text.is_empty()
+        && state
+            .companion_live_system_started_at_ms
+            .load(Ordering::Relaxed)
+            == 0
+    {
+        state
+            .companion_live_system_started_at_ms
+            .store(now.max(0) as u64, Ordering::Relaxed);
+    }
+}
+
+pub async fn finalize_system_transcription(
+    state: &AppState,
+    session_id: u64,
+    transcription: &crate::domain::Transcription,
+) -> Option<crate::domain::Transcription> {
+    let accumulated = state.companion_system_accumulated_text.read().await.clone();
+    let partial = state
+        .partial_transcription
+        .read()
+        .await
+        .clone()
+        .unwrap_or_default();
+    let tail = if transcription.text.trim().is_empty() {
+        partial
+    } else {
+        transcription.text.clone()
+    };
+    let final_key = finalized_range_key(transcription.start, transcription.duration);
+    let last_segment_key = state
+        .companion_system_last_finalized_text
+        .read()
+        .await
+        .clone();
+    let is_duplicate_final_range = !transcription.text.trim().is_empty()
+        && !final_key.is_empty()
+        && final_key == last_segment_key
+        && !accumulated.trim().is_empty();
+    let utterance_text = if is_duplicate_final_range {
+        accumulated
+    } else if transcription.text.trim().is_empty() {
+        merge_transcript_text(&accumulated, &tail)
+    } else {
+        append_transcript_text(&accumulated, &tail)
+    }
+    .trim()
+    .to_string();
+
+    clear_system_live_buffers(state).await;
+
+    if utterance_text.is_empty() {
+        return None;
+    }
+
+    let mut canonical = transcription.clone();
+    canonical.text = utterance_text;
+    append_system_final(state, session_id, &canonical).await;
+    Some(canonical)
 }
 
 pub async fn visible_microphone_partial_text(state: &AppState) -> Option<String> {
@@ -664,7 +930,10 @@ pub async fn on_microphone_partial(state: &AppState, payload: &PartialTranscript
         if new_text.is_empty() {
             return;
         }
-        if *state.companion_microphone_last_finalized_text.read().await == new_text {
+        let segment_key = finalized_range_key(payload.start, payload.duration);
+        if !segment_key.is_empty()
+            && *state.companion_microphone_last_finalized_text.read().await == segment_key
+        {
             return;
         }
         if is_mic_text_duplicate_of_system(state, &new_text, now).await {
@@ -673,16 +942,10 @@ pub async fn on_microphone_partial(state: &AppState, payload: &PartialTranscript
         }
 
         let mut accumulated = state.companion_microphone_accumulated_text.write().await;
-        if accumulated.trim().is_empty() {
-            *accumulated = new_text.clone();
-        } else {
-            *accumulated = format!("{} {}", accumulated.trim(), new_text)
-                .trim()
-                .to_string();
-        }
+        *accumulated = append_transcript_text(accumulated.trim(), &new_text);
         drop(accumulated);
 
-        *state.companion_microphone_last_finalized_text.write().await = new_text;
+        *state.companion_microphone_last_finalized_text.write().await = segment_key;
         *state.companion_microphone_partial_text.write().await = String::new();
         return;
     }
@@ -814,13 +1077,30 @@ pub async fn on_microphone_final(state: &AppState, payload: &FinalTranscriptionP
         .await
         .clone();
     let partial = state.companion_microphone_partial_text.read().await.clone();
-    let utterance_text = [accumulated, payload.text.clone(), partial]
-        .into_iter()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string();
+    let tail = if payload.text.trim().is_empty() {
+        partial
+    } else {
+        payload.text.clone()
+    };
+    let final_key = finalized_range_key(payload.start, payload.duration);
+    let last_segment_key = state
+        .companion_microphone_last_finalized_text
+        .read()
+        .await
+        .clone();
+    let is_duplicate_final_range = !payload.text.trim().is_empty()
+        && !final_key.is_empty()
+        && final_key == last_segment_key
+        && !accumulated.trim().is_empty();
+    let utterance_text = if is_duplicate_final_range {
+        accumulated
+    } else if payload.text.trim().is_empty() {
+        merge_transcript_text(&accumulated, &tail)
+    } else {
+        append_transcript_text(&accumulated, &tail)
+    }
+    .trim()
+    .to_string();
 
     if !utterance_text.is_empty() {
         append_microphone_message(
@@ -970,6 +1250,115 @@ mod tests {
         assert_eq!(message.status, "final");
         assert_eq!(message.session_id, None);
         assert_eq!(message.text, "void main() {\n  print('hi');\n}");
+    }
+
+    #[tokio::test]
+    async fn system_final_appends_finalized_chunks_before_append() {
+        let state = AppState::default();
+
+        on_system_partial(
+            &state,
+            &PartialTranscriptionPayload {
+                session_id: 1,
+                source: "system".to_string(),
+                text: "my number is two two".to_string(),
+                timestamp: 100,
+                is_segment_final: true,
+                start: 0.0,
+                duration: 1.0,
+            },
+        )
+        .await;
+
+        let canonical =
+            finalize_system_transcription(&state, 1, &test_transcription("two two three", 200))
+                .await
+                .expect("canonical transcription");
+
+        assert_eq!(canonical.text, "my number is two two two two three");
+
+        let timeline = state.companion_timeline.read().await;
+        let stt = timeline
+            .iter()
+            .find(|message| message.kind == "stt")
+            .expect("stt message");
+
+        assert_eq!(stt.text, "my number is two two two two three");
+        assert!(visible_system_partial_text(&state).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn system_final_does_not_duplicate_same_finalized_range() {
+        let state = AppState::default();
+
+        on_system_partial(
+            &state,
+            &PartialTranscriptionPayload {
+                session_id: 1,
+                source: "system".to_string(),
+                text: "hello world".to_string(),
+                timestamp: 100,
+                is_segment_final: true,
+                start: 0.0,
+                duration: 1.5,
+            },
+        )
+        .await;
+
+        let final_transcription = test_transcription("hello world", 200).with_timing(0.0, 1.5);
+        let canonical = finalize_system_transcription(&state, 1, &final_transcription)
+            .await
+            .expect("canonical transcription");
+
+        assert_eq!(canonical.text, "hello world");
+    }
+
+    #[tokio::test]
+    async fn system_partial_keeps_repeated_short_segment_finals_when_segment_changes() {
+        let state = AppState::default();
+
+        for start in [0.0, 1.0] {
+            on_system_partial(
+                &state,
+                &PartialTranscriptionPayload {
+                    session_id: 1,
+                    source: "system".to_string(),
+                    text: "да".to_string(),
+                    timestamp: 100,
+                    is_segment_final: true,
+                    start,
+                    duration: 0.4,
+                },
+            )
+            .await;
+        }
+
+        let canonical = finalize_system_transcription(&state, 1, &test_transcription("", 200))
+            .await
+            .expect("canonical transcription");
+
+        assert_eq!(canonical.text, "да да");
+    }
+
+    #[tokio::test]
+    async fn microphone_live_merges_overlapping_partial_after_segment_final() {
+        let state = AppState::default();
+        *state.companion_microphone_accumulated_text.write().await =
+            "Ты слышишь, что я говорю?".to_string();
+        *state.companion_microphone_partial_text.write().await = "Ты слышишь, что".to_string();
+
+        assert_eq!(
+            visible_microphone_partial_text(&state).await.as_deref(),
+            Some("Ты слышишь, что я говорю?")
+        );
+    }
+
+    #[test]
+    fn finalized_chunk_append_preserves_repeated_boundary_words() {
+        assert_eq!(
+            append_transcript_text("my number is two two", "two two three"),
+            "my number is two two two two three"
+        );
     }
 
     #[tokio::test]

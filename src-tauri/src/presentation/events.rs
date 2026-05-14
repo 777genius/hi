@@ -13,6 +13,7 @@ pub const EVENT_MICROPHONE_TEST_LEVEL: &str = "microphone_test:level";
 pub const EVENT_SYSTEM_AUDIO_TEST_LEVEL: &str = "system_audio_test:level";
 pub const EVENT_MICROPHONE_AUDIO_LEVEL: &str = "microphone:level";
 pub const EVENT_MICROPHONE_MUTE_STATE: &str = "microphone:mute-state";
+pub const EVENT_COMPANION_SNAPSHOT: &str = "companion:snapshot";
 
 pub const EVENT_TRANSCRIPTION_ERROR: &str = "transcription:error";
 pub const EVENT_CONNECTION_QUALITY: &str = "connection:quality";
@@ -86,6 +87,10 @@ pub struct FinalTranscriptionPayload {
     pub language: Option<String>,
     /// Unix timestamp in milliseconds (epoch ms).
     pub timestamp: i64,
+    /// Start time of the finalized audio range in seconds.
+    pub start: f64,
+    /// Duration of the finalized audio range in seconds.
+    pub duration: f64,
 }
 
 impl FinalTranscriptionPayload {
@@ -97,6 +102,8 @@ impl FinalTranscriptionPayload {
             confidence: t.confidence,
             language: t.language,
             timestamp: t.timestamp,
+            start: t.start,
+            duration: t.duration,
         }
     }
 }

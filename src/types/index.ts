@@ -33,6 +33,8 @@ export interface FinalTranscriptionPayload {
   confidence?: number;
   language?: string;
   timestamp: number;
+  start?: number;
+  duration?: number;
 }
 
 export interface RecordingStatusPayload {

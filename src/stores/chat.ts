@@ -19,7 +19,7 @@ import {
   type MicrophoneMuteStatePayload,
   type PartialTranscriptionPayload,
 } from '../types';
-import { mergeTranscriptText } from '../utils/transcriptionText';
+import { appendTranscriptText, mergeTranscriptText } from '../utils/transcriptionText';
 import { useTranscriptionStore } from './transcription';
 
 type ChatMessageKind = 'stt' | 'haiku' | 'mic' | 'prompt';
@@ -245,7 +245,7 @@ export const useChatStore = defineStore('chat', () => {
     return mergeTranscriptText(accumulated, partial).trim();
   });
   const liveMicText = computed(() =>
-    [micAccumulatedText.value, micPartialText.value].filter(Boolean).join(' ').trim()
+    mergeTranscriptText(micAccumulatedText.value, micPartialText.value).trim()
   );
 
   watch(
@@ -969,6 +969,13 @@ export const useChatStore = defineStore('chat', () => {
     liveMicSinceMs.value = 0;
   }
 
+  function finalizedRangeKey(start?: number, duration?: number): string {
+    const s = Number(start);
+    const d = Number(duration);
+    if (!Number.isFinite(s) || !Number.isFinite(d) || d <= 0) return '';
+    return `${s.toFixed(3)}|${d.toFixed(3)}`;
+  }
+
   async function waitForUiPaint(): Promise<void> {
     await nextTick();
     if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
@@ -1125,18 +1132,17 @@ export const useChatStore = defineStore('chat', () => {
         }
 
         if (event.payload.is_segment_final) {
-          const newText = event.payload.text;
-          if (newText && newText === micLastFinalizedText.value) return;
+          const newText = event.payload.text.trim();
+          const segmentKey = finalizedRangeKey(event.payload.start, event.payload.duration);
+          if (newText && segmentKey && segmentKey === micLastFinalizedText.value) return;
           if (newText && isMicTextDuplicateOfSystem(newText, Date.now())) {
             clearLiveMicBuffers();
             return;
           }
 
-          micAccumulatedText.value = micAccumulatedText.value
-            ? `${micAccumulatedText.value} ${newText}`.trim()
-            : newText;
+          micAccumulatedText.value = appendTranscriptText(micAccumulatedText.value, newText);
 
-          micLastFinalizedText.value = newText;
+          micLastFinalizedText.value = segmentKey;
           micPartialText.value = '';
           return;
         }
@@ -1186,10 +1192,17 @@ export const useChatStore = defineStore('chat', () => {
           return;
         }
 
-        const utteranceText = [micAccumulatedText.value, event.payload.text || micPartialText.value]
-          .filter(Boolean)
-          .join(' ')
-          .trim();
+        const finalKey = finalizedRangeKey(event.payload.start, event.payload.duration);
+        const isDuplicateFinalRange =
+          !!event.payload.text &&
+          !!finalKey &&
+          finalKey === micLastFinalizedText.value &&
+          !!micAccumulatedText.value.trim();
+        const utteranceText = isDuplicateFinalRange
+          ? micAccumulatedText.value.trim()
+          : event.payload.text
+            ? appendTranscriptText(micAccumulatedText.value, event.payload.text).trim()
+            : mergeTranscriptText(micAccumulatedText.value, micPartialText.value).trim();
 
         if (utteranceText && !isMicTextDuplicateOfSystem(utteranceText, Date.now())) {
           micMessages.value.push({

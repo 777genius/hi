@@ -438,4 +438,199 @@ describe('chat store (selection + context)', () => {
     expect(hasMicFinal).toBe(true);
     expect(hasSttFinal).toBe(false);
   });
+
+  it('merges overlapping microphone live text and empty final fallback', async () => {
+    const store = useChatStore();
+    await store.initialize();
+
+    const micLevelCb = listenMock.mock.calls.find((c) => c[0] === 'microphone:level')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const sysLevelCb = listenMock.mock.calls.find((c) => c[0] === 'audio:level')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const partialCb = listenMock.mock.calls.find((c) => c[0] === 'transcription:partial')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const finalCb = listenMock.mock.calls.find((c) => c[0] === 'transcription:final')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+
+    sysLevelCb?.({ payload: { level: 0 } });
+    micLevelCb?.({ payload: { level: 0.6 } });
+
+    partialCb?.({
+      payload: {
+        session_id: 1,
+        source: 'microphone',
+        text: 'Ты слышишь, что я говорю?',
+        timestamp: Date.now(),
+        is_segment_final: true,
+        start: 0,
+        duration: 2.3,
+      },
+    });
+    partialCb?.({
+      payload: {
+        session_id: 1,
+        source: 'microphone',
+        text: 'Ты слышишь, что',
+        timestamp: Date.now() + 50,
+        is_segment_final: false,
+        start: 0,
+        duration: 1.1,
+      },
+    });
+
+    expect(store.messages.find((m) => m.id === 'mic:live')?.text).toBe('Ты слышишь, что я говорю?');
+
+    finalCb?.({
+      payload: {
+        session_id: 1,
+        source: 'microphone',
+        text: '',
+        timestamp: Date.now() + 100,
+      },
+    });
+
+    const micFinal = store.messages.find((m) => m.kind === 'mic' && m.status === 'final');
+    expect(micFinal?.text).toBe('Ты слышишь, что я говорю?');
+  });
+
+  it('appends finalized microphone chunks without removing repeated boundary words', async () => {
+    const store = useChatStore();
+    await store.initialize();
+
+    const micLevelCb = listenMock.mock.calls.find((c) => c[0] === 'microphone:level')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const sysLevelCb = listenMock.mock.calls.find((c) => c[0] === 'audio:level')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const partialCb = listenMock.mock.calls.find((c) => c[0] === 'transcription:partial')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const finalCb = listenMock.mock.calls.find((c) => c[0] === 'transcription:final')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+
+    sysLevelCb?.({ payload: { level: 0 } });
+    micLevelCb?.({ payload: { level: 0.6 } });
+
+    partialCb?.({
+      payload: {
+        session_id: 1,
+        source: 'microphone',
+        text: 'my number is two two',
+        timestamp: Date.now(),
+        is_segment_final: true,
+        start: 0,
+        duration: 3.26,
+      },
+    });
+    finalCb?.({
+      payload: {
+        session_id: 1,
+        source: 'microphone',
+        text: 'two two three',
+        timestamp: Date.now() + 100,
+      },
+    });
+
+    const micFinal = store.messages.find((m) => m.kind === 'mic' && m.status === 'final');
+    expect(micFinal?.text).toBe('my number is two two two two three');
+  });
+
+  it('does not duplicate microphone final when it repeats the last finalized range', async () => {
+    const store = useChatStore();
+    await store.initialize();
+
+    const micLevelCb = listenMock.mock.calls.find((c) => c[0] === 'microphone:level')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const sysLevelCb = listenMock.mock.calls.find((c) => c[0] === 'audio:level')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const partialCb = listenMock.mock.calls.find((c) => c[0] === 'transcription:partial')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const finalCb = listenMock.mock.calls.find((c) => c[0] === 'transcription:final')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+
+    sysLevelCb?.({ payload: { level: 0 } });
+    micLevelCb?.({ payload: { level: 0.6 } });
+
+    partialCb?.({
+      payload: {
+        session_id: 1,
+        source: 'microphone',
+        text: 'hello world',
+        timestamp: Date.now(),
+        is_segment_final: true,
+        start: 0,
+        duration: 1.5,
+      },
+    });
+    finalCb?.({
+      payload: {
+        session_id: 1,
+        source: 'microphone',
+        text: 'hello world',
+        timestamp: Date.now() + 100,
+        start: 0,
+        duration: 1.5,
+      },
+    });
+
+    const micFinal = store.messages.find((m) => m.kind === 'mic' && m.status === 'final');
+    expect(micFinal?.text).toBe('hello world');
+  });
+
+  it('keeps repeated short microphone segment finals', async () => {
+    const store = useChatStore();
+    await store.initialize();
+
+    const micLevelCb = listenMock.mock.calls.find((c) => c[0] === 'microphone:level')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const sysLevelCb = listenMock.mock.calls.find((c) => c[0] === 'audio:level')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const partialCb = listenMock.mock.calls.find((c) => c[0] === 'transcription:partial')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+    const finalCb = listenMock.mock.calls.find((c) => c[0] === 'transcription:final')?.[1] as
+      | ((e: any) => void)
+      | undefined;
+
+    sysLevelCb?.({ payload: { level: 0 } });
+    micLevelCb?.({ payload: { level: 0.6 } });
+
+    for (const start of [0, 1]) {
+      partialCb?.({
+        payload: {
+          session_id: 1,
+          source: 'microphone',
+          text: 'да',
+          timestamp: Date.now(),
+          is_segment_final: true,
+          start,
+          duration: 0.4,
+        },
+      });
+    }
+
+    finalCb?.({
+      payload: {
+        session_id: 1,
+        source: 'microphone',
+        text: '',
+        timestamp: Date.now() + 100,
+      },
+    });
+
+    const micFinal = store.messages.find((m) => m.kind === 'mic' && m.status === 'final');
+    expect(micFinal?.text).toBe('да да');
+  });
 });

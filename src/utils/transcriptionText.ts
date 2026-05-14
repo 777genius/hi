@@ -73,6 +73,10 @@ function joinWithSpace(a: string, b: string): string {
   return `${left} ${right}`.trim();
 }
 
+export function appendTranscriptText(base: string, next: string): string {
+  return joinWithSpace(base, next);
+}
+
 /**
  * Пытается аккуратно "склеить" транскрипции, избегая дублей.
  *
@@ -117,4 +121,3 @@ export function mergeTranscriptText(base: string, next: string): string {
 
   return joinWithSpace(a, b);
 }
-

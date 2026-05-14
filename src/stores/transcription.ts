@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { isTauriAvailable } from '../utils/tauri';
 import type { CompanionSnapshotData } from '@/windowing/stateSync';
 import { i18n } from '../i18n';
-import { mergeTranscriptText } from '../utils/transcriptionText';
+import { appendTranscriptText, mergeTranscriptText } from '../utils/transcriptionText';
 import { api } from '../features/auth/infrastructure/api/apiClient';
 import { useAuthStore } from '../features/auth/store/authStore';
 import { getTokenRepository } from '../features/auth/infrastructure/repositories/TokenRepository';
@@ -66,6 +66,60 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       .replace(/[.,!?;:"'`(){}\[\]<>\-–—_\\/|@#$%^&*+=~]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
+  }
+
+  function hasEnoughContextForVisibleOverlap(norm: string): boolean {
+    if (!norm) return false;
+    const words = norm.split(' ').filter(Boolean);
+    return words.length >= 3 || norm.length >= 18;
+  }
+
+  function combineVisibleTranscriptParts(parts: string[]): string {
+    let combined = '';
+
+    for (const part of parts) {
+      const next = String(part ?? '').trim();
+      if (!next) continue;
+      if (!combined) {
+        combined = next;
+        continue;
+      }
+
+      const combinedNorm = normalizeForDedup(combined);
+      const nextNorm = normalizeForDedup(next);
+      const canUseVisibleOverlap =
+        hasEnoughContextForVisibleOverlap(combinedNorm) ||
+        hasEnoughContextForVisibleOverlap(nextNorm);
+      if (!canUseVisibleOverlap) {
+        combined = `${combined} ${next}`.trim();
+        continue;
+      }
+
+      if (
+        hasEnoughContextForVisibleOverlap(nextNorm) &&
+        combinedNorm.includes(nextNorm)
+      ) {
+        continue;
+      }
+      if (
+        hasEnoughContextForVisibleOverlap(combinedNorm) &&
+        nextNorm.includes(combinedNorm)
+      ) {
+        combined = next;
+        continue;
+      }
+
+      combined = mergeTranscriptText(combined, next);
+    }
+
+    return combined.trim();
+  }
+
+  function finalizedRangeKey(start?: number, duration?: number): string {
+    const s = Number(start);
+    const d = Number(duration);
+    if (!Number.isFinite(s) || !Number.isFinite(d) || d <= 0) return '';
+    return `${s.toFixed(3)}|${d.toFixed(3)}`;
   }
 
   function editFinalUtterance(utteranceId: string, nextText: string): void {
@@ -130,8 +184,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
   const error = ref<string | null>(null);
   const errorType = ref<TranscriptionErrorPayload['error_type'] | null>(null);
+  const isDeviceNotFoundError = ref(false);
   const lastFinalizedSegmentKey = ref<string>(''); // для дедупликации повторных is_final сегментов
-  const lastFinalizedSegmentTextNorm = ref<string>(''); // помогает не "съедать" повторяющиеся короткие сегменты
   const connectionQuality = ref<ConnectionQuality>(ConnectionQuality.Good);
 
   // Retry логика подключения (когда запись ещё не стартанула и мы пытаемся подключиться к STT)
@@ -174,6 +228,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (status.value === RecordingStatus.Error) status.value = RecordingStatus.Idle;
     error.value = null;
     errorType.value = null;
+    isDeviceNotFoundError.value = false;
 
     // И сбрасываем контекст последней неудачной попытки подключения,
     // чтобы новые попытки стартовали "с чистого листа".
@@ -210,10 +265,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   );
 
-  // Флаг для защиты от дублирования auto-paste
-  // Хранит значение finalText на момент последней успешной вставки
-  const lastPastedFinalText = ref<string>('');
-
   // Отслеживание utterances по start времени
   const currentUtteranceStart = ref<number>(-1); // start время текущей utterance (-1 = нет активной)
 
@@ -224,7 +275,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // Таймеры для анимации
   let partialAnimationTimer: ReturnType<typeof setInterval> | null = null;
   let accumulatedAnimationTimer: ReturnType<typeof setInterval> | null = null;
-
   // Listeners
   type UnlistenFn = () => void;
   let unlistenPartial: UnlistenFn | null = null;
@@ -399,6 +449,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return errorType.value === 'limit_exceeded';
   });
 
+  const canOpenSettingsForDevice = computed(
+    () => status.value === RecordingStatus.Error && isDeviceNotFoundError.value
+  );
+
   // Флаг: RecordingPopover подхватит и откроет ProfilePopover с секцией лицензии
   const wantsLicenseActivation = ref(false);
 
@@ -438,13 +492,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const partial = visiblePartialText.value;
 
     // Собираем все части которые есть
-    const parts = [];
+    const parts: string[] = [];
     if (final) parts.push(final);
     if (accumulated) parts.push(accumulated);
     if (partial) parts.push(partial);
 
     if (parts.length > 0) {
-      return parts.join(' ');
+      return combineVisibleTranscriptParts(parts);
     }
 
     // Показываем placeholder только когда в режиме Idle
@@ -601,11 +655,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // Если сегмент финализирован (is_final=true, но не speech_final)
           if (event.payload.is_segment_final) {
             const newText = event.payload.text;
-            const newNorm = normalizeForDedup(newText);
-            const segKey = `${event.payload.start}|${event.payload.duration}|${newNorm}`;
+            const segKey = finalizedRangeKey(event.payload.start, event.payload.duration);
 
             // Проверка на точный дубликат (защита от повторной отправки того же сегмента)
-            if (segKey === lastFinalizedSegmentKey.value) {
+            if (segKey && segKey === lastFinalizedSegmentKey.value) {
               console.log('⚠️ Exact duplicate segment detected, skipping:', newText);
               return;
             }
@@ -615,23 +668,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             console.log('🔒 [BEFORE ACCUMULATE] accumulated:', oldAccumulated);
             console.log('🔒 [BEFORE ACCUMULATE] newText:', newText);
 
-            const isRepeatCandidate =
-              !!newNorm &&
-              newNorm === lastFinalizedSegmentTextNorm.value &&
-              (newNorm.length <= 12 || newNorm.split(' ').length <= 2);
-
-            if (isRepeatCandidate) {
-              // Важно: одинаковый короткий текст может быть реально произнесён дважды подряд (например "да да").
-              // При этом start/duration будут отличаться, а segKey — другой. Не "съедаем" повтор.
-              accumulatedText.value = accumulatedText.value
-                ? `${accumulatedText.value} ${String(newText ?? '').trim()}`.trim()
-                : String(newText ?? '').trim();
-            } else {
-              accumulatedText.value = mergeTranscriptText(accumulatedText.value, newText);
-            }
+            // По Deepgram docs каждый `is_final=true` chunk покрывает свой диапазон аудио.
+            // Поэтому finalized chunks конкатенируем, а overlap убираем только в live/interim отображении.
+            accumulatedText.value = appendTranscriptText(accumulatedText.value, newText);
 
             lastFinalizedSegmentKey.value = segKey;
-            lastFinalizedSegmentTextNorm.value = newNorm;
 
             console.log('🔒 [AFTER ACCUMULATE] accumulated:', accumulatedText.value);
             console.log('🔒 Utterance finalized and accumulated:', {
@@ -654,6 +695,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               clearInterval(partialAnimationTimer);
               partialAnimationTimer = null;
             }
+
           } else {
             // Промежуточный результат (is_final=false)
             // Deepgram отправляет НАКОПЛЕННЫЙ текст utterance, поэтому просто ЗАМЕНЯЕМ
@@ -741,14 +783,25 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             const ts = Number(event.payload.timestamp);
             const timestampMs = Number.isFinite(ts) && ts > 0 ? ts : Date.now();
 
-            const tail = event.payload.text || partialText.value;
-            const currentUtteranceText = mergeTranscriptText(accumulatedText.value, tail).trim();
+            const finalKey = finalizedRangeKey(event.payload.start, event.payload.duration);
+            const isDuplicateFinalRange =
+              !!event.payload.text &&
+              !!finalKey &&
+              finalKey === lastFinalizedSegmentKey.value &&
+              !!accumulatedText.value.trim();
+            const currentUtteranceText = isDuplicateFinalRange
+              ? accumulatedText.value.trim()
+              : event.payload.text
+                ? appendTranscriptText(accumulatedText.value, event.payload.text).trim()
+                : mergeTranscriptText(accumulatedText.value, partialText.value).trim();
 
             console.log('🔗 [SPEECH_FINAL] Combining utterance:', {
               accumulated: accumulatedText.value,
               partial: partialText.value,
               final_payload: event.payload.text,
-              used_source: event.payload.text ? 'FINAL payload' : 'accumulated+partial',
+              used_source: isDuplicateFinalRange
+                ? 'deduped finalized range'
+                : event.payload.text ? 'FINAL payload' : 'accumulated+partial',
               combined: currentUtteranceText
             });
 
@@ -764,7 +817,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             partialText.value = '';
             accumulatedText.value = '';
             lastFinalizedSegmentKey.value = '';
-            lastFinalizedSegmentTextNorm.value = '';
             currentUtteranceStart.value = -1;
 
             // Очищаем анимированные тексты
@@ -865,13 +917,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             accumulatedText.value = '';
             finalText.value = '';
             lastFinalizedSegmentKey.value = '';
-            lastFinalizedSegmentTextNorm.value = '';
             currentUtteranceStart.value = -1;
             error.value = null;
             errorType.value = null;
-
-            // Сбрасываем флаг auto-paste
-            lastPastedFinalText.value = '';
+            isDeviceNotFoundError.value = false;
 
             // Очищаем анимированный текст
             animatedPartialText.value = '';
@@ -888,12 +937,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             }
           }
 
-          // Если статус стал Idle - обрабатываем текущий текст при ЛЮБОЙ остановке
-          // (через hotkey ИЛИ через VAD timeout когда пользователь закончил говорить)
-          //
-          // Из логов [2025-11-03]: VAD timeout - это нормальный способ остановки после молчания >3 сек.
-          // Пользователь закончил говорить → текст должен скопироваться и вставиться автоматически.
-          // Проверка `stopped_via_hotkey` убрана, чтобы auto-paste работал в обоих случаях.
+          // Если статус стал Idle, фиксируем текущий видимый текст для диагностики при любой остановке
+          // (через hotkey или через VAD timeout, когда пользователь закончил говорить).
           if (nextStatus === RecordingStatus.Idle) {
             console.log('🔄 Запись остановлена - обрабатываем текущий текст');
 
@@ -1014,7 +1059,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
           // Лимит подписки исчерпан — показываем сразу, без retry
           const isLimitExceeded = event.payload.error_type === 'limit_exceeded'
-            || event.payload.error_details?.category === 'limit_exceeded';
+            || event.payload.error_details?.category === 'limit_exceeded'
+            || event.payload.error_details?.serverCode === 'LIMIT_EXCEEDED'
+            || event.payload.error_details?.serverCode === 'LICENSE_INACTIVE'
+            || isLicenseInactiveFromRaw(event.payload.error);
 
           if (isLimitExceeded) {
             // Уже обработали — не дёргаем API повторно
@@ -1036,6 +1084,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             } catch {}
             error.value = usageMessage;
             errorType.value = 'limit_exceeded';
+            isDeviceNotFoundError.value = false;
             status.value = RecordingStatus.Error;
             return;
           }
@@ -1065,6 +1114,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               rateLimitRetryCount = 0;
               error.value = mapErrorMessage('connection', event.payload.error, event.payload.error_details);
               errorType.value = 'connection';
+              isDeviceNotFoundError.value = false;
               status.value = RecordingStatus.Error;
             }
             return;
@@ -1085,7 +1135,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (isConnecting.value) {
             // Лимит подписки — нет смысла ретраить, прерываем цикл и показываем ошибку сразу
             const connectIsLimitExceeded = event.payload.error_type === 'limit_exceeded'
-              || event.payload.error_details?.category === 'limit_exceeded';
+              || event.payload.error_details?.category === 'limit_exceeded'
+              || event.payload.error_details?.serverCode === 'LIMIT_EXCEEDED'
+              || event.payload.error_details?.serverCode === 'LICENSE_INACTIVE'
+              || isLicenseInactiveFromRaw(event.payload.error);
             if (connectIsLimitExceeded) {
               // Уже обработали — не дёргаем API повторно
               if (errorType.value === 'limit_exceeded') return;
@@ -1106,6 +1159,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               } catch {}
               error.value = usageMessage;
               errorType.value = 'limit_exceeded';
+              isDeviceNotFoundError.value = false;
               status.value = RecordingStatus.Error;
               return;
             }
@@ -1138,6 +1192,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
           error.value = mapErrorMessage(normalizedType, event.payload.error, event.payload.error_details);
           errorType.value = normalizedType;
+          isDeviceNotFoundError.value =
+            normalizedType === 'configuration' && isDeviceNotFoundInRaw(event.payload.error);
           status.value = RecordingStatus.Error;
         }
       );
@@ -1168,8 +1224,55 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  function isDeviceNotFoundInRaw(raw: string): boolean {
+    const lower = String(raw ?? '').toLowerCase();
+    return (
+      lower.includes('device not found') ||
+      lower.includes("device '") ||
+      lower.includes('не удалось инициализировать устройство') ||
+      lower.includes('failed to create audio capture with device')
+    );
+  }
+
+  function isLicenseInactiveFromRaw(raw: string): boolean {
+    const lower = String(raw ?? '').toLowerCase();
+    return (
+      lower.includes('license_inactive') ||
+      lower.includes('license inactive') ||
+      lower.includes('лицензия не активна')
+    );
+  }
+
+  function isAudioDeviceUnavailableFromRaw(raw: string): boolean {
+    const lower = String(raw ?? '').toLowerCase();
+    return (
+      lower.includes('device is no longer available') ||
+      lower.includes('requested device is no longer available') ||
+      lower.includes('has been unplugged') ||
+      (lower.includes('failed to build audio stream') && (lower.includes('device') || lower.includes('stream'))) ||
+      (lower.includes('failed to start audio capture') && lower.includes('device'))
+    );
+  }
+
   function detectErrorTypeFromRaw(raw: string): TranscriptionErrorPayload['error_type'] | null {
     const lower = raw.toLowerCase();
+    if (isDeviceNotFoundInRaw(raw)) {
+      return 'configuration';
+    }
+    if (isAudioDeviceUnavailableFromRaw(raw)) {
+      return 'processing';
+    }
+    if (
+      lower.includes('(type: processing)') ||
+      lower.includes('type: processing') ||
+      lower.includes('failed to start audio capture') ||
+      lower.includes('capture error')
+    ) {
+      return 'processing';
+    }
+    if (isLicenseInactiveFromRaw(raw)) {
+      return 'limit_exceeded';
+    }
     if (
       lower.includes('authentication error') ||
       lower.includes('401') ||
@@ -1339,20 +1442,34 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       case 'limit_exceeded':
         return i18n.global.t('errors.limitExceeded');
       case 'processing':
-        return i18n.global.t('errors.processing');
+        return mapProcessingErrorMessage(raw);
       case 'authentication':
         // По идее мы сюда не попадаем (auth ошибка приводит к auto-logout),
         // но оставляем адекватный текст на всякий случай.
         return i18n.global.t('errors.authentication');
       case 'configuration':
+        if (isDeviceNotFoundInRaw(raw)) {
+          return i18n.global.t('errors.audioDeviceNotFound');
+        }
         return i18n.global.t('errors.generic', { error: raw });
       default:
         return i18n.global.t('errors.generic', { error: raw });
     }
   }
 
+  function mapProcessingErrorMessage(raw: string): string {
+    if (isAudioDeviceUnavailableFromRaw(raw)) {
+      return i18n.global.t('errors.audioDeviceUnavailable');
+    }
+    return i18n.global.t('errors.processing');
+  }
+
   function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function currentConnectFailureDetails(): TranscriptionErrorPayload['error_details'] | null {
+    return lastConnectFailureDetails.value ?? null;
   }
 
   function calcBackoffMs(attemptIndex: number): number {
@@ -1441,6 +1558,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       status.value = RecordingStatus.Idle;
       error.value = null;
       errorType.value = null;
+      isDeviceNotFoundError.value = false;
       isForcingLogout = false;
     }
   }
@@ -1485,16 +1603,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Очищаем весь предыдущий текст перед новой записью
     error.value = null;
     errorType.value = null;
+    isDeviceNotFoundError.value = false;
     partialText.value = '';
     accumulatedText.value = '';
     finalText.value = '';
     finalUtterances.value = [];
     lastFinalizedSegmentKey.value = '';
-    lastFinalizedSegmentTextNorm.value = '';
     currentUtteranceStart.value = -1;
-
-    // Сбрасываем флаг auto-paste
-    lastPastedFinalText.value = '';
 
     // Очищаем анимированный текст
     animatedPartialText.value = '';
@@ -1523,6 +1638,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // На каждый запуск сбрасываем маркеры исхода подключения
     lastConnectFailure.value = null;
     lastConnectFailureRaw.value = '';
+    lastConnectFailureDetails.value = null;
 
     console.log('[ConnectRetry] Starting recording (single attempt)');
     await invoke<string>('start_recording');
@@ -1545,6 +1661,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         connectAttempt.value = attempt;
         lastConnectFailure.value = null;
         lastConnectFailureRaw.value = '';
+        lastConnectFailureDetails.value = null;
 
         try {
           // Перед первой попыткой гарантируем, что access token свежий.
@@ -1581,13 +1698,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
           // Если ошибка пришла не через events, пробуем классифицировать по raw строке
           const raw = lastConnectFailureRaw.value || formatUnknownError(err);
-          const details = lastConnectFailureDetails.value;
+          const details = currentConnectFailureDetails();
           const detected = failureType || detectErrorTypeFromRaw(raw) || 'connection';
 
           const httpStatus = details?.httpStatus ?? extractHttpStatusFromRaw(raw);
           const serverCode = details?.serverCode;
           const isLimitExceeded =
-            details?.category === 'limit_exceeded' || serverCode === 'LIMIT_EXCEEDED';
+            details?.category === 'limit_exceeded' ||
+            serverCode === 'LIMIT_EXCEEDED' ||
+            serverCode === 'LICENSE_INACTIVE' ||
+            isLicenseInactiveFromRaw(raw);
 
           // Auth ошибка: обычно это протухший access token.
           // Пробуем один раз обновить сессию и продолжить retry-цикл.
@@ -1619,6 +1739,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (isLimitExceeded) {
             errorType.value = 'limit_exceeded';
             error.value = mapErrorMessage('limit_exceeded', raw, details);
+            isDeviceNotFoundError.value = false;
             status.value = RecordingStatus.Error;
             return;
           }
@@ -1644,7 +1765,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (!isRetriable || isLastAttempt) {
             errorType.value = detected;
             error.value = mapErrorMessage(detected, raw, details);
-      status.value = RecordingStatus.Error;
+            isDeviceNotFoundError.value = detected === 'configuration' && isDeviceNotFoundInRaw(raw);
+            status.value = RecordingStatus.Error;
             return;
           }
 
@@ -1673,6 +1795,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       const fallbackRaw = lastConnectFailureRaw.value || 'Unknown connection error';
       errorType.value = fallbackType;
       error.value = mapErrorMessage(fallbackType, fallbackRaw, lastConnectFailureDetails.value);
+      isDeviceNotFoundError.value =
+        fallbackType === 'configuration' && isDeviceNotFoundInRaw(fallbackRaw);
       status.value = RecordingStatus.Error;
     } finally {
       isConnecting.value = false;
@@ -1790,7 +1914,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     animatedAccumulatedText.value = '';
     currentUtteranceStart.value = -1;
     lastFinalizedSegmentKey.value = '';
-    lastFinalizedSegmentTextNorm.value = '';
 
     finalUtterances.value = snapshot.timeline
       .filter((message) => message.kind === 'stt' && message.status === 'final' && !message.deleted)
@@ -1825,6 +1948,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     hasConnectionIssue,
     canReconnect,
     canActivateLicense,
+    canOpenSettingsForDevice,
     wantsLicenseActivation,
     isConnecting,
     connectAttempt,

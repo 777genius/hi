@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeTranscriptText } from './transcriptionText';
+import { appendTranscriptText, mergeTranscriptText } from './transcriptionText';
 
 describe('mergeTranscriptText', () => {
   it('returns next when base is empty', () => {
@@ -35,5 +35,16 @@ describe('mergeTranscriptText', () => {
     const next = 'думаю что да';
     expect(mergeTranscriptText(base, next)).toBe('я думаю что да');
   });
-});
 
+  it('appends finalized chunks without overlap removal', () => {
+    expect(appendTranscriptText('my number is two two', 'two two three')).toBe(
+      'my number is two two two two three'
+    );
+  });
+
+  it('still merges overlapping live interim text', () => {
+    expect(mergeTranscriptText('Ты слышишь, что я говорю?', 'Ты слышишь, что')).toBe(
+      'Ты слышишь, что я говорю?'
+    );
+  });
+});
