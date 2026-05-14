@@ -33,8 +33,8 @@ const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen";
 // Поднимаем порог, чтобы "конец фразы" определялся по более заметной паузе.
 const DEEPGRAM_ENDPOINTING_MS: u32 = 1000;
 
-/// Парсит строку keyterms (через запятую) и возвращает URL query-суффикс вида "&keywords=term1&keywords=term2"
-fn build_keywords_query(keyterms: &Option<String>) -> String {
+/// Парсит строку keyterms (через запятую) и возвращает URL query-суффикс вида "&keyterm=term1&keyterm=term2"
+fn build_keyterms_query(keyterms: &Option<String>) -> String {
     let Some(raw) = keyterms.as_deref() else {
         return String::new();
     };
@@ -43,9 +43,20 @@ fn build_keywords_query(keyterms: &Option<String>) -> String {
         .filter(|t| !t.is_empty())
         .map(|term| {
             let encoded = urlencoding::encode(term);
-            format!("&keywords={encoded}")
+            format!("&keyterm={encoded}")
         })
         .collect()
+}
+
+fn build_deepgram_listen_url(model: &str, language: &str, keyterms: &Option<String>) -> String {
+    format!(
+        "{}?encoding=linear16&sample_rate=16000&channels=1&model={}&language={}&punctuate=true&interim_results=true&endpointing={}{}",
+        DEEPGRAM_WS_URL,
+        model,
+        language,
+        DEEPGRAM_ENDPOINTING_MS,
+        build_keyterms_query(keyterms)
+    )
 }
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -192,19 +203,13 @@ impl SttProvider for DeepgramProvider {
         );
 
         // Собираем URL с параметрами (добавляем channels=1 для mono)
-        let keywords_query = build_keywords_query(
+        let url = build_deepgram_listen_url(
+            &model,
+            &language,
             &self
                 .config
                 .as_ref()
                 .and_then(|c| c.deepgram_keyterms.clone()),
-        );
-        let url = format!(
-            "{}?encoding=linear16&sample_rate=16000&channels=1&model={}&language={}&punctuate=true&interim_results=true&endpointing={}{}",
-            DEEPGRAM_WS_URL,
-            model,
-            language,
-            DEEPGRAM_ENDPOINTING_MS,
-            keywords_query
         );
 
         log::debug!("Connecting to Deepgram: {}", url);
@@ -1083,14 +1088,12 @@ impl DeepgramProvider {
                 tokio::time::sleep(Duration::from_millis(delays_ms[attempt - 2])).await;
             }
 
-            // Пытаемся создать новое WebSocket соединение
-            let keywords_query = build_keywords_query(&config.deepgram_keyterms);
-            let url = format!(
-                "{}?encoding=linear16&sample_rate=16000&channels=1&language={}&model={}{}",
-                DEEPGRAM_WS_URL,
-                config.language,
+            // Пытаемся создать новое WebSocket соединение с теми же Deepgram params,
+            // что и при initial connect.
+            let url = build_deepgram_listen_url(
                 config.model.as_deref().unwrap_or("nova-3"),
-                keywords_query
+                &config.language,
+                &config.deepgram_keyterms,
             );
 
             let request = match Request::builder()
@@ -1423,7 +1426,10 @@ impl DeepgramProvider {
 
                                 // Отправляем как final когда речь завершена или пришёл flush от Finalize.
                                 if is_final && (speech_final || from_finalize) {
-                                    log::info!("✅ Final transcript: '{}' → вызываем on_final callback", text);
+                                    log::info!(
+                                        "✅ Final transcript: '{}' → вызываем on_final callback",
+                                        text
+                                    );
                                     on_final(transcription);
                                 } else {
                                     // Все остальные (промежуточные и финализированные сегменты) - как partial
@@ -1495,6 +1501,19 @@ mod tests {
     fn test_provider_default() {
         let provider = DeepgramProvider::default();
         assert!(!provider.is_streaming);
+    }
+
+    #[test]
+    fn test_build_deepgram_url_keeps_streaming_params_on_reconnect() {
+        let keyterms = Some("Codex, Deepgram Nova".to_string());
+        let url = build_deepgram_listen_url("nova-3", "ru", &keyterms);
+
+        assert!(url.contains("interim_results=true"));
+        assert!(url.contains("punctuate=true"));
+        assert!(url.contains("endpointing=1000"));
+        assert!(url.contains("keyterm=Codex"));
+        assert!(url.contains("keyterm=Deepgram%20Nova"));
+        assert!(!url.contains("keywords="));
     }
 
     #[test]
