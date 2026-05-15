@@ -1,6 +1,10 @@
 import type { ChatMessage } from '@/stores/chat';
-
-const DEFAULT_MAX_CONTEXT_CHARS = 48_000;
+import {
+  DEFAULT_MAX_CONTEXT_CHARS,
+  trimContextParts,
+  trimContextText,
+  type ContextRetentionPart,
+} from './contextRetention';
 
 type CodeExplainContextMessage = Pick<ChatMessage, 'id' | 'kind' | 'status' | 'text' | 'deleted'>;
 
@@ -24,15 +28,7 @@ export function trimCodeExplainContextText(
   text: string,
   maxChars = DEFAULT_MAX_CONTEXT_CHARS,
 ): string {
-  const trimmed = String(text ?? '').trim();
-  if (trimmed.length <= maxChars) return trimmed;
-
-  const tail = trimmed.slice(trimmed.length - maxChars);
-  const firstLineBreak = tail.indexOf('\n');
-  if (firstLineBreak >= 0 && firstLineBreak < tail.length - 1) {
-    return tail.slice(firstLineBreak + 1).trim();
-  }
-  return tail.trim();
+  return trimContextText(text, maxChars);
 }
 
 export function buildCodeExplainContextUpToMessageId(
@@ -40,7 +36,7 @@ export function buildCodeExplainContextUpToMessageId(
   messageId: string,
   maxChars = DEFAULT_MAX_CONTEXT_CHARS,
 ): string {
-  const parts: string[] = [];
+  const parts: ContextRetentionPart[] = [];
 
   for (const message of messages) {
     if (!isUsableCodeExplainContextMessage(message)) {
@@ -49,9 +45,9 @@ export function buildCodeExplainContextUpToMessageId(
     }
 
     const line = formatCodeExplainContextLine(message);
-    if (line) parts.push(line);
+    if (line) parts.push({ kind: message.kind, line });
     if (message.id === messageId) break;
   }
 
-  return trimCodeExplainContextText(parts.join('\n'), maxChars);
+  return trimContextParts(parts, maxChars);
 }

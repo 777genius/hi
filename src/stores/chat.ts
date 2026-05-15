@@ -20,6 +20,7 @@ import {
   type PartialTranscriptionPayload,
 } from '../types';
 import { appendTranscriptText, mergeTranscriptText } from '../utils/transcriptionText';
+import { trimContextParts, type ContextRetentionPart } from '@/presentation/contextRetention';
 import { useTranscriptionStore } from './transcription';
 
 type ChatMessageKind = 'stt' | 'haiku' | 'mic' | 'prompt';
@@ -50,7 +51,6 @@ export interface ChatMessage {
   attachments?: ChatAttachment[];
 }
 
-const MAX_CONTEXT_CHARS = 48_000;
 const MIN_HOVER_TRIGGER_MS = 800;
 const MIC_DOMINANCE_HOLD_MS = 1200;
 const LIVE_STT_MESSAGE_ID = 'stt:live';
@@ -620,20 +620,8 @@ export const useChatStore = defineStore('chat', () => {
     return contextClearedAtMs.value > 0 && msg.createdAtMs <= contextClearedAtMs.value;
   }
 
-  function trimContextText(text: string): string {
-    const t = String(text ?? '').trim();
-    if (t.length <= MAX_CONTEXT_CHARS) return t;
-
-    const tail = t.slice(t.length - MAX_CONTEXT_CHARS);
-    const firstLineBreak = tail.indexOf('\n');
-    if (firstLineBreak >= 0 && firstLineBreak < tail.length - 1) {
-      return tail.slice(firstLineBreak + 1).trim();
-    }
-    return tail.trim();
-  }
-
   function buildHaikuContextText(): string {
-    const parts: string[] = [];
+    const parts: ContextRetentionPart[] = [];
 
     function formatLine(msg: ChatMessage): string {
       const t = String(msg.text ?? '').trim();
@@ -652,10 +640,10 @@ export const useChatStore = defineStore('chat', () => {
         if (msg.deleted) continue;
         if (msg.kind === 'haiku' && msg.status !== 'final') continue;
         const line = formatLine(msg);
-        if (line) parts.push(line);
+        if (line) parts.push({ kind: msg.kind, line });
       }
 
-      return trimContextText(parts.join('\n'));
+      return trimContextParts(parts);
     }
 
     // Если ничего не выделено — отправляем весь контекст (в порядке чата).
@@ -664,14 +652,14 @@ export const useChatStore = defineStore('chat', () => {
       if (msg.kind === 'haiku' && msg.status !== 'final') continue;
       if (isMessageOutOfContext(msg)) continue;
       const line = formatLine(msg);
-      if (line) parts.push(line);
+      if (line) parts.push({ kind: msg.kind, line });
     }
 
-    return trimContextText(parts.join('\n'));
+    return trimContextParts(parts);
   }
 
   function buildHaikuContextTextIgnoringSelection(): string {
-    const parts: string[] = [];
+    const parts: ContextRetentionPart[] = [];
 
     function formatLine(msg: ChatMessage): string {
       const t = String(msg.text ?? '').trim();
@@ -688,14 +676,14 @@ export const useChatStore = defineStore('chat', () => {
       if (msg.kind === 'haiku' && msg.status !== 'final') continue;
       if (isMessageOutOfContext(msg)) continue;
       const line = formatLine(msg);
-      if (line) parts.push(line);
+      if (line) parts.push({ kind: msg.kind, line });
     }
 
-    return trimContextText(parts.join('\n'));
+    return trimContextParts(parts);
   }
 
   function buildHaikuContextTextFullHistory(): string {
-    const parts: string[] = [];
+    const parts: ContextRetentionPart[] = [];
 
     function formatLine(msg: ChatMessage): string {
       const t = String(msg.text ?? '').trim();
@@ -711,10 +699,10 @@ export const useChatStore = defineStore('chat', () => {
       if (msg.deleted) continue;
       if (msg.kind === 'haiku' && msg.status !== 'final') continue;
       const line = formatLine(msg);
-      if (line) parts.push(line);
+      if (line) parts.push({ kind: msg.kind, line });
     }
 
-    return trimContextText(parts.join('\n'));
+    return trimContextParts(parts);
   }
 
   function resolveInsertAfterId(): string | undefined {

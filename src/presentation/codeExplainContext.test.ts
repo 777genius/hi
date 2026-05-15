@@ -67,7 +67,7 @@ describe('buildCodeExplainContextUpToMessageId', () => {
         kind: 'stt',
         text: `CODE-EXPLAIN-EARLY-001\nfunction totals(orders) {}\n${'x'.repeat(2_000)}`,
       }),
-      ...Array.from({ length: 120 }, (_, index) =>
+      ...Array.from({ length: 320 }, (_, index) =>
         message({
           id: `stt:${index}`,
           kind: 'stt',
@@ -76,10 +76,11 @@ describe('buildCodeExplainContextUpToMessageId', () => {
       ),
     ];
 
-    const context = buildCodeExplainContextUpToMessageId(messages, 'stt:119');
+    const context = buildCodeExplainContextUpToMessageId(messages, 'stt:319');
 
     expect(context.length).toBeLessThanOrEqual(48_000);
     expect(context).toContain('CODE-EXPLAIN-EARLY-001');
-    expect(context).toContain('FOLLOW-UP-119');
+    expect(context).toContain('FOLLOW-UP-319');
+    expect(context).not.toContain('FOLLOW-UP-000');
   });
 });

@@ -11,6 +11,14 @@ const CROSS_STREAM_DEDUP_RECENT_LIMIT: usize = 6;
 const MIC_DOMINANCE_HOLD_MS: u64 = 1_200;
 const MIC_SYSTEM_LOOKBACK_MS: i64 = 20_000;
 const MAX_CONTEXT_CHARS: usize = 48_000;
+const RECENT_CONTEXT_CHARS: usize = 32_000;
+const MAX_PRUNED_IMPORTANT_OLD_MESSAGES: usize = 40;
+
+#[derive(Debug, Clone)]
+struct ContextPart {
+    kind: String,
+    line: String,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct CompanionPromptDraft {
@@ -43,12 +51,28 @@ async fn max_items(state: &AppState) -> usize {
 }
 
 async fn prune_timeline(state: &AppState) {
-    let max_items = max_items(state).await;
+    let max_items = max_items(state).await.max(1);
     let mut timeline = state.companion_timeline.write().await;
     let len = timeline.len();
-    if len > max_items {
-        timeline.drain(0..len - max_items);
+    if len <= max_items {
+        return;
     }
+
+    let important_old_limit = MAX_PRUNED_IMPORTANT_OLD_MESSAGES.min(max_items / 5).max(1);
+    let recent_reserve = max_items.saturating_sub(important_old_limit).max(1);
+    let old_candidate_end = len.saturating_sub(recent_reserve);
+    let protected_old_indexes =
+        select_pruned_important_old_indexes(&timeline[..old_candidate_end], important_old_limit);
+    let tail_keep_count = max_items.saturating_sub(protected_old_indexes.len());
+    let recent_start = len.saturating_sub(tail_keep_count);
+
+    let kept = timeline
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| *idx >= recent_start || protected_old_indexes.contains(idx))
+        .map(|(_, message)| message.clone())
+        .collect::<Vec<_>>();
+    *timeline = kept;
 }
 
 pub async fn reset_session_state(state: &AppState) {
@@ -1184,7 +1208,7 @@ pub async fn build_context_text(state: &AppState, include_full_history: bool) ->
     let live_system = visible_system_partial_text(state).await;
     let live_mic = visible_microphone_partial_text(state).await;
 
-    let mut parts: Vec<String> = Vec::new();
+    let mut parts: Vec<ContextPart> = Vec::new();
     for message in state.companion_timeline.read().await.iter() {
         if message.deleted {
             continue;
@@ -1197,18 +1221,27 @@ pub async fn build_context_text(state: &AppState, include_full_history: bool) ->
         }
         let line = format_context_line(message.kind.as_str(), &message.text);
         if !line.is_empty() {
-            parts.push(line);
+            parts.push(ContextPart {
+                kind: message.kind.clone(),
+                line,
+            });
         }
     }
 
     if let Some(text) = live_system {
-        parts.push(format!("ОС: {}", text));
+        parts.push(ContextPart {
+            kind: "stt".to_string(),
+            line: format!("ОС: {}", text),
+        });
     }
     if let Some(text) = live_mic {
-        parts.push(format!("МИКРОФОН: {}", text));
+        parts.push(ContextPart {
+            kind: "mic".to_string(),
+            line: format!("МИКРОФОН: {}", text),
+        });
     }
 
-    trim_context_text(&parts.join("\n"))
+    trim_context_parts(&parts)
 }
 
 fn format_context_line(kind: &str, text: &str) -> String {
@@ -1226,15 +1259,19 @@ fn format_context_line(kind: &str, text: &str) -> String {
 }
 
 fn trim_context_text(text: &str) -> String {
+    trim_context_text_to(text, MAX_CONTEXT_CHARS)
+}
+
+fn trim_context_text_to(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
-    if trimmed.chars().count() <= MAX_CONTEXT_CHARS {
+    if trimmed.chars().count() <= max_chars {
         return trimmed.to_string();
     }
 
     let tail = trimmed
         .chars()
         .rev()
-        .take(MAX_CONTEXT_CHARS)
+        .take(max_chars)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
@@ -1247,6 +1284,298 @@ fn trim_context_text(text: &str) -> String {
     }
 
     tail.trim().to_string()
+}
+
+fn trim_context_line_head_to(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+
+    trimmed
+        .chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn context_len(parts: &[ContextPart]) -> usize {
+    parts
+        .iter()
+        .enumerate()
+        .map(|(idx, part)| part.line.chars().count() + usize::from(idx > 0))
+        .sum()
+}
+
+fn can_append(parts: &[ContextPart], line: &str, max_chars: usize) -> bool {
+    context_len(parts) + line.chars().count() + usize::from(!parts.is_empty()) <= max_chars
+}
+
+fn indexed_context_len(parts: &[(usize, ContextPart)]) -> usize {
+    parts
+        .iter()
+        .enumerate()
+        .map(|(idx, (_, part))| part.line.chars().count() + usize::from(idx > 0))
+        .sum()
+}
+
+fn can_append_indexed(parts: &[(usize, ContextPart)], line: &str, max_chars: usize) -> bool {
+    indexed_context_len(parts) + line.chars().count() + usize::from(!parts.is_empty()) <= max_chars
+}
+
+fn add_anchor_candidate(
+    anchors: &mut Vec<(usize, ContextPart)>,
+    selected_indexes: &mut Vec<usize>,
+    index: usize,
+    part: &ContextPart,
+    anchor_budget: usize,
+) {
+    if selected_indexes.contains(&index) {
+        return;
+    }
+
+    if can_append_indexed(anchors, &part.line, anchor_budget) {
+        anchors.push((index, part.clone()));
+        selected_indexes.push(index);
+        return;
+    }
+
+    let used = indexed_context_len(anchors);
+    let separator = usize::from(!anchors.is_empty());
+    let Some(remaining) = anchor_budget.checked_sub(used + separator) else {
+        return;
+    };
+    if remaining < 400 {
+        return;
+    }
+
+    let line = trim_context_line_head_to(&part.line, remaining);
+    if line.is_empty() {
+        return;
+    }
+
+    anchors.push((
+        index,
+        ContextPart {
+            kind: part.kind.clone(),
+            line,
+        },
+    ));
+    selected_indexes.push(index);
+}
+
+fn is_important_older_context_part(part: &ContextPart) -> bool {
+    if part.kind == "prompt" {
+        return true;
+    }
+    if part.kind == "haiku" {
+        return false;
+    }
+
+    let line = part.line.as_str();
+    let lower = line.to_lowercase();
+    let markers = [
+        "```",
+        "=>",
+        "function ",
+        "class ",
+        "interface ",
+        "struct ",
+        "impl ",
+        "const ",
+        "let ",
+        "var ",
+        "def ",
+        "func ",
+        "select ",
+        " from ",
+        " where ",
+        " join ",
+        "useeffect",
+        "error",
+        "exception",
+        "stack",
+        "trace",
+        "deadlock",
+        "race",
+        "sql",
+        "react",
+        "python",
+        "typescript",
+        "javascript",
+        "rust",
+        "код",
+        "почему",
+        "как ",
+        "что ",
+        "задач",
+        "ошиб",
+        "индекс",
+    ];
+
+    line.chars().count() > 800
+        || line.contains('?')
+        || line.contains('{')
+        || line.contains(';')
+        || markers.iter().any(|marker| lower.contains(marker))
+}
+
+fn is_important_pruned_old_message(message: &CompanionMessage) -> bool {
+    if message.deleted {
+        return false;
+    }
+    if message.kind == "haiku" {
+        return false;
+    }
+
+    let line = format_context_line(message.kind.as_str(), &message.text);
+    is_important_older_context_part(&ContextPart {
+        kind: message.kind.clone(),
+        line,
+    })
+}
+
+fn select_pruned_important_old_indexes(messages: &[CompanionMessage], limit: usize) -> Vec<usize> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let candidates = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| is_important_pruned_old_message(message))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut selected = Vec::new();
+    let oldest = candidates[0];
+    selected.push(oldest);
+
+    for index in candidates.iter().rev() {
+        if selected.len() >= limit {
+            break;
+        }
+        if selected.contains(index) {
+            continue;
+        }
+        selected.push(*index);
+    }
+
+    selected.sort_unstable();
+    selected
+}
+
+fn trim_context_parts(raw_parts: &[ContextPart]) -> String {
+    let parts = raw_parts
+        .iter()
+        .filter_map(|part| {
+            let line = part.line.trim();
+            if line.is_empty() {
+                None
+            } else {
+                Some(ContextPart {
+                    kind: part.kind.clone(),
+                    line: line.to_string(),
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        return String::new();
+    }
+
+    if context_len(&parts) <= MAX_CONTEXT_CHARS {
+        return parts
+            .iter()
+            .map(|part| part.line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    let recent_limit = RECENT_CONTEXT_CHARS.min(MAX_CONTEXT_CHARS);
+    let mut recent: Vec<ContextPart> = Vec::new();
+    let mut recent_start = parts.len();
+
+    for idx in (0..parts.len()).rev() {
+        let part = &parts[idx];
+        if recent.is_empty() && part.line.chars().count() > recent_limit {
+            recent.insert(
+                0,
+                ContextPart {
+                    kind: part.kind.clone(),
+                    line: trim_context_text_to(&part.line, recent_limit),
+                },
+            );
+            recent_start = idx;
+            break;
+        }
+        if !can_append(&recent, &part.line, recent_limit) {
+            break;
+        }
+        recent.insert(0, part.clone());
+        recent_start = idx;
+    }
+
+    let anchor_budget = MAX_CONTEXT_CHARS
+        .saturating_sub(context_len(&recent))
+        .saturating_sub(usize::from(!recent.is_empty()));
+    let anchor_candidates = parts[..recent_start]
+        .iter()
+        .enumerate()
+        .filter(|(_, part)| is_important_older_context_part(part))
+        .collect::<Vec<_>>();
+    let mut anchors: Vec<(usize, ContextPart)> = Vec::new();
+    let mut selected_anchor_indexes: Vec<usize> = Vec::new();
+
+    if let Some((index, part)) = anchor_candidates.first() {
+        add_anchor_candidate(
+            &mut anchors,
+            &mut selected_anchor_indexes,
+            *index,
+            part,
+            anchor_budget,
+        );
+    }
+
+    for (index, part) in anchor_candidates.iter().rev() {
+        add_anchor_candidate(
+            &mut anchors,
+            &mut selected_anchor_indexes,
+            *index,
+            part,
+            anchor_budget,
+        );
+    }
+
+    anchors.sort_by_key(|(index, _)| *index);
+    let mut selected = anchors
+        .into_iter()
+        .map(|(_, part)| part)
+        .collect::<Vec<_>>();
+    selected.extend(recent);
+
+    if selected.is_empty() {
+        return trim_context_text(
+            &parts
+                .iter()
+                .map(|part| part.line.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    trim_context_text(
+        &selected
+            .iter()
+            .map(|part| part.line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 pub async fn resolve_insert_after_id(state: &AppState) -> Option<String> {
@@ -1631,7 +1960,7 @@ mod tests {
         .await
         .expect("early focus-copy message");
 
-        for idx in 0..120 {
+        for idx in 0..320 {
             append_system_final(
                 &state,
                 1,
@@ -1647,7 +1976,96 @@ mod tests {
 
         assert!(context.chars().count() <= MAX_CONTEXT_CHARS);
         assert!(context.contains("CODE-JS-ORDER-MAP-001"));
-        assert!(context.contains("FOLLOW-UP-119"));
+        assert!(context.contains("FOLLOW-UP-319"));
+        assert!(!context.contains("FOLLOW-UP-000"));
+    }
+
+    #[tokio::test]
+    async fn prune_timeline_keeps_old_code_anchors_before_recent_tail() {
+        let state = AppState::default();
+
+        for idx in 0..24 {
+            append_focus_copy_system_final(
+                &state,
+                format!(
+                    "CTX-PRUNE-OLD-CODE-{idx:02}\nfunction pruneAnchor{idx}() {{ return {idx}; }}\nsentinel: quartz-index-latch-{idx}\n{}",
+                    "x".repeat(1_000)
+                ),
+                100 + idx,
+                Some(format!("focus-copy:prune-code-{idx}")),
+            )
+            .await
+            .expect("old code message");
+        }
+
+        for idx in 0..280 {
+            append_system_final(
+                &state,
+                1,
+                &test_transcription(
+                    &format!("noise interview filler {idx:03} {}", "ж".repeat(180)),
+                    1_000 + idx,
+                ),
+            )
+            .await;
+        }
+        append_system_final(
+            &state,
+            1,
+            &test_transcription("CTX-PRUNE-RECENT-279 violet-tail-signal", 9_999),
+        )
+        .await;
+
+        let timeline_text = state
+            .companion_timeline
+            .read()
+            .await
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(timeline_text.contains("CTX-PRUNE-OLD-CODE-00"));
+        assert!(timeline_text.contains("CTX-PRUNE-OLD-CODE-23"));
+        assert!(timeline_text.contains("CTX-PRUNE-RECENT-279"));
+        assert!(!timeline_text.contains("noise interview filler 000"));
+
+        let context = build_context_text(&state, false).await;
+        assert!(context.chars().count() <= MAX_CONTEXT_CHARS);
+        assert!(context.contains("CTX-PRUNE-OLD-CODE-00"));
+        assert!(context.contains("CTX-PRUNE-OLD-CODE-23"));
+        assert!(context.contains("CTX-PRUNE-RECENT-279"));
+    }
+
+    #[test]
+    fn trim_context_parts_keeps_first_and_fresh_old_code_anchors() {
+        let mut parts = Vec::new();
+        for idx in 0..24 {
+            parts.push(ContextPart {
+                kind: "stt".to_string(),
+                line: format!(
+                    "ОС: CODE-OLD-{idx:02} function sample{idx}() {{ return {idx}; }} {}",
+                    "x".repeat(1_200)
+                ),
+            });
+        }
+        parts.push(ContextPart {
+            kind: "haiku".to_string(),
+            line: format!("ПОМОЩНИК: ASSISTANT-OLD-NOISE-001 {}", "y".repeat(12_000)),
+        });
+        for idx in 0..180 {
+            parts.push(ContextPart {
+                kind: "stt".to_string(),
+                line: format!("ОС: RECENT-HOUR-{idx:03} {}", "z".repeat(220)),
+            });
+        }
+
+        let context = trim_context_parts(&parts);
+
+        assert!(context.chars().count() <= MAX_CONTEXT_CHARS);
+        assert!(context.contains("CODE-OLD-00"));
+        assert!(context.contains("CODE-OLD-23"));
+        assert!(context.contains("RECENT-HOUR-179"));
+        assert!(!context.contains("ASSISTANT-OLD-NOISE-001"));
     }
 
     #[tokio::test]

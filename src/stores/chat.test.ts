@@ -738,7 +738,7 @@ describe('chat store (selection + context)', () => {
       timestamp: 1,
     });
 
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 320; i++) {
       transcriptionProxy.finalUtterances.push({
         id: `stt:follow:${i}`,
         sessionId: 1,
@@ -756,7 +756,8 @@ describe('chat store (selection + context)', () => {
     expect(payload?.text).toBeTypeOf('string');
     expect(payload!.text!.length).toBeLessThanOrEqual(48_000);
     expect(payload!.text).toContain('CODE-JS-ORDER-MAP-001');
-    expect(payload!.text).toContain('FOLLOW-UP-119');
+    expect(payload!.text).toContain('FOLLOW-UP-319');
+    expect(payload!.text).not.toContain('FOLLOW-UP-000');
   });
 
   it('filters system STT utterance when it duplicates microphone utterance', async () => {
