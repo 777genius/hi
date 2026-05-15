@@ -37,6 +37,7 @@ const emit = defineEmits<{
   (e: 'row-mousemove', event: MouseEvent, message: ConversationFeedMessage): void;
   (e: 'message-click', event: MouseEvent, message: ConversationFeedMessage): void;
   (e: 'inline-edit-keydown', event: KeyboardEvent, message: ConversationFeedMessage): void;
+  (e: 'assistant-candidate-select', messageId: string, candidateId: string): void;
 }>();
 
 const slots = useSlots();
@@ -45,6 +46,7 @@ const highlightedById = reactive<Record<string, HighlightEntry>>({});
 const showScrollToBottom = ref(false);
 const expandedMessageIds = reactive(new Set<string>());
 const collapsedMessageIds = reactive(new Set<string>());
+const activeCandidateByMessageId = reactive<Record<string, string>>({});
 let scrollStateFrame: number | null = null;
 
 defineExpose({
@@ -183,12 +185,56 @@ function renderHaikuMarkdown(text: string): string {
   return renderMarkdownToSafeHtml(String(text ?? ''));
 }
 
+function candidateList(message: ConversationFeedMessage) {
+  return message.kind === 'haiku' ? (message.candidates ?? []) : [];
+}
+
+function primaryCandidate(message: ConversationFeedMessage) {
+  const candidates = candidateList(message);
+  return candidates.find((candidate) => candidate.id === 'anthropic') ?? candidates[0] ?? null;
+}
+
+function activeCandidateId(message: ConversationFeedMessage): string | null {
+  return (
+    activeCandidateByMessageId[message.id] ??
+    message.activeCandidateId ??
+    primaryCandidate(message)?.id ??
+    null
+  );
+}
+
+function activeCandidate(message: ConversationFeedMessage) {
+  const candidates = candidateList(message);
+  const activeId = activeCandidateId(message);
+  return candidates.find((candidate) => candidate.id === activeId) ?? primaryCandidate(message);
+}
+
+function visibleAssistantText(message: ConversationFeedMessage): string {
+  if (message.kind !== 'haiku') return message.text;
+  return activeCandidate(message)?.text ?? message.text;
+}
+
+function visibleMessageStatus(message: ConversationFeedMessage): ConversationFeedMessage['status'] {
+  if (message.kind !== 'haiku') return message.status;
+  return activeCandidate(message)?.status ?? message.status;
+}
+
+function selectAssistantCandidate(message: ConversationFeedMessage, candidateId: string): void {
+  if (!candidateId) return;
+  activeCandidateByMessageId[message.id] = candidateId;
+  emit('assistant-candidate-select', message.id, candidateId);
+  void nextTick(() => {
+    scheduleScrollStateUpdate();
+  });
+}
+
 function rowClasses(message: ConversationFeedMessage): Record<string, boolean> {
+  const status = visibleMessageStatus(message);
   return {
     incoming: message.role === 'incoming',
     outgoing: message.role === 'outgoing',
     'assistant-response': message.kind === 'haiku',
-    partial: message.status === 'streaming',
+    partial: status === 'streaming',
     prompt: message.kind === 'prompt',
     anchor:
       props.anchorMode === 'fixed' &&
@@ -196,7 +242,7 @@ function rowClasses(message: ConversationFeedMessage): Record<string, boolean> {
       message.sttIndex === props.anchorSttIndex,
     selected: props.isSelected(message.id),
     'out-of-context': props.isOutOfContext(message),
-    error: message.status === 'error',
+    error: status === 'error',
     'focus-copy': isFocusCopyMessage(message),
     collapsed: isMessageCollapsed(message),
   };
@@ -329,6 +375,9 @@ watch(
     for (const id of Array.from(collapsedMessageIds)) {
       if (!liveIds.has(id)) collapsedMessageIds.delete(id);
     }
+    for (const id of Object.keys(activeCandidateByMessageId)) {
+      if (!liveIds.has(id)) delete activeCandidateByMessageId[id];
+    }
     void nextTick(() => {
       scheduleScrollStateUpdate();
     });
@@ -399,12 +448,34 @@ onUnmounted(() => {
             <template v-else>
               <template v-if="msg.kind === 'haiku'">
                 <div
+                  v-if="candidateList(msg).length > 1"
+                  class="assistant-candidate-tabs no-drag"
+                  @click.stop
+                >
+                  <button
+                    v-for="candidate in candidateList(msg)"
+                    :key="candidate.id"
+                    type="button"
+                    class="assistant-candidate-tab"
+                    :class="{
+                      active: activeCandidateId(msg) === candidate.id,
+                      streaming: candidate.status === 'streaming',
+                      error: candidate.status === 'error',
+                    }"
+                    :title="[candidate.label, candidate.model].filter(Boolean).join(' · ')"
+                    @click.stop="selectAssistantCandidate(msg, candidate.id)"
+                  >
+                    <span class="assistant-candidate-label">{{ candidate.label }}</span>
+                    <span v-if="candidate.status === 'streaming'" class="assistant-candidate-dot" />
+                  </button>
+                </div>
+                <div
                   v-if="isCollapsibleMessage(msg)"
                   class="chat-collapsible-message"
                   :class="{ collapsed: isMessageCollapsed(msg) }"
                   @click="expandCollapsedMessage(msg, $event)"
                 >
-                  <div class="chat-collapsible-content chat-markdown" v-html="renderHaikuMarkdown(msg.text)" />
+                  <div class="chat-collapsible-content chat-markdown" v-html="renderHaikuMarkdown(visibleAssistantText(msg))" />
                   <button
                     type="button"
                     class="chat-collapse-toggle no-drag"
@@ -413,7 +484,7 @@ onUnmounted(() => {
                     {{ isMessageCollapsed(msg) ? 'More' : 'Hide' }}
                   </button>
                 </div>
-                <div v-else class="chat-markdown" v-html="renderHaikuMarkdown(msg.text)" />
+                <div v-else class="chat-markdown" v-html="renderHaikuMarkdown(visibleAssistantText(msg))" />
               </template>
               <div
                 v-else-if="getHighlightedHtml(msg)"
@@ -429,7 +500,7 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <span v-if="msg.status === 'streaming'" class="chat-cursor">▍</span>
+            <span v-if="visibleMessageStatus(msg) === 'streaming'" class="chat-cursor">▍</span>
           </template>
         </div>
 
@@ -763,6 +834,68 @@ onUnmounted(() => {
 
 .chat-collapsible-message.collapsed {
   cursor: pointer;
+}
+
+.assistant-candidate-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+  white-space: normal;
+}
+
+.assistant-candidate-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  max-width: 160px;
+  padding: 3px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.72);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.assistant-candidate-tab.active {
+  border-color: rgba(59, 130, 246, 0.48);
+  background: rgba(59, 130, 246, 0.18);
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.assistant-candidate-tab.error {
+  border-color: rgba(244, 67, 54, 0.38);
+}
+
+.assistant-candidate-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-candidate-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  background: rgba(59, 130, 246, 0.95);
+}
+
+:global(.theme-light) .assistant-candidate-tab {
+  border-color: rgba(15, 23, 42, 0.12);
+  background: rgba(15, 23, 42, 0.04);
+  color: rgba(15, 23, 42, 0.68);
+}
+
+:global(.theme-light) .assistant-candidate-tab.active {
+  border-color: rgba(37, 99, 235, 0.45);
+  background: rgba(37, 99, 235, 0.12);
+  color: rgba(15, 23, 42, 0.92);
 }
 
 .chat-collapse-toggle {

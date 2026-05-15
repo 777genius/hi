@@ -5,6 +5,16 @@ export type ConversationFeedAttachment = {
   dataUrl: string;
 };
 
+export type ConversationLlmCandidate = {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
+  status: 'final' | 'streaming' | 'error';
+  text: string;
+  error?: string;
+};
+
 export type ConversationFeedMessage = {
   id: string;
   kind: 'stt' | 'mic' | 'haiku' | 'prompt';
@@ -17,4 +27,6 @@ export type ConversationFeedMessage = {
   deleted?: boolean;
   sttIndex?: number;
   attachments?: ConversationFeedAttachment[];
+  candidates?: ConversationLlmCandidate[];
+  activeCandidateId?: string;
 };

@@ -102,6 +102,8 @@ export type CompanionMessage = {
   sttIndex?: number | null;
   deleted?: boolean;
   attachments?: CompanionAttachment[] | null;
+  candidates?: CompanionLlmCandidate[] | null;
+  activeCandidateId?: string | null;
 };
 
 export type CompanionAttachment = {
@@ -109,6 +111,16 @@ export type CompanionAttachment = {
   kind: string;
   mime: string;
   dataUrl: string;
+};
+
+export type CompanionLlmCandidate = {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
+  status: string;
+  text: string;
+  error?: string | null;
 };
 
 export type CompanionSnapshotData = {

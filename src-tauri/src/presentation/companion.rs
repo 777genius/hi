@@ -102,6 +102,19 @@ pub struct CompanionAttachment {
 
 #[derive(Debug, Clone, serde::Serialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct CompanionLlmCandidate {
+    pub id: String,
+    pub label: String,
+    pub provider: String,
+    pub model: String,
+    pub status: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct CompanionMessage {
     pub id: String,
     pub seq: u64,
@@ -124,6 +137,10 @@ pub struct CompanionMessage {
     pub deleted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<CompanionAttachment>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidates: Option<Vec<CompanionLlmCandidate>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_candidate_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, Default)]
@@ -1075,8 +1092,13 @@ async fn handle_ai_request_post(
         Err(response) => return response,
     };
 
-    match crate::presentation::companion_actions::request_ai(state.inner(), &app_handle, body.text)
-        .await
+    match crate::presentation::companion_actions::request_ai(
+        state.inner(),
+        &app_handle,
+        body.text,
+        None,
+    )
+    .await
     {
         Ok(response) => {
             complete_companion_action_idempotency(state.inner(), idempotency_key, &response).await;
@@ -1136,6 +1158,7 @@ async fn handle_prompt_send_post(
         &app_handle,
         body.text.unwrap_or_default(),
         body.images,
+        None,
     )
     .await
     {

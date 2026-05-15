@@ -34,14 +34,27 @@ struct CompanionDeltaWriter {
     handle: tauri::async_runtime::JoinHandle<()>,
 }
 
-fn spawn_companion_delta_writer(app_handle: AppHandle, request_id: String) -> CompanionDeltaWriter {
+#[derive(Debug, Clone)]
+struct HaikuCandidateMeta {
+    id: String,
+    label: String,
+    provider: String,
+    model: String,
+}
+
+fn spawn_companion_delta_writer(
+    app_handle: AppHandle,
+    request_id: String,
+    candidate_id: Option<String>,
+) -> CompanionDeltaWriter {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let handle = tauri::async_runtime::spawn(async move {
         while let Some(delta_text) = rx.recv().await {
             if let Some(state) = app_handle.try_state::<AppState>() {
-                crate::presentation::companion_timeline::append_haiku_delta(
+                crate::presentation::companion_timeline::append_haiku_candidate_delta(
                     state.inner(),
                     &request_id,
+                    candidate_id.as_deref(),
                     &delta_text,
                 )
                 .await;
@@ -57,6 +70,115 @@ fn spawn_companion_delta_writer(app_handle: AppHandle, request_id: String) -> Co
 async fn drain_companion_delta_writer(writer: CompanionDeltaWriter) {
     drop(writer.tx);
     let _ = writer.handle.await;
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
+    )
+}
+
+fn candidate_start_payload(
+    request_id: &str,
+    candidate: &HaikuCandidateMeta,
+) -> HaikuCandidateStartPayload {
+    HaikuCandidateStartPayload {
+        request_id: request_id.to_string(),
+        candidate_id: candidate.id.clone(),
+        candidate_label: candidate.label.clone(),
+        provider: candidate.provider.clone(),
+        model: candidate.model.clone(),
+    }
+}
+
+fn candidate_delta_payload(
+    request_id: &str,
+    delta: String,
+    candidate: Option<&HaikuCandidateMeta>,
+) -> HaikuDeltaPayload {
+    HaikuDeltaPayload {
+        request_id: request_id.to_string(),
+        delta,
+        candidate_id: candidate.map(|value| value.id.clone()),
+        candidate_label: candidate.map(|value| value.label.clone()),
+        provider: candidate.map(|value| value.provider.clone()),
+        model: candidate.map(|value| value.model.clone()),
+    }
+}
+
+fn candidate_done_payload(
+    request_id: &str,
+    candidate: Option<&HaikuCandidateMeta>,
+) -> HaikuDonePayload {
+    HaikuDonePayload {
+        request_id: request_id.to_string(),
+        candidate_id: candidate.map(|value| value.id.clone()),
+        candidate_label: candidate.map(|value| value.label.clone()),
+        provider: candidate.map(|value| value.provider.clone()),
+        model: candidate.map(|value| value.model.clone()),
+    }
+}
+
+fn candidate_error_payload(
+    request_id: &str,
+    error: String,
+    candidate: Option<&HaikuCandidateMeta>,
+) -> HaikuErrorPayload {
+    HaikuErrorPayload {
+        request_id: request_id.to_string(),
+        error,
+        candidate_id: candidate.map(|value| value.id.clone()),
+        candidate_label: candidate.map(|value| value.label.clone()),
+        provider: candidate.map(|value| value.provider.clone()),
+        model: candidate.map(|value| value.model.clone()),
+    }
+}
+
+async fn settle_parallel_candidate(
+    app_handle: &AppHandle,
+    request_id: &str,
+    candidate: &HaikuCandidateMeta,
+    result: crate::domain::LlmResult<()>,
+) -> bool {
+    match result {
+        Ok(()) => {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                crate::presentation::companion_timeline::finalize_haiku_candidate(
+                    state.inner(),
+                    request_id,
+                    Some(&candidate.id),
+                )
+                .await;
+                let _ = crate::presentation::companion::publish_snapshot_sse_only(app_handle).await;
+            }
+            let _ = app_handle.emit(
+                EVENT_HAIKU_DONE,
+                candidate_done_payload(request_id, Some(candidate)),
+            );
+            true
+        }
+        Err(e) => {
+            let error = e.to_string();
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                crate::presentation::companion_timeline::fail_haiku_candidate(
+                    state.inner(),
+                    request_id,
+                    Some(&candidate.id),
+                    &error,
+                )
+                .await;
+                let _ = crate::presentation::companion::publish_snapshot_sse_only(app_handle).await;
+            }
+            let _ = app_handle.emit(
+                EVENT_HAIKU_ERROR,
+                candidate_error_payload(request_id, error, Some(candidate)),
+            );
+            false
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1734,9 +1856,15 @@ pub async fn companion_request_ai(
     state: State<'_, AppState>,
     app_handle: AppHandle,
     question_text: Option<String>,
+    openai_responses_web_search: Option<bool>,
 ) -> Result<crate::presentation::companion_actions::CompanionActionResponse, String> {
-    crate::presentation::companion_actions::request_ai(state.inner(), &app_handle, question_text)
-        .await
+    crate::presentation::companion_actions::request_ai(
+        state.inner(),
+        &app_handle,
+        question_text,
+        openai_responses_web_search,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1745,12 +1873,14 @@ pub async fn companion_send_prompt(
     app_handle: AppHandle,
     text: String,
     images: Option<Vec<LlmImageInput>>,
+    openai_responses_web_search: Option<bool>,
 ) -> Result<crate::presentation::companion_actions::CompanionActionResponse, String> {
     crate::presentation::companion_actions::send_prompt(
         state.inner(),
         &app_handle,
         text,
         images.unwrap_or_default(),
+        openai_responses_web_search,
     )
     .await
 }
@@ -2778,6 +2908,7 @@ pub async fn start_haiku_stream(
     text: String,
     system_prompt: Option<String>,
     companion_meta: Option<CompanionAiRequestMeta>,
+    openai_responses_web_search: Option<bool>,
 ) -> Result<String, String> {
     let prompt = text.trim();
     if prompt.is_empty() {
@@ -2794,6 +2925,7 @@ pub async fn start_haiku_stream(
         "openai" | "openai_compatible" | "openrouter" => {
             crate::domain::LlmProviderType::OpenAiCompatible
         }
+        "openai_responses" | "responses" => crate::domain::LlmProviderType::OpenAiResponses,
         "backend" => crate::domain::LlmProviderType::Backend,
         other => {
             log::warn!(
@@ -2816,6 +2948,13 @@ pub async fn start_haiku_stream(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1024),
+            crate::domain::LlmProviderType::OpenAiResponses => {
+                std::env::var("OPENAI_RESPONSES_MAX_TOKENS")
+                    .or_else(|_| std::env::var("OPENAI_MAX_TOKENS"))
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1024)
+            }
             crate::domain::LlmProviderType::Backend => 1024,
         });
 
@@ -2831,6 +2970,13 @@ pub async fn start_haiku_stream(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.2),
+            crate::domain::LlmProviderType::OpenAiResponses => {
+                std::env::var("OPENAI_RESPONSES_TEMPERATURE")
+                    .or_else(|_| std::env::var("OPENAI_TEMPERATURE"))
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.2)
+            }
             crate::domain::LlmProviderType::Backend => 0.2,
         });
 
@@ -2875,6 +3021,11 @@ pub async fn start_haiku_stream(
             crate::domain::LlmProviderType::OpenAiCompatible => {
                 std::env::var("OPENAI_SYSTEM_PROMPT").ok()
             }
+            crate::domain::LlmProviderType::OpenAiResponses => {
+                std::env::var("OPENAI_RESPONSES_SYSTEM_PROMPT")
+                    .or_else(|_| std::env::var("OPENAI_SYSTEM_PROMPT"))
+                    .ok()
+            }
             crate::domain::LlmProviderType::Backend => {
                 std::env::var("BACKEND_LLM_SYSTEM_PROMPT").ok()
             }
@@ -2887,6 +3038,7 @@ pub async fn start_haiku_stream(
         crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_MODEL")
             .or_else(|_| std::env::var("LLM_MODEL"))
             .map_err(|_| "OPENAI_MODEL (or LLM_MODEL) is not set".to_string())?,
+        crate::domain::LlmProviderType::OpenAiResponses => openai_responses_model(),
         crate::domain::LlmProviderType::Backend => {
             std::env::var("LLM_MODEL").unwrap_or_else(|_| "default".to_string())
         }
@@ -2898,6 +3050,9 @@ pub async fn start_haiku_stream(
                 .map_err(|_| "ANTHROPIC_API_KEY is not set".to_string())?,
         ),
         crate::domain::LlmProviderType::OpenAiCompatible => Some(
+            std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
+        ),
+        crate::domain::LlmProviderType::OpenAiResponses => Some(
             std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
         ),
         crate::domain::LlmProviderType::Backend => None,
@@ -2932,6 +3087,295 @@ pub async fn start_haiku_stream(
     let request_id = uuid::Uuid::new_v4().to_string();
     let companion_meta = companion_meta.unwrap_or_default();
     *state.companion_system_prompt.write().await = system_prompt.clone();
+
+    let parallel_openai_enabled = provider == crate::domain::LlmProviderType::Anthropic
+        && env_flag("LLM_PARALLEL_OPENAI_RESPONSES")
+        && std::env::var("OPENAI_API_KEY")
+            .ok()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+
+    if parallel_openai_enabled {
+        let openai_mini_model = openai_responses_model();
+        let openai_web_model = openai_responses_web_model();
+        let openai_web_search_enabled = openai_responses_web_search.unwrap_or(true);
+        let openai_runtime_cfg = openai_responses_runtime_config()?;
+        match (
+            llm_factory.create(&openai_runtime_cfg),
+            llm_factory.create(&openai_runtime_cfg),
+        ) {
+            (Ok(openai_mini_provider), Ok(openai_web_provider)) => {
+                let anthropic_candidate = HaikuCandidateMeta {
+                    id: "anthropic".to_string(),
+                    label: "Anthropic".to_string(),
+                    provider: "anthropic".to_string(),
+                    model: model.clone(),
+                };
+                let openai_mini_candidate = HaikuCandidateMeta {
+                    id: "openai_responses".to_string(),
+                    label: "OpenAI 5.4 mini".to_string(),
+                    provider: "openai_responses".to_string(),
+                    model: openai_mini_model.clone(),
+                };
+                let openai_web_candidate = HaikuCandidateMeta {
+                    id: "openai_responses_web".to_string(),
+                    label: if openai_web_search_enabled {
+                        "OpenAI 5.5 web"
+                    } else {
+                        "OpenAI 5.5"
+                    }
+                    .to_string(),
+                    provider: "openai_responses".to_string(),
+                    model: openai_web_model.clone(),
+                };
+
+                crate::presentation::companion_timeline::begin_haiku_message(
+                    state.inner(),
+                    crate::presentation::companion_timeline::CompanionHaikuStart {
+                        request_id: request_id.clone(),
+                        insert_after_id: companion_meta.insert_after_id.clone(),
+                        created_at_ms: companion_meta
+                            .created_at_ms
+                            .unwrap_or_else(crate::presentation::companion_timeline::now_ms),
+                        candidates: vec![
+                            crate::presentation::companion::CompanionLlmCandidate {
+                                id: anthropic_candidate.id.clone(),
+                                label: anthropic_candidate.label.clone(),
+                                provider: anthropic_candidate.provider.clone(),
+                                model: anthropic_candidate.model.clone(),
+                                status: "streaming".to_string(),
+                                text: String::new(),
+                                error: None,
+                            },
+                            crate::presentation::companion::CompanionLlmCandidate {
+                                id: openai_mini_candidate.id.clone(),
+                                label: openai_mini_candidate.label.clone(),
+                                provider: openai_mini_candidate.provider.clone(),
+                                model: openai_mini_candidate.model.clone(),
+                                status: "streaming".to_string(),
+                                text: String::new(),
+                                error: None,
+                            },
+                            crate::presentation::companion::CompanionLlmCandidate {
+                                id: openai_web_candidate.id.clone(),
+                                label: openai_web_candidate.label.clone(),
+                                provider: openai_web_candidate.provider.clone(),
+                                model: openai_web_candidate.model.clone(),
+                                status: "streaming".to_string(),
+                                text: String::new(),
+                                error: None,
+                            },
+                        ],
+                        active_candidate_id: Some(anthropic_candidate.id.clone()),
+                    },
+                )
+                .await;
+                let _ = app_handle.emit(
+                    EVENT_HAIKU_CANDIDATE_START,
+                    candidate_start_payload(&request_id, &anthropic_candidate),
+                );
+                let _ = app_handle.emit(
+                    EVENT_HAIKU_CANDIDATE_START,
+                    candidate_start_payload(&request_id, &openai_mini_candidate),
+                );
+                let _ = app_handle.emit(
+                    EVENT_HAIKU_CANDIDATE_START,
+                    candidate_start_payload(&request_id, &openai_web_candidate),
+                );
+                let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
+
+                log::info!(
+                    "Command: start_haiku_stream parallel request_id={} prompt_len={}",
+                    request_id,
+                    prompt.len()
+                );
+
+                let request_id_clone = request_id.clone();
+                let app_handle_clone = app_handle.clone();
+                let user_text = prompt.to_string();
+                let anthropic_model = model.clone();
+                let system_prompt_clone = system_prompt.clone();
+                let anthropic_candidate_clone = anthropic_candidate.clone();
+                let openai_mini_candidate_clone = openai_mini_candidate.clone();
+                let openai_web_candidate_clone = openai_web_candidate.clone();
+
+                tauri::async_runtime::spawn(async move {
+                    let anthropic_writer = spawn_companion_delta_writer(
+                        app_handle_clone.clone(),
+                        request_id_clone.clone(),
+                        Some(anthropic_candidate_clone.id.clone()),
+                    );
+                    let openai_mini_writer = spawn_companion_delta_writer(
+                        app_handle_clone.clone(),
+                        request_id_clone.clone(),
+                        Some(openai_mini_candidate_clone.id.clone()),
+                    );
+                    let openai_web_writer = spawn_companion_delta_writer(
+                        app_handle_clone.clone(),
+                        request_id_clone.clone(),
+                        Some(openai_web_candidate_clone.id.clone()),
+                    );
+
+                    let anthropic_request = crate::domain::LlmStreamRequest::new(
+                        anthropic_model,
+                        system_prompt_clone.clone(),
+                        user_text.clone(),
+                        max_tokens,
+                        temperature,
+                    );
+                    let openai_mini_request = build_openai_responses_request(
+                        openai_mini_model,
+                        system_prompt_clone.clone(),
+                        user_text.clone(),
+                        max_tokens,
+                        temperature,
+                        Vec::new(),
+                        Some(false),
+                        openai_responses_reasoning_effort(),
+                        openai_responses_verbosity(),
+                    );
+                    let openai_web_request = build_openai_responses_request(
+                        openai_web_model,
+                        system_prompt_clone,
+                        user_text,
+                        max_tokens,
+                        temperature,
+                        Vec::new(),
+                        Some(openai_web_search_enabled),
+                        openai_responses_web_reasoning_effort(),
+                        openai_responses_web_verbosity(),
+                    );
+
+                    let anthropic_future = async {
+                        let app_handle_delta = app_handle_clone.clone();
+                        let request_id_delta = request_id_clone.clone();
+                        let delta_meta = anthropic_candidate_clone.clone();
+                        let companion_delta_tx = anthropic_writer.tx.clone();
+                        let result = llm_provider
+                            .stream_text(
+                                &anthropic_request,
+                                Box::new(move |delta| {
+                                    let delta_text = delta.to_string();
+                                    let _ = app_handle_delta.emit(
+                                        EVENT_HAIKU_DELTA,
+                                        candidate_delta_payload(
+                                            &request_id_delta,
+                                            delta_text.clone(),
+                                            Some(&delta_meta),
+                                        ),
+                                    );
+                                    let _ = companion_delta_tx.send(delta_text);
+                                }),
+                            )
+                            .await;
+                        drain_companion_delta_writer(anthropic_writer).await;
+                        result
+                    };
+
+                    let openai_mini_future = async {
+                        let app_handle_delta = app_handle_clone.clone();
+                        let request_id_delta = request_id_clone.clone();
+                        let delta_meta = openai_mini_candidate_clone.clone();
+                        let companion_delta_tx = openai_mini_writer.tx.clone();
+                        let result = openai_mini_provider
+                            .stream_text(
+                                &openai_mini_request,
+                                Box::new(move |delta| {
+                                    let delta_text = delta.to_string();
+                                    let _ = app_handle_delta.emit(
+                                        EVENT_HAIKU_DELTA,
+                                        candidate_delta_payload(
+                                            &request_id_delta,
+                                            delta_text.clone(),
+                                            Some(&delta_meta),
+                                        ),
+                                    );
+                                    let _ = companion_delta_tx.send(delta_text);
+                                }),
+                            )
+                            .await;
+                        drain_companion_delta_writer(openai_mini_writer).await;
+                        result
+                    };
+
+                    let openai_web_future = async {
+                        let app_handle_delta = app_handle_clone.clone();
+                        let request_id_delta = request_id_clone.clone();
+                        let delta_meta = openai_web_candidate_clone.clone();
+                        let companion_delta_tx = openai_web_writer.tx.clone();
+                        let result = openai_web_provider
+                            .stream_text(
+                                &openai_web_request,
+                                Box::new(move |delta| {
+                                    let delta_text = delta.to_string();
+                                    let _ = app_handle_delta.emit(
+                                        EVENT_HAIKU_DELTA,
+                                        candidate_delta_payload(
+                                            &request_id_delta,
+                                            delta_text.clone(),
+                                            Some(&delta_meta),
+                                        ),
+                                    );
+                                    let _ = companion_delta_tx.send(delta_text);
+                                }),
+                            )
+                            .await;
+                        drain_companion_delta_writer(openai_web_writer).await;
+                        result
+                    };
+
+                    let (anthropic_result, openai_mini_result, openai_web_result) =
+                        tokio::join!(anthropic_future, openai_mini_future, openai_web_future);
+                    let anthropic_ok = settle_parallel_candidate(
+                        &app_handle_clone,
+                        &request_id_clone,
+                        &anthropic_candidate_clone,
+                        anthropic_result,
+                    )
+                    .await;
+                    let openai_mini_ok = settle_parallel_candidate(
+                        &app_handle_clone,
+                        &request_id_clone,
+                        &openai_mini_candidate_clone,
+                        openai_mini_result,
+                    )
+                    .await;
+                    let openai_web_ok = settle_parallel_candidate(
+                        &app_handle_clone,
+                        &request_id_clone,
+                        &openai_web_candidate_clone,
+                        openai_web_result,
+                    )
+                    .await;
+
+                    if anthropic_ok || openai_mini_ok || openai_web_ok {
+                        let _ = app_handle_clone.emit(
+                            EVENT_HAIKU_DONE,
+                            candidate_done_payload(&request_id_clone, None),
+                        );
+                    } else {
+                        let _ = app_handle_clone.emit(
+                            EVENT_HAIKU_ERROR,
+                            candidate_error_payload(
+                                &request_id_clone,
+                                "All LLM candidates failed".to_string(),
+                                None,
+                            ),
+                        );
+                    }
+                });
+
+                return Ok(request_id);
+            }
+            (Err(err), _) | (_, Err(err)) => {
+                log::warn!(
+                    "Failed to create OpenAI Responses parallel provider, falling back to single provider: {}",
+                    err
+                );
+            }
+        }
+    }
+
     crate::presentation::companion_timeline::begin_haiku_message(
         state.inner(),
         crate::presentation::companion_timeline::CompanionHaikuStart {
@@ -2940,6 +3384,8 @@ pub async fn start_haiku_stream(
             created_at_ms: companion_meta
                 .created_at_ms
                 .unwrap_or_else(crate::presentation::companion_timeline::now_ms),
+            candidates: Vec::new(),
+            active_candidate_id: None,
         },
     )
     .await;
@@ -2955,21 +3401,36 @@ pub async fn start_haiku_stream(
     let user_text = prompt.to_string();
     let model_clone = model.clone();
     let system_prompt_clone = system_prompt.clone();
+    let provider_clone = provider;
 
     tauri::async_runtime::spawn(async move {
         let app_handle_delta = app_handle_clone.clone();
         let request_id_delta = request_id_clone.clone();
         let companion_delta_writer =
-            spawn_companion_delta_writer(app_handle_clone.clone(), request_id_clone.clone());
+            spawn_companion_delta_writer(app_handle_clone.clone(), request_id_clone.clone(), None);
         let companion_delta_tx = companion_delta_writer.tx.clone();
 
-        let request = crate::domain::LlmStreamRequest::new(
-            model_clone,
-            system_prompt_clone,
-            user_text,
-            max_tokens,
-            temperature,
-        );
+        let request = if provider_clone == crate::domain::LlmProviderType::OpenAiResponses {
+            build_openai_responses_request(
+                model_clone,
+                system_prompt_clone,
+                user_text,
+                max_tokens,
+                temperature,
+                Vec::new(),
+                openai_responses_web_search,
+                openai_responses_reasoning_effort(),
+                openai_responses_verbosity(),
+            )
+        } else {
+            crate::domain::LlmStreamRequest::new(
+                model_clone,
+                system_prompt_clone,
+                user_text,
+                max_tokens,
+                temperature,
+            )
+        };
 
         let result = llm_provider
             .stream_text(
@@ -2978,10 +3439,7 @@ pub async fn start_haiku_stream(
                     let delta_text = delta.to_string();
                     let _ = app_handle_delta.emit(
                         EVENT_HAIKU_DELTA,
-                        HaikuDeltaPayload {
-                            request_id: request_id_delta.clone(),
-                            delta: delta_text.clone(),
-                        },
+                        candidate_delta_payload(&request_id_delta, delta_text.clone(), None),
                     );
                     let _ = companion_delta_tx.send(delta_text);
                 }),
@@ -3005,9 +3463,7 @@ pub async fn start_haiku_stream(
                 }
                 let _ = app_handle_clone.emit(
                     EVENT_HAIKU_DONE,
-                    HaikuDonePayload {
-                        request_id: request_id_clone,
-                    },
+                    candidate_done_payload(&request_id_clone, None),
                 );
             }
             Err(e) => {
@@ -3025,10 +3481,7 @@ pub async fn start_haiku_stream(
                 }
                 let _ = app_handle_clone.emit(
                     EVENT_HAIKU_ERROR,
-                    HaikuErrorPayload {
-                        request_id: request_id_clone,
-                        error: e.to_string(),
-                    },
+                    candidate_error_payload(&request_id_clone, e.to_string(), None),
                 );
             }
         }
@@ -3048,6 +3501,98 @@ fn is_valid_llm_image_input(image: &LlmImageInput) -> bool {
     let media_type = image.media_type.trim();
     let data = image.data_base64.trim();
     media_type.starts_with("image/") && !data.is_empty()
+}
+
+fn to_llm_image_content(images: &[LlmImageInput]) -> Vec<crate::domain::LlmImageContent> {
+    images
+        .iter()
+        .filter(|image| is_valid_llm_image_input(image))
+        .map(|image| crate::domain::LlmImageContent {
+            media_type: image.media_type.trim().to_string(),
+            data_base64: image.data_base64.trim().to_string(),
+        })
+        .collect()
+}
+
+fn openai_responses_model() -> String {
+    std::env::var("OPENAI_RESPONSES_MODEL")
+        .or_else(|_| std::env::var("OPENAI_MODEL"))
+        .unwrap_or_else(|_| crate::domain::DEFAULT_OPENAI_RESPONSES_MODEL.to_string())
+}
+
+fn openai_responses_web_model() -> String {
+    std::env::var("OPENAI_RESPONSES_WEB_MODEL").unwrap_or_else(|_| "gpt-5.5".to_string())
+}
+
+fn openai_responses_reasoning_effort() -> String {
+    std::env::var("OPENAI_RESPONSES_REASONING_EFFORT").unwrap_or_else(|_| "low".to_string())
+}
+
+fn openai_responses_web_reasoning_effort() -> String {
+    std::env::var("OPENAI_RESPONSES_WEB_REASONING_EFFORT").unwrap_or_else(|_| "medium".to_string())
+}
+
+fn openai_responses_verbosity() -> String {
+    std::env::var("OPENAI_RESPONSES_VERBOSITY").unwrap_or_else(|_| "low".to_string())
+}
+
+fn openai_responses_web_verbosity() -> String {
+    std::env::var("OPENAI_RESPONSES_WEB_VERBOSITY").unwrap_or_else(|_| "low".to_string())
+}
+
+fn openai_responses_web_search(
+    request_enabled: Option<bool>,
+) -> Option<crate::domain::LlmWebSearchOptions> {
+    let enabled = request_enabled.unwrap_or_else(|| env_flag("OPENAI_RESPONSES_WEB_SEARCH"));
+    enabled.then(|| crate::domain::LlmWebSearchOptions {
+        tool_type: std::env::var("OPENAI_RESPONSES_WEB_SEARCH_TOOL_TYPE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "web_search_preview".to_string()),
+        context_size: std::env::var("OPENAI_RESPONSES_WEB_SEARCH_CONTEXT_SIZE")
+            .unwrap_or_else(|_| "low".to_string()),
+    })
+}
+
+fn openai_responses_runtime_config() -> Result<crate::domain::LlmRuntimeConfig, String> {
+    Ok(crate::domain::LlmRuntimeConfig {
+        provider: crate::domain::LlmProviderType::OpenAiResponses,
+        api_key: Some(
+            std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
+        ),
+        base_url: std::env::var("OPENAI_BASE_URL").ok(),
+        backend_url: None,
+        backend_auth_token: None,
+    })
+}
+
+fn build_openai_responses_request(
+    model: String,
+    system_prompt: String,
+    user_text: String,
+    max_tokens: u32,
+    temperature: f32,
+    images: Vec<crate::domain::LlmImageContent>,
+    web_search_enabled: Option<bool>,
+    reasoning_effort: String,
+    verbosity: String,
+) -> crate::domain::LlmStreamRequest {
+    let mut request = crate::domain::LlmStreamRequest::new(
+        model,
+        system_prompt,
+        user_text,
+        max_tokens,
+        temperature,
+    )
+    .with_reasoning_effort(reasoning_effort)
+    .with_verbosity(verbosity)
+    .with_images(images);
+
+    if let Some(web_search) = openai_responses_web_search(web_search_enabled) {
+        request = request.with_web_search(web_search);
+    }
+
+    request
 }
 
 fn build_anthropic_chat_user_content(text: &str, images: &[LlmImageInput]) -> serde_json::Value {
@@ -3147,6 +3692,7 @@ pub async fn start_haiku_chat_stream(
     images: Option<Vec<LlmImageInput>>,
     system_prompt: Option<String>,
     companion_meta: Option<CompanionAiRequestMeta>,
+    openai_responses_web_search: Option<bool>,
 ) -> Result<String, String> {
     let context = context_text.trim().to_string();
     let question = question_text.trim().to_string();
@@ -3170,6 +3716,7 @@ pub async fn start_haiku_chat_stream(
         "openai" | "openai_compatible" | "openrouter" => {
             crate::domain::LlmProviderType::OpenAiCompatible
         }
+        "openai_responses" | "responses" => crate::domain::LlmProviderType::OpenAiResponses,
         "backend" => crate::domain::LlmProviderType::Backend,
         other => {
             log::warn!(
@@ -3192,6 +3739,13 @@ pub async fn start_haiku_chat_stream(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1024),
+            crate::domain::LlmProviderType::OpenAiResponses => {
+                std::env::var("OPENAI_RESPONSES_MAX_TOKENS")
+                    .or_else(|_| std::env::var("OPENAI_MAX_TOKENS"))
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1024)
+            }
             crate::domain::LlmProviderType::Backend => 1024,
         });
 
@@ -3207,6 +3761,13 @@ pub async fn start_haiku_chat_stream(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.2),
+            crate::domain::LlmProviderType::OpenAiResponses => {
+                std::env::var("OPENAI_RESPONSES_TEMPERATURE")
+                    .or_else(|_| std::env::var("OPENAI_TEMPERATURE"))
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.2)
+            }
             crate::domain::LlmProviderType::Backend => 0.2,
         });
 
@@ -3245,6 +3806,11 @@ pub async fn start_haiku_chat_stream(
             crate::domain::LlmProviderType::OpenAiCompatible => {
                 std::env::var("OPENAI_SYSTEM_PROMPT").ok()
             }
+            crate::domain::LlmProviderType::OpenAiResponses => {
+                std::env::var("OPENAI_RESPONSES_SYSTEM_PROMPT")
+                    .or_else(|_| std::env::var("OPENAI_SYSTEM_PROMPT"))
+                    .ok()
+            }
             crate::domain::LlmProviderType::Backend => {
                 std::env::var("BACKEND_LLM_SYSTEM_PROMPT").ok()
             }
@@ -3257,6 +3823,7 @@ pub async fn start_haiku_chat_stream(
         crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_MODEL")
             .or_else(|_| std::env::var("LLM_MODEL"))
             .map_err(|_| "OPENAI_MODEL (or LLM_MODEL) is not set".to_string())?,
+        crate::domain::LlmProviderType::OpenAiResponses => openai_responses_model(),
         crate::domain::LlmProviderType::Backend => {
             std::env::var("LLM_MODEL").unwrap_or_else(|_| "default".to_string())
         }
@@ -3268,6 +3835,9 @@ pub async fn start_haiku_chat_stream(
                 .map_err(|_| "ANTHROPIC_API_KEY is not set".to_string())?,
         ),
         crate::domain::LlmProviderType::OpenAiCompatible => Some(
+            std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
+        ),
+        crate::domain::LlmProviderType::OpenAiResponses => Some(
             std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
         ),
         crate::domain::LlmProviderType::Backend => None,
@@ -3335,6 +3905,343 @@ pub async fn start_haiku_chat_stream(
         )
         .await;
     }
+
+    let parallel_openai_enabled = provider == crate::domain::LlmProviderType::Anthropic
+        && env_flag("LLM_PARALLEL_OPENAI_RESPONSES")
+        && std::env::var("OPENAI_API_KEY")
+            .ok()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+
+    if parallel_openai_enabled {
+        let openai_mini_model = openai_responses_model();
+        let openai_web_model = openai_responses_web_model();
+        let openai_web_search_enabled = openai_responses_web_search.unwrap_or(true);
+        let openai_runtime_cfg = openai_responses_runtime_config()?;
+        match (
+            llm_factory.create(&openai_runtime_cfg),
+            llm_factory.create(&openai_runtime_cfg),
+        ) {
+            (Ok(openai_mini_provider), Ok(openai_web_provider)) => {
+                let anthropic_candidate = HaikuCandidateMeta {
+                    id: "anthropic".to_string(),
+                    label: "Anthropic".to_string(),
+                    provider: "anthropic".to_string(),
+                    model: model.clone(),
+                };
+                let openai_mini_candidate = HaikuCandidateMeta {
+                    id: "openai_responses".to_string(),
+                    label: "OpenAI 5.4 mini".to_string(),
+                    provider: "openai_responses".to_string(),
+                    model: openai_mini_model.clone(),
+                };
+                let openai_web_candidate = HaikuCandidateMeta {
+                    id: "openai_responses_web".to_string(),
+                    label: if openai_web_search_enabled {
+                        "OpenAI 5.5 web"
+                    } else {
+                        "OpenAI 5.5"
+                    }
+                    .to_string(),
+                    provider: "openai_responses".to_string(),
+                    model: openai_web_model.clone(),
+                };
+
+                crate::presentation::companion_timeline::begin_haiku_message(
+                    state.inner(),
+                    crate::presentation::companion_timeline::CompanionHaikuStart {
+                        request_id: request_id.clone(),
+                        insert_after_id: companion_meta
+                            .insert_after_id
+                            .clone()
+                            .or_else(|| companion_meta.prompt_message_id.clone()),
+                        created_at_ms: companion_meta
+                            .created_at_ms
+                            .unwrap_or_else(crate::presentation::companion_timeline::now_ms),
+                        candidates: vec![
+                            crate::presentation::companion::CompanionLlmCandidate {
+                                id: anthropic_candidate.id.clone(),
+                                label: anthropic_candidate.label.clone(),
+                                provider: anthropic_candidate.provider.clone(),
+                                model: anthropic_candidate.model.clone(),
+                                status: "streaming".to_string(),
+                                text: String::new(),
+                                error: None,
+                            },
+                            crate::presentation::companion::CompanionLlmCandidate {
+                                id: openai_mini_candidate.id.clone(),
+                                label: openai_mini_candidate.label.clone(),
+                                provider: openai_mini_candidate.provider.clone(),
+                                model: openai_mini_candidate.model.clone(),
+                                status: "streaming".to_string(),
+                                text: String::new(),
+                                error: None,
+                            },
+                            crate::presentation::companion::CompanionLlmCandidate {
+                                id: openai_web_candidate.id.clone(),
+                                label: openai_web_candidate.label.clone(),
+                                provider: openai_web_candidate.provider.clone(),
+                                model: openai_web_candidate.model.clone(),
+                                status: "streaming".to_string(),
+                                text: String::new(),
+                                error: None,
+                            },
+                        ],
+                        active_candidate_id: Some(anthropic_candidate.id.clone()),
+                    },
+                )
+                .await;
+                let _ = app_handle.emit(
+                    EVENT_HAIKU_CANDIDATE_START,
+                    candidate_start_payload(&request_id, &anthropic_candidate),
+                );
+                let _ = app_handle.emit(
+                    EVENT_HAIKU_CANDIDATE_START,
+                    candidate_start_payload(&request_id, &openai_mini_candidate),
+                );
+                let _ = app_handle.emit(
+                    EVENT_HAIKU_CANDIDATE_START,
+                    candidate_start_payload(&request_id, &openai_web_candidate),
+                );
+                let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
+
+                log::info!(
+                    "Command: start_haiku_chat_stream parallel request_id={} ctx_len={} q_len={} images={}",
+                    request_id,
+                    context.len(),
+                    question.len(),
+                    images.len()
+                );
+
+                let request_id_clone = request_id.clone();
+                let app_handle_clone = app_handle.clone();
+                let anthropic_model = model.clone();
+                let system_prompt_clone = system_prompt.clone();
+                let images_clone = images.clone();
+                let context_clone = context.clone();
+                let question_clone = question.clone();
+                let api_key_clone = api_key.clone();
+                let anthropic_candidate_clone = anthropic_candidate.clone();
+                let openai_mini_candidate_clone = openai_mini_candidate.clone();
+                let openai_web_candidate_clone = openai_web_candidate.clone();
+
+                tauri::async_runtime::spawn(async move {
+                    let combined_text = if context_clone.is_empty() {
+                        question_clone.clone()
+                    } else if question_clone.is_empty() {
+                        context_clone.clone()
+                    } else {
+                        format!("{context_clone}\n\nЗАПРОС: {question_clone}")
+                    };
+
+                    let anthropic_writer = spawn_companion_delta_writer(
+                        app_handle_clone.clone(),
+                        request_id_clone.clone(),
+                        Some(anthropic_candidate_clone.id.clone()),
+                    );
+                    let openai_mini_writer = spawn_companion_delta_writer(
+                        app_handle_clone.clone(),
+                        request_id_clone.clone(),
+                        Some(openai_mini_candidate_clone.id.clone()),
+                    );
+                    let openai_web_writer = spawn_companion_delta_writer(
+                        app_handle_clone.clone(),
+                        request_id_clone.clone(),
+                        Some(openai_web_candidate_clone.id.clone()),
+                    );
+
+                    let openai_mini_request = build_openai_responses_request(
+                        openai_mini_model,
+                        system_prompt_clone.clone(),
+                        combined_text.clone(),
+                        max_tokens,
+                        temperature,
+                        to_llm_image_content(&images_clone),
+                        Some(false),
+                        openai_responses_reasoning_effort(),
+                        openai_responses_verbosity(),
+                    );
+                    let openai_web_request = build_openai_responses_request(
+                        openai_web_model,
+                        system_prompt_clone.clone(),
+                        combined_text.clone(),
+                        max_tokens,
+                        temperature,
+                        to_llm_image_content(&images_clone),
+                        Some(openai_web_search_enabled),
+                        openai_responses_web_reasoning_effort(),
+                        openai_responses_web_verbosity(),
+                    );
+
+                    let anthropic_future = async {
+                        let key: Result<String, crate::domain::LlmError> = match api_key_clone {
+                            Some(k) if !k.trim().is_empty() => Ok(k),
+                            _ => Err(crate::domain::LlmError::Authentication(
+                                "Missing API key".to_string(),
+                            )),
+                        };
+
+                        let result = match key {
+                            Ok(k) => {
+                                let user_content = build_anthropic_chat_user_content(
+                                    &combined_text,
+                                    &images_clone,
+                                );
+                                let app_handle_delta = app_handle_clone.clone();
+                                let request_id_delta = request_id_clone.clone();
+                                let delta_meta = anthropic_candidate_clone.clone();
+                                let companion_delta_tx = anthropic_writer.tx.clone();
+
+                                crate::infrastructure::ai::anthropic::stream_user_content_deltas(
+                                    crate::infrastructure::ai::anthropic::StreamUserContentOptions {
+                                        api_key: &k,
+                                        model: &anthropic_model,
+                                        system_prompt: &system_prompt_clone,
+                                        user_content: &user_content,
+                                        max_tokens,
+                                        temperature,
+                                    },
+                                    move |delta| {
+                                        let delta_text = delta.to_string();
+                                        let _ = app_handle_delta.emit(
+                                            EVENT_HAIKU_DELTA,
+                                            candidate_delta_payload(
+                                                &request_id_delta,
+                                                delta_text.clone(),
+                                                Some(&delta_meta),
+                                            ),
+                                        );
+                                        let _ = companion_delta_tx.send(delta_text);
+                                    },
+                                )
+                                .await
+                                .map_err(|e| match e {
+                                    crate::infrastructure::ai::anthropic::AnthropicError::MissingApiKey => {
+                                        crate::domain::LlmError::Authentication("Missing API key".to_string())
+                                    }
+                                    crate::infrastructure::ai::anthropic::AnthropicError::Http {
+                                        status,
+                                        body,
+                                    } => crate::domain::LlmError::Http { status, body },
+                                    crate::infrastructure::ai::anthropic::AnthropicError::Network(err) => {
+                                        crate::domain::LlmError::Network(err.to_string())
+                                    }
+                                    crate::infrastructure::ai::anthropic::AnthropicError::InvalidResponse(
+                                        err,
+                                    ) => crate::domain::LlmError::InvalidResponse(err),
+                                })
+                            }
+                            Err(e) => Err(e),
+                        };
+
+                        drain_companion_delta_writer(anthropic_writer).await;
+                        result
+                    };
+
+                    let openai_mini_future = async {
+                        let app_handle_delta = app_handle_clone.clone();
+                        let request_id_delta = request_id_clone.clone();
+                        let delta_meta = openai_mini_candidate_clone.clone();
+                        let companion_delta_tx = openai_mini_writer.tx.clone();
+                        let result = openai_mini_provider
+                            .stream_text(
+                                &openai_mini_request,
+                                Box::new(move |delta| {
+                                    let delta_text = delta.to_string();
+                                    let _ = app_handle_delta.emit(
+                                        EVENT_HAIKU_DELTA,
+                                        candidate_delta_payload(
+                                            &request_id_delta,
+                                            delta_text.clone(),
+                                            Some(&delta_meta),
+                                        ),
+                                    );
+                                    let _ = companion_delta_tx.send(delta_text);
+                                }),
+                            )
+                            .await;
+                        drain_companion_delta_writer(openai_mini_writer).await;
+                        result
+                    };
+
+                    let openai_web_future = async {
+                        let app_handle_delta = app_handle_clone.clone();
+                        let request_id_delta = request_id_clone.clone();
+                        let delta_meta = openai_web_candidate_clone.clone();
+                        let companion_delta_tx = openai_web_writer.tx.clone();
+                        let result = openai_web_provider
+                            .stream_text(
+                                &openai_web_request,
+                                Box::new(move |delta| {
+                                    let delta_text = delta.to_string();
+                                    let _ = app_handle_delta.emit(
+                                        EVENT_HAIKU_DELTA,
+                                        candidate_delta_payload(
+                                            &request_id_delta,
+                                            delta_text.clone(),
+                                            Some(&delta_meta),
+                                        ),
+                                    );
+                                    let _ = companion_delta_tx.send(delta_text);
+                                }),
+                            )
+                            .await;
+                        drain_companion_delta_writer(openai_web_writer).await;
+                        result
+                    };
+
+                    let (anthropic_result, openai_mini_result, openai_web_result) =
+                        tokio::join!(anthropic_future, openai_mini_future, openai_web_future);
+                    let anthropic_ok = settle_parallel_candidate(
+                        &app_handle_clone,
+                        &request_id_clone,
+                        &anthropic_candidate_clone,
+                        anthropic_result,
+                    )
+                    .await;
+                    let openai_mini_ok = settle_parallel_candidate(
+                        &app_handle_clone,
+                        &request_id_clone,
+                        &openai_mini_candidate_clone,
+                        openai_mini_result,
+                    )
+                    .await;
+                    let openai_web_ok = settle_parallel_candidate(
+                        &app_handle_clone,
+                        &request_id_clone,
+                        &openai_web_candidate_clone,
+                        openai_web_result,
+                    )
+                    .await;
+
+                    if anthropic_ok || openai_mini_ok || openai_web_ok {
+                        let _ = app_handle_clone.emit(
+                            EVENT_HAIKU_DONE,
+                            candidate_done_payload(&request_id_clone, None),
+                        );
+                    } else {
+                        let _ = app_handle_clone.emit(
+                            EVENT_HAIKU_ERROR,
+                            candidate_error_payload(
+                                &request_id_clone,
+                                "All LLM candidates failed".to_string(),
+                                None,
+                            ),
+                        );
+                    }
+                });
+
+                return Ok(request_id);
+            }
+            (Err(err), _) | (_, Err(err)) => {
+                log::warn!(
+                    "Failed to create OpenAI Responses parallel provider, falling back to single provider: {}",
+                    err
+                );
+            }
+        }
+    }
+
     crate::presentation::companion_timeline::begin_haiku_message(
         state.inner(),
         crate::presentation::companion_timeline::CompanionHaikuStart {
@@ -3346,6 +4253,8 @@ pub async fn start_haiku_chat_stream(
             created_at_ms: companion_meta
                 .created_at_ms
                 .unwrap_or_else(crate::presentation::companion_timeline::now_ms),
+            candidates: Vec::new(),
+            active_candidate_id: None,
         },
     )
     .await;
@@ -3378,7 +4287,7 @@ pub async fn start_haiku_chat_stream(
         let app_handle_delta_anthropic = app_handle_delta.clone();
         let app_handle_delta_openai = app_handle_delta.clone();
         let companion_delta_writer =
-            spawn_companion_delta_writer(app_handle_clone.clone(), request_id_clone.clone());
+            spawn_companion_delta_writer(app_handle_clone.clone(), request_id_clone.clone(), None);
 
         let combined_text = if context_clone.is_empty() {
             question_clone.clone()
@@ -3419,10 +4328,11 @@ pub async fn start_haiku_chat_stream(
                             let delta_text = delta.to_string();
                             let _ = app_handle_delta_anthropic.emit(
                                 EVENT_HAIKU_DELTA,
-                                HaikuDeltaPayload {
-                                    request_id: request_id_for_delta_anthropic.clone(),
-                                    delta: delta_text.clone(),
-                                },
+                                candidate_delta_payload(
+                                    &request_id_for_delta_anthropic,
+                                    delta_text.clone(),
+                                    None,
+                                ),
                             );
                             let _ = companion_delta_tx.send(delta_text);
                         },
@@ -3447,7 +4357,9 @@ pub async fn start_haiku_chat_stream(
                 Err(e) => Err(e),
             }
         } else {
-            if !images_clone.is_empty() {
+            if !images_clone.is_empty()
+                && provider_clone != crate::domain::LlmProviderType::OpenAiResponses
+            {
                 log::warn!(
                     "LLM provider '{}' does not support images in this request path; ignoring attachments",
                     llm_provider.name()
@@ -3455,13 +4367,27 @@ pub async fn start_haiku_chat_stream(
             }
 
             let companion_delta_tx = companion_delta_writer.tx.clone();
-            let request = crate::domain::LlmStreamRequest::new(
-                model_clone.clone(),
-                system_prompt_clone.clone(),
-                combined_text,
-                max_tokens,
-                temperature,
-            );
+            let request = if provider_clone == crate::domain::LlmProviderType::OpenAiResponses {
+                build_openai_responses_request(
+                    model_clone.clone(),
+                    system_prompt_clone.clone(),
+                    combined_text,
+                    max_tokens,
+                    temperature,
+                    to_llm_image_content(&images_clone),
+                    openai_responses_web_search,
+                    openai_responses_reasoning_effort(),
+                    openai_responses_verbosity(),
+                )
+            } else {
+                crate::domain::LlmStreamRequest::new(
+                    model_clone.clone(),
+                    system_prompt_clone.clone(),
+                    combined_text,
+                    max_tokens,
+                    temperature,
+                )
+            };
 
             llm_provider
                 .stream_text(
@@ -3470,10 +4396,11 @@ pub async fn start_haiku_chat_stream(
                         let delta_text = delta.to_string();
                         let _ = app_handle_delta_openai.emit(
                             EVENT_HAIKU_DELTA,
-                            HaikuDeltaPayload {
-                                request_id: request_id_for_delta_openai.clone(),
-                                delta: delta_text.clone(),
-                            },
+                            candidate_delta_payload(
+                                &request_id_for_delta_openai,
+                                delta_text.clone(),
+                                None,
+                            ),
                         );
                         let _ = companion_delta_tx.send(delta_text);
                     }),
@@ -3498,9 +4425,7 @@ pub async fn start_haiku_chat_stream(
                 }
                 let _ = app_handle_clone.emit(
                     EVENT_HAIKU_DONE,
-                    HaikuDonePayload {
-                        request_id: request_id_for_done,
-                    },
+                    candidate_done_payload(&request_id_for_done, None),
                 );
             }
             Err(e) => {
@@ -3518,10 +4443,7 @@ pub async fn start_haiku_chat_stream(
                 }
                 let _ = app_handle_clone.emit(
                     EVENT_HAIKU_ERROR,
-                    HaikuErrorPayload {
-                        request_id: request_id_for_error,
-                        error: e.to_string(),
-                    },
+                    candidate_error_payload(&request_id_for_error, e.to_string(), None),
                 );
             }
         }
@@ -3559,6 +4481,7 @@ pub async fn start_code_explain_stream(
         "openai" | "openai_compatible" | "openrouter" => {
             crate::domain::LlmProviderType::OpenAiCompatible
         }
+        "openai_responses" | "responses" => crate::domain::LlmProviderType::OpenAiResponses,
         "backend" => crate::domain::LlmProviderType::Backend,
         other => {
             log::warn!(
@@ -3581,6 +4504,13 @@ pub async fn start_code_explain_stream(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1024),
+            crate::domain::LlmProviderType::OpenAiResponses => {
+                std::env::var("OPENAI_RESPONSES_MAX_TOKENS")
+                    .or_else(|_| std::env::var("OPENAI_MAX_TOKENS"))
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1024)
+            }
             crate::domain::LlmProviderType::Backend => 1024,
         });
 
@@ -3596,6 +4526,13 @@ pub async fn start_code_explain_stream(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.2),
+            crate::domain::LlmProviderType::OpenAiResponses => {
+                std::env::var("OPENAI_RESPONSES_TEMPERATURE")
+                    .or_else(|_| std::env::var("OPENAI_TEMPERATURE"))
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.2)
+            }
             crate::domain::LlmProviderType::Backend => 0.2,
         });
 
@@ -3636,6 +4573,7 @@ pub async fn start_code_explain_stream(
         crate::domain::LlmProviderType::OpenAiCompatible => std::env::var("OPENAI_MODEL")
             .or_else(|_| std::env::var("LLM_MODEL"))
             .map_err(|_| "OPENAI_MODEL (or LLM_MODEL) is not set".to_string())?,
+        crate::domain::LlmProviderType::OpenAiResponses => openai_responses_model(),
         crate::domain::LlmProviderType::Backend => {
             std::env::var("LLM_MODEL").unwrap_or_else(|_| "default".to_string())
         }
@@ -3647,6 +4585,9 @@ pub async fn start_code_explain_stream(
                 .map_err(|_| "ANTHROPIC_API_KEY is not set".to_string())?,
         ),
         crate::domain::LlmProviderType::OpenAiCompatible => Some(
+            std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
+        ),
+        crate::domain::LlmProviderType::OpenAiResponses => Some(
             std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY is not set".to_string())?,
         ),
         crate::domain::LlmProviderType::Backend => None,

@@ -83,6 +83,11 @@ const appVersion = ref('');
 const glowColor = ref<'blue' | 'red' | null>(null);
 const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
 const microphoneMuteHotkeyLabel = computed(() => (isMac ? 'Option+Z' : 'Alt+Z'));
+const webSearchToggleTooltip = computed(() =>
+  chatStore.openaiResponsesWebSearchEnabled
+    ? 'Web search для OpenAI включён'
+    : 'Web search для OpenAI выключен'
+);
 
 const audioPermissions = useAudioPermissions();
 
@@ -759,6 +764,7 @@ async function runCompanionPromptSend(input: {
       mediaType: img.mime,
       dataBase64: img.dataBase64,
     })),
+    openaiResponsesWebSearch: chatStore.openaiResponsesWebSearchEnabled,
   });
   if (response.snapshot) {
     applyCompanionSnapshot(response.snapshot);
@@ -1348,6 +1354,7 @@ const onHaikuHover = async () => {
     if (chatStore.companionModeEnabled) {
       const response = await invoke<CompanionActionResponse>(CMD_COMPANION_REQUEST_AI, {
         questionText: null,
+        openaiResponsesWebSearch: chatStore.openaiResponsesWebSearchEnabled,
       });
       if (response.snapshot) {
         applyCompanionSnapshot(response.snapshot);
@@ -1387,6 +1394,10 @@ const onMicToggleClick = async () => {
   } catch (err) {
     console.error('Failed to toggle microphone:', err);
   }
+};
+
+const onWebSearchToggleClick = () => {
+  chatStore.toggleOpenAiResponsesWebSearch();
 };
 
 function isAdditiveSelection(e: MouseEvent): boolean {
@@ -1822,6 +1833,7 @@ const onChatMouseDown = (e: MouseEvent) => {
           @row-mousemove="onFeedRowMouseMove"
           @message-click="onFeedMessageClick"
           @inline-edit-keydown="onInlineEditKeydown"
+          @assistant-candidate-select="chatStore.selectHaikuCandidate"
         >
           <template #overlay>
             <div
@@ -1949,6 +1961,19 @@ const onChatMouseDown = (e: MouseEvent) => {
       <!-- Controls -->
       <div class="controls">
         <div class="controls-center">
+          <v-tooltip :text="webSearchToggleTooltip" location="top">
+            <template #activator="{ props: tp }">
+              <button
+                v-bind="tp"
+                class="web-search-toggle-button no-drag"
+                :class="{ active: chatStore.openaiResponsesWebSearchEnabled }"
+                :aria-pressed="chatStore.openaiResponsesWebSearchEnabled"
+                @click="onWebSearchToggleClick"
+              >
+                <span class="mdi mdi-web"></span>
+              </button>
+            </template>
+          </v-tooltip>
           <v-tooltip
             :text="chatStore.microphoneEnabled
               ? `Замьютить микрофон (${microphoneMuteHotkeyLabel})`
@@ -2487,6 +2512,35 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 .mic-toggle-button.disabled:hover {
   transform: none;
+}
+
+.web-search-toggle-button {
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border-radius: 12px;
+  border: 1px solid rgba(20, 184, 166, 0.28);
+  background: rgba(20, 184, 166, 0.1);
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  opacity: 0.9;
+  transition: all 0.15s ease;
+}
+
+.web-search-toggle-button:hover {
+  opacity: 1;
+  transform: scale(1.05);
+}
+
+.web-search-toggle-button.active {
+  background: rgba(20, 184, 166, 0.22);
+  border-color: rgba(45, 212, 191, 0.55);
+  color: rgba(240, 253, 250, 0.98);
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.2), 0 0 16px rgba(20, 184, 166, 0.22);
 }
 
 @keyframes haiku-spin {
@@ -3374,6 +3428,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 
   .haiku-button,
   .mic-toggle-button,
+  .web-search-toggle-button,
   .controls-right .selection-clear-button,
   .controls-right .context-clear-button,
   .controls-right .history-clear-button {
@@ -3452,6 +3507,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 
   .haiku-button,
   .mic-toggle-button,
+  .web-search-toggle-button,
   .controls-right .selection-clear-button,
   .controls-right .context-clear-button,
   .controls-right .history-clear-button {

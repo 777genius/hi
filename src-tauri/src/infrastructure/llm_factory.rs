@@ -3,6 +3,7 @@ use crate::domain::{
 };
 use crate::infrastructure::llm::{
     AnthropicLlmProvider, BackendLlmProvider, OpenAiCompatibleLlmProvider,
+    OpenAiResponsesLlmProvider,
 };
 
 /// Factory for creating LLM providers based on runtime configuration.
@@ -29,6 +30,10 @@ impl LlmProviderFactory for DefaultLlmProviderFactory {
 
             LlmProviderType::OpenAiCompatible => {
                 Ok(Box::new(OpenAiCompatibleLlmProvider::new(config)?))
+            }
+
+            LlmProviderType::OpenAiResponses => {
+                Ok(Box::new(OpenAiResponsesLlmProvider::new(config)?))
             }
 
             LlmProviderType::Backend => Ok(Box::new(BackendLlmProvider::new(config)?)),
@@ -61,6 +66,17 @@ mod tests {
         let f = DefaultLlmProviderFactory::new();
         let cfg = LlmRuntimeConfig {
             provider: LlmProviderType::Anthropic,
+            ..Default::default()
+        };
+        let err = f.create(&cfg).err().expect("expected error");
+        assert!(matches!(err, crate::domain::LlmError::Authentication(_)));
+    }
+
+    #[test]
+    fn create_openai_responses_requires_key() {
+        let f = DefaultLlmProviderFactory::new();
+        let cfg = LlmRuntimeConfig {
+            provider: LlmProviderType::OpenAiResponses,
             ..Default::default()
         };
         let err = f.create(&cfg).err().expect("expected error");
