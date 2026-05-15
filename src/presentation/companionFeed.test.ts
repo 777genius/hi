@@ -14,6 +14,11 @@ function makeSnapshot(overrides: Partial<CompanionSnapshotData> = {}): Companion
       enabled: true,
       supported: true,
       source: 'os',
+      systemMuted: false,
+      systemSupported: true,
+      systemSource: 'os',
+      appMuted: false,
+      appEnabled: true,
     },
     controls: {
       historyFloorSeq: 0,

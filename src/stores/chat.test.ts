@@ -80,6 +80,11 @@ function companionSnapshot(timeline: CompanionSnapshotData['timeline'] = []): Co
       enabled: true,
       supported: true,
       source: 'combined',
+      systemMuted: false,
+      systemSupported: true,
+      systemSource: 'combined',
+      appMuted: false,
+      appEnabled: true,
     },
     controls: {
       historyFloorSeq: 0,

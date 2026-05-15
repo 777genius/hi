@@ -134,6 +134,11 @@ export type CompanionSnapshotData = {
     enabled: boolean;
     supported: boolean;
     source: string;
+    systemMuted: boolean;
+    systemSupported: boolean;
+    systemSource: string;
+    appMuted: boolean;
+    appEnabled: boolean;
   };
   controls: {
     historyFloorSeq: number;

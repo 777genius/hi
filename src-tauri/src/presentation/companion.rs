@@ -62,6 +62,11 @@ pub struct CompanionMicrophoneState {
     pub enabled: bool,
     pub supported: bool,
     pub source: String,
+    pub system_muted: bool,
+    pub system_supported: bool,
+    pub system_source: String,
+    pub app_muted: bool,
+    pub app_enabled: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, Default)]
@@ -294,6 +299,8 @@ struct TokenQuery {
 struct CompanionAiRequestBody {
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    openai_responses_web_search: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -303,6 +310,8 @@ struct CompanionPromptSendBody {
     text: Option<String>,
     #[serde(default)]
     images: Vec<crate::presentation::commands::LlmImageInput>,
+    #[serde(default)]
+    openai_responses_web_search: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -582,15 +591,27 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
     let runtime = state.companion_runtime.read().await.clone();
     let companion_mode_enabled = *runtime.enabled.read().await;
 
-    let microphone_payload =
-        crate::presentation::commands::get_effective_microphone_mute_state(state)
-            .await
-            .unwrap_or(MicrophoneMuteStatePayload {
+    let system_microphone_payload =
+        crate::presentation::commands::get_system_microphone_mute_state().unwrap_or(
+            MicrophoneMuteStatePayload {
                 muted: false,
                 supported: false,
                 source: "unknown".to_string(),
                 detail: None,
-            });
+            },
+        );
+    let app_microphone_payload =
+        crate::presentation::commands::get_app_microphone_mute_state(state);
+    let microphone_muted = system_microphone_payload.muted || app_microphone_payload.muted;
+    let microphone_source = match (
+        system_microphone_payload.muted,
+        app_microphone_payload.muted,
+    ) {
+        (true, true) => "combined".to_string(),
+        (true, false) => system_microphone_payload.source.clone(),
+        (false, true) => app_microphone_payload.source.clone(),
+        (false, false) => system_microphone_payload.source.clone(),
+    };
 
     let recording_status = state.transcription_service.get_status().await;
     let active_session_id = state
@@ -641,10 +662,15 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
             active_session_id,
         },
         microphone: CompanionMicrophoneState {
-            muted: microphone_payload.muted,
-            enabled: !microphone_payload.muted,
-            supported: microphone_payload.supported,
-            source: microphone_payload.source,
+            muted: microphone_muted,
+            enabled: !microphone_muted,
+            supported: system_microphone_payload.supported || app_microphone_payload.supported,
+            source: microphone_source,
+            system_muted: system_microphone_payload.muted,
+            system_supported: system_microphone_payload.supported,
+            system_source: system_microphone_payload.source,
+            app_muted: app_microphone_payload.muted,
+            app_enabled: !app_microphone_payload.muted,
         },
         controls: CompanionControlState {
             history_floor_seq,
@@ -767,6 +793,18 @@ async fn route_request(
         }
         (Method::POST, "/api/microphone/unmute") => {
             handle_mutating_post(app_handle.clone(), req, "microphone_unmute").await
+        }
+        (Method::POST, "/api/microphone/system/mute") => {
+            handle_mutating_post(app_handle.clone(), req, "microphone_mute").await
+        }
+        (Method::POST, "/api/microphone/system/unmute") => {
+            handle_mutating_post(app_handle.clone(), req, "microphone_unmute").await
+        }
+        (Method::POST, "/api/microphone/app/mute") => {
+            handle_mutating_post(app_handle.clone(), req, "app_microphone_mute").await
+        }
+        (Method::POST, "/api/microphone/app/unmute") => {
+            handle_mutating_post(app_handle.clone(), req, "app_microphone_unmute").await
         }
         (Method::POST, "/api/desktop/blackout/enable") => {
             handle_mutating_post(app_handle.clone(), req, "desktop_blackout_enable").await
@@ -1005,6 +1043,22 @@ async fn handle_mutating_post(
             )
             .await
         }
+        "app_microphone_mute" => {
+            crate::presentation::companion_actions::ensure_app_microphone_muted(
+                state.inner(),
+                &app_handle,
+                true,
+            )
+            .await
+        }
+        "app_microphone_unmute" => {
+            crate::presentation::companion_actions::ensure_app_microphone_muted(
+                state.inner(),
+                &app_handle,
+                false,
+            )
+            .await
+        }
         "desktop_blackout_enable" => {
             crate::presentation::companion_actions::ensure_desktop_blackout(
                 state.inner(),
@@ -1096,7 +1150,7 @@ async fn handle_ai_request_post(
         state.inner(),
         &app_handle,
         body.text,
-        None,
+        body.openai_responses_web_search,
     )
     .await
     {
@@ -1158,7 +1212,7 @@ async fn handle_prompt_send_post(
         &app_handle,
         body.text.unwrap_or_default(),
         body.images,
-        None,
+        body.openai_responses_web_search,
     )
     .await
     {

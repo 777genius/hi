@@ -156,6 +156,37 @@ pub async fn ensure_microphone_muted(
     success(state, app_handle, if muted { "muted" } else { "unmuted" }).await
 }
 
+pub async fn ensure_app_microphone_muted(
+    state: &AppState,
+    app_handle: &AppHandle,
+    muted: bool,
+) -> Result<CompanionActionResponse, String> {
+    let Some(_guard) = acquire_action_lock(state).await else {
+        return busy_transition(app_handle).await;
+    };
+
+    if !*state.is_authenticated.read().await {
+        return rejected_auth(app_handle).await;
+    }
+
+    let current = commands::get_app_microphone_mute_state(state);
+    if current.muted == muted {
+        return noop(app_handle, "noop").await;
+    }
+
+    commands::set_app_microphone_muted_raw(state, app_handle.clone(), muted).await?;
+    success(
+        state,
+        app_handle,
+        if muted {
+            "app_microphone_muted"
+        } else {
+            "app_microphone_unmuted"
+        },
+    )
+    .await
+}
+
 pub async fn ensure_desktop_blackout(
     state: &AppState,
     app_handle: &AppHandle,

@@ -161,7 +161,6 @@ fn build_responses_payload(request: &LlmStreamRequest) -> Value {
             }
         ],
         "max_output_tokens": request.max_tokens,
-        "temperature": request.temperature,
         "stream": true,
         "store": false
     });
@@ -274,6 +273,7 @@ mod tests {
         assert_eq!(payload["stream"], true);
         assert_eq!(payload["reasoning"]["effort"], "low");
         assert_eq!(payload["text"]["verbosity"], "low");
+        assert!(payload.get("temperature").is_none());
         assert!(payload.get("tools").is_none());
     }
 

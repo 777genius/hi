@@ -268,6 +268,16 @@ fn app_microphone_mute_status(
     }
 }
 
+pub fn get_app_microphone_mute_state(state: &AppState) -> MicrophoneMuteStatePayload {
+    to_microphone_mute_state_payload(app_microphone_mute_status(state), None)
+}
+
+pub fn get_system_microphone_mute_state() -> Result<MicrophoneMuteStatePayload, String> {
+    let os_status = crate::infrastructure::microphone_mute::get_microphone_mute_status()
+        .map_err(|e| format!("Не удалось получить статус микрофона: {}", e))?;
+    Ok(to_microphone_mute_state_payload(os_status, None))
+}
+
 fn effective_microphone_mute_status(
     state: &AppState,
     os_status: crate::infrastructure::microphone_mute::MicrophoneMuteStatus,
@@ -292,6 +302,20 @@ pub async fn get_effective_microphone_mute_state(
 
 async fn emit_microphone_mute_state(app_handle: &AppHandle, payload: &MicrophoneMuteStatePayload) {
     let _ = app_handle.emit(EVENT_MICROPHONE_MUTE_STATE, payload.clone());
+}
+
+pub async fn set_app_microphone_muted_raw(
+    state: &AppState,
+    app_handle: AppHandle,
+    muted: bool,
+) -> Result<MicrophoneMuteStatePayload, String> {
+    let current = get_app_microphone_mute_state(state);
+    if current.muted == muted {
+        return Ok(current);
+    }
+
+    sync_microphone_transcription_enabled_internal(state, app_handle, !muted).await?;
+    Ok(get_app_microphone_mute_state(state))
 }
 
 async fn sync_microphone_transcription_enabled_internal(
@@ -2935,7 +2959,6 @@ pub async fn start_haiku_stream(
             crate::domain::LlmProviderType::Anthropic
         }
     };
-
     let max_tokens: u32 = std::env::var("LLM_MAX_TOKENS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -3726,7 +3749,6 @@ pub async fn start_haiku_chat_stream(
             crate::domain::LlmProviderType::Anthropic
         }
     };
-
     let max_tokens: u32 = std::env::var("LLM_MAX_TOKENS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -4491,7 +4513,6 @@ pub async fn start_code_explain_stream(
             crate::domain::LlmProviderType::Anthropic
         }
     };
-
     let max_tokens: u32 = std::env::var("LLM_MAX_TOKENS")
         .ok()
         .and_then(|v| v.parse().ok())

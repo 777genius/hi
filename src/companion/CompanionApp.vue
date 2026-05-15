@@ -42,6 +42,7 @@ const REQUEST_TIMEOUT_MS = 9000;
 const ACTION_REQUEST_TIMEOUT_MS = 30000;
 const PWA_CHECK_TIMEOUT_MS = 4500;
 const PWA_INSTALL_HINT_DISMISSED_KEY = 'companionPwaInstallHintDismissed';
+const OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY = 'openaiResponsesWebSearchEnabled';
 
 const companionFeedRef = ref<{ scrollEl: HTMLElement | null } | null>(null);
 const snapshot = ref<TauriSnapshotEnvelope<CompanionSnapshotData> | null>(null);
@@ -54,6 +55,7 @@ const actionInFlight = ref(false);
 const syncInFlight = ref(false);
 const aiQuestion = ref('');
 const aiComposerOpen = ref(false);
+const openaiResponsesWebSearchEnabled = ref(readStoredBoolean(OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY, true));
 const promptImages = ref<PromptImageDraft[]>([]);
 const promptFileInputRef = ref<HTMLInputElement | null>(null);
 const pwaStandalone = ref(false);
@@ -93,12 +95,16 @@ const emptyFeedText = computed(() => {
 
 const recordingStatus = computed<CompanionRecordingStatus>(() => snapshotData.value?.recording.status ?? 'Idle');
 const canStop = computed(() => recordingStatus.value === 'Recording' || recordingStatus.value === 'Starting');
-const microphoneSupported = computed(() => !!snapshotData.value?.microphone.supported);
-const microphoneMuted = computed(() => !!snapshotData.value?.microphone.muted);
+const appMicrophoneMuted = computed(() => !!snapshotData.value?.microphone.appMuted);
 const recordButtonTitle = computed(() => (canStop.value ? 'Остановить запись' : 'Начать запись'));
-const microphoneToggleTitle = computed(() => (microphoneMuted.value ? 'Включить микрофон' : 'Выключить микрофон'));
+const appMicrophoneToggleTitle = computed(() => (
+  appMicrophoneMuted.value ? 'Включить микрофон в приложении' : 'Замьютить микрофон только в приложении'
+));
 const aiButtonTitle = computed(() => 'Сгенерировать ответ');
 const promptComposerTitle = computed(() => (aiComposerOpen.value ? 'Скрыть сообщение в AI' : 'Открыть сообщение в AI'));
+const webSearchToggleTitle = computed(() => (
+  openaiResponsesWebSearchEnabled.value ? 'Web search для OpenAI включён' : 'Web search для OpenAI выключен'
+));
 const canSendPrompt = computed(() => aiQuestion.value.trim().length > 0 || promptImages.value.length > 0);
 const pwaInstallPlatform = computed(() => detectCompanionInstallPlatform(
   typeof navigator === 'undefined' ? null : navigator,
@@ -157,6 +163,31 @@ const recordButtonIconClass = computed(() => {
 function statusRevision(next: TauriSnapshotEnvelope<CompanionSnapshotData>): number {
   const value = Number(next?.revision || '0');
   return Number.isFinite(value) ? value : 0;
+}
+
+function readStoredBoolean(key: string, fallback = false): boolean {
+  if (typeof localStorage === 'undefined') return fallback;
+  try {
+    const value = localStorage.getItem(key);
+    if (value === '1' || value === 'true') return true;
+    if (value === '0' || value === 'false') return false;
+  } catch {
+    // ignore
+  }
+  return fallback;
+}
+
+function setOpenAiResponsesWebSearchEnabled(enabled: boolean): void {
+  openaiResponsesWebSearchEnabled.value = !!enabled;
+  try {
+    localStorage.setItem(OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY, enabled ? '1' : '0');
+  } catch {
+    // ignore
+  }
+}
+
+function toggleOpenAiResponsesWebSearch(): void {
+  setOpenAiResponsesWebSearchEnabled(!openaiResponsesWebSearchEnabled.value);
 }
 
 function isNearBottom(): boolean {
@@ -670,7 +701,10 @@ async function onRecordClick(): Promise<void> {
 }
 
 async function requestAiReply(): Promise<void> {
-  await sendAction('/api/ai/request', { text: '' });
+  await sendAction('/api/ai/request', {
+    text: '',
+    openaiResponsesWebSearch: openaiResponsesWebSearchEnabled.value,
+  });
 }
 
 async function sendPromptDraft(): Promise<void> {
@@ -681,6 +715,7 @@ async function sendPromptDraft(): Promise<void> {
   }
   const applied = await sendAction('/api/prompt/send', {
     text,
+    openaiResponsesWebSearch: openaiResponsesWebSearchEnabled.value,
     images: promptImages.value.map((img) => ({
       mediaType: img.mime,
       dataBase64: img.dataBase64,
@@ -1096,13 +1131,27 @@ onUnmounted(() => {
         </div>
 
         <div class="controls-center">
+          <div class="microphone-toggle-group" aria-label="Управление микрофоном">
+            <button
+              class="dock-microphone-button app"
+              :class="{ active: appMicrophoneMuted }"
+              :title="appMicrophoneToggleTitle"
+              :disabled="actionsDisabled"
+              @click="sendAction(appMicrophoneMuted ? '/api/microphone/app/unmute' : '/api/microphone/app/mute').catch(() => {})"
+            >
+              <span :class="appMicrophoneMuted ? 'mdi mdi-microphone-off' : 'mdi mdi-microphone'" />
+            </button>
+          </div>
+
           <button
-            class="dock-circle-button"
-            :title="microphoneToggleTitle"
-            :disabled="actionsDisabled || !microphoneSupported"
-            @click="sendAction(microphoneMuted ? '/api/microphone/unmute' : '/api/microphone/mute').catch(() => {})"
+            class="dock-circle-button web-search"
+            :class="{ active: openaiResponsesWebSearchEnabled }"
+            :title="webSearchToggleTitle"
+            :aria-pressed="openaiResponsesWebSearchEnabled"
+            :disabled="actionsDisabled"
+            @click="toggleOpenAiResponsesWebSearch"
           >
-            <span :class="microphoneMuted ? 'mdi mdi-microphone-off' : 'mdi mdi-microphone'" />
+            <span class="mdi mdi-web" />
           </button>
 
           <button
@@ -1640,6 +1689,7 @@ onUnmounted(() => {
 
 .dock-square-button,
 .dock-circle-button,
+.dock-microphone-button,
 .dock-record-button,
 .ask-close-button,
 .send-button {
@@ -1653,6 +1703,7 @@ onUnmounted(() => {
 
 .dock-square-button:disabled,
 .dock-circle-button:disabled,
+.dock-microphone-button:disabled,
 .dock-record-button:disabled {
   opacity: 0.42;
   cursor: default;
@@ -1679,6 +1730,7 @@ onUnmounted(() => {
 
 .dock-square-button:hover:not(:disabled),
 .dock-circle-button:hover:not(:disabled),
+.dock-microphone-button:hover:not(:disabled),
 .dock-record-button:hover:not(:disabled) {
   transform: translateY(-1px) scale(1.02);
 }
@@ -1693,6 +1745,36 @@ onUnmounted(() => {
 
 .dock-circle-button.active {
   background: rgba(59, 130, 246, 0.34);
+}
+
+.dock-circle-button.web-search.active {
+  background: rgba(76, 175, 80, 0.28);
+  color: #b8f5c3;
+  box-shadow: inset 0 0 0 1px rgba(184, 245, 195, 0.18);
+}
+
+.microphone-toggle-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dock-microphone-button {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 20px;
+}
+
+.dock-microphone-button.app {
+  background: rgba(59, 130, 246, 0.16);
+}
+
+.dock-microphone-button.active {
+  background: rgba(244, 67, 54, 0.24);
+  color: #ffb4ad;
+  box-shadow: inset 0 0 0 1px rgba(255, 154, 143, 0.18);
 }
 
 .dock-record-button {
@@ -1831,6 +1913,13 @@ onUnmounted(() => {
     font-size: 22px;
   }
 
+  .dock-microphone-button {
+    width: 38px;
+    height: 38px;
+    border-radius: 13px;
+    font-size: 18px;
+  }
+
   .dock-record-button {
     width: 60px;
     height: 60px;
@@ -1867,6 +1956,13 @@ onUnmounted(() => {
   .dock-circle-button {
     width: 44px;
     height: 44px;
+  }
+
+  .dock-microphone-button {
+    width: 36px;
+    height: 36px;
+    border-radius: 12px;
+    font-size: 17px;
   }
 
   .dock-record-button {

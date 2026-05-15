@@ -38,6 +38,7 @@ const WS_RESUME_GRACE_MS: u64 = 10_000;
 const WS_RECONNECT_DELAYS_MS: [u64; 5] = [250, 500, 1000, 2000, 3000];
 const REPLAY_BUFFER_MAX_MS: u64 = 10_000;
 const REPLAY_BUFFER_MAX_BYTES: usize = 512 * 1024;
+const DEFAULT_BACKEND_PROTOCOL_VERSION: u16 = 1;
 
 /// Проверяем, что URL указывает на локальный бэкенд (localhost/loopback).
 ///
@@ -74,6 +75,14 @@ fn get_default_backend_url() -> String {
         log::info!("Release build: using prod backend {}", PROD_BACKEND_URL);
         PROD_BACKEND_URL.to_string()
     }
+}
+
+fn backend_protocol_version() -> u16 {
+    std::env::var("VOICE_TO_TEXT_BACKEND_PROTOCOL_V")
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|value| *value >= 1)
+        .unwrap_or(DEFAULT_BACKEND_PROTOCOL_VERSION)
 }
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -1476,8 +1485,11 @@ impl SttProvider for BackendProvider {
             })
             .filter(|v| !v.is_empty());
 
+        let protocol_v = backend_protocol_version();
+        log::info!("BackendProvider: Using backend protocol_v={}", protocol_v);
+
         let config_msg = ClientMessage::Config {
-            protocol_v: 2,
+            protocol_v,
             provider: provider_name.to_string(),
             language: config.language.clone(),
             sample_rate: 16000,
@@ -1810,8 +1822,11 @@ impl SttProvider for BackendProvider {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Mutex as StdMutex;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
+
+    static BACKEND_PROTOCOL_ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
     #[test]
     fn test_backend_provider_new() {
@@ -1857,6 +1872,30 @@ mod tests {
             category_for_server_error("PROVIDER_UNAVAILABLE"),
             SttConnectionCategory::ServerUnavailable
         );
+    }
+
+    #[test]
+    fn backend_protocol_version_defaults_to_prod_compatible_v1() {
+        let _guard = BACKEND_PROTOCOL_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("VOICE_TO_TEXT_BACKEND_PROTOCOL_V").ok();
+        std::env::remove_var("VOICE_TO_TEXT_BACKEND_PROTOCOL_V");
+        assert_eq!(backend_protocol_version(), 1);
+        match previous {
+            Some(value) => std::env::set_var("VOICE_TO_TEXT_BACKEND_PROTOCOL_V", value),
+            None => std::env::remove_var("VOICE_TO_TEXT_BACKEND_PROTOCOL_V"),
+        }
+    }
+
+    #[test]
+    fn backend_protocol_version_can_be_overridden_for_new_backend() {
+        let _guard = BACKEND_PROTOCOL_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("VOICE_TO_TEXT_BACKEND_PROTOCOL_V").ok();
+        std::env::set_var("VOICE_TO_TEXT_BACKEND_PROTOCOL_V", "2");
+        assert_eq!(backend_protocol_version(), 2);
+        match previous {
+            Some(value) => std::env::set_var("VOICE_TO_TEXT_BACKEND_PROTOCOL_V", value),
+            None => std::env::remove_var("VOICE_TO_TEXT_BACKEND_PROTOCOL_V"),
+        }
     }
 
     #[test]
