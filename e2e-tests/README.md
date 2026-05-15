@@ -108,6 +108,16 @@ pnpm e2e:companion-context -- --skip-ai
 pnpm e2e:companion-context -- --allow-ai-miss
 ```
 
+Проверка, что backend memory не только получил ingest, но и реально достаёт нужный контекст после длинной истории:
+
+```bash
+INTERVIEW_MEMORY_AUTH_TOKEN="$(cat /tmp/hackinterview-memory-e2e-token.txt)" \
+INTERVIEW_MEMORY_DB_URL=postgres://belief@localhost/voice_to_text \
+pnpm e2e:companion-context -- --filler-chars 52000 --verify-memory --memory-api-url http://127.0.0.1:8080
+```
+
+`--verify-memory` через `psql` находит свежий `session_id` по E2E markers, вызывает `/api/v1/interview-memory/context` и проверяет, что retrieved memory содержит ранний code marker, поздний marker, голосовой вопрос про проект, `debounce`, таймер/аргумент, очередь/стек и линейную сложность.
+
 Если desktop app не залогинен, voice/recording phase ожидаемо вернёт `authRequired`. Для проверки long context/focus-copy/memory split без записи:
 
 ```bash

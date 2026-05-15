@@ -4366,6 +4366,12 @@ Frontend companion synthetic context gate:
   cd /Users/belief/dev/projects/HackInterview
   pnpm e2e:companion-context -- --filler-chars 80000
 
+Frontend companion memory retrieval gate:
+  cd /Users/belief/dev/projects/HackInterview
+  INTERVIEW_MEMORY_AUTH_TOKEN="$(cat /tmp/hackinterview-memory-e2e-token.txt)" \
+  INTERVIEW_MEMORY_DB_URL=postgres://belief@localhost/voice_to_text \
+  pnpm e2e:companion-context -- --filler-chars 52000 --verify-memory --memory-api-url http://127.0.0.1:8080
+
 Frontend companion dual audio gate:
   cd /Users/belief/dev/projects/HackInterview
   pnpm e2e:companion-audio -- --cycles 3 --allow-mic-miss
@@ -4392,6 +4398,8 @@ INTERVIEW_MEMORY_AUTH_TOKEN="<local-user-jwt>" INTERVIEW_MEMORY_API_URL=http://1
 ```
 
 `INTERVIEW_MEMORY_AUTH_TOKEN` is an explicit memory-bridge override for local E2E only. It must not change normal app auth semantics when unset.
+
+The `--verify-memory` gate must assert the backend `## retrieved_memory` section itself, not only the final AI answer. Required evidence: early code marker, late marker, project phrase, debounce/timer/argument question, queue-not-stack correction and linear-complexity requirement.
 
 Backend must have memory routes enabled:
 

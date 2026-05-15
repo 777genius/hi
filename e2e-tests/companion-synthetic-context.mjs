@@ -32,6 +32,14 @@ const ANSWER_EXPECTATIONS = [
   { label: 'queue not stack answer', terms: ['очеред', 'стек'] },
   { label: 'linear complexity answer', terms: ['линей'] },
 ];
+const MEMORY_EXPECTATIONS = [
+  { label: 'early code marker', terms: [CODE_MARKER] },
+  { label: 'late marker', terms: [LATE_MARKER] },
+  { label: 'project context', terms: ['север', 'мост'] },
+  { label: 'debounce question', terms: ['debounce', 'таймер', 'аргумент'] },
+  { label: 'queue not stack', terms: ['очеред', 'стек'] },
+  { label: 'linear complexity', terms: ['линей'] },
+];
 
 function parseArgs(argv) {
   const options = {
@@ -48,6 +56,12 @@ function parseArgs(argv) {
     skipVoice: false,
     skipAi: false,
     allowAiMiss: false,
+    verifyMemory: false,
+    memoryApiUrl: process.env.INTERVIEW_MEMORY_E2E_API_URL || process.env.INTERVIEW_MEMORY_API_URL || '',
+    memoryAuthToken: process.env.INTERVIEW_MEMORY_AUTH_TOKEN || '',
+    memoryAuthTokenFile: process.env.INTERVIEW_MEMORY_AUTH_TOKEN_FILE || '',
+    memoryDbUrl: process.env.INTERVIEW_MEMORY_DB_URL || process.env.DATABASE_URL || '',
+    memorySessionId: process.env.INTERVIEW_MEMORY_SESSION_ID || '',
     restoreMic: true,
     keepAudio: false,
     openaiResponsesWebSearch: false,
@@ -76,6 +90,12 @@ function parseArgs(argv) {
     else if (arg === '--skip-voice') options.skipVoice = true;
     else if (arg === '--skip-ai') options.skipAi = true;
     else if (arg === '--allow-ai-miss') options.allowAiMiss = true;
+    else if (arg === '--verify-memory') options.verifyMemory = true;
+    else if (arg === '--memory-api-url') options.memoryApiUrl = next();
+    else if (arg === '--memory-auth-token') options.memoryAuthToken = next();
+    else if (arg === '--memory-auth-token-file') options.memoryAuthTokenFile = next();
+    else if (arg === '--memory-db-url') options.memoryDbUrl = next();
+    else if (arg === '--memory-session-id') options.memorySessionId = next();
     else if (arg === '--no-restore-mic') options.restoreMic = false;
     else if (arg === '--keep-audio') options.keepAudio = true;
     else if (arg === '--web-search') options.openaiResponsesWebSearch = true;
@@ -88,6 +108,7 @@ function parseArgs(argv) {
   }
 
   options.baseUrl = normalizeBaseUrl(options.baseUrl);
+  if (options.memoryApiUrl) options.memoryApiUrl = normalizeBaseUrl(options.memoryApiUrl);
   options.fillerChars = Math.max(0, Math.floor(options.fillerChars || 0));
   if (!options.token) options.token = extractTokenFromUrl(process.env.COMPANION_URL || options.baseUrl) || '';
   return options;
@@ -113,6 +134,12 @@ Useful flags:
   --skip-ai                      Only synthesize voice and verify STT timeline.
   --allow-ai-miss                Keep exit code 0 when AI answer misses expectations.
   --web-search                   Enable OpenAI Responses web search for prompt.
+  --verify-memory                Verify backend interview-memory retrieval after the companion flow.
+  --memory-api-url <url>         Backend memory API URL, defaults to INTERVIEW_MEMORY_API_URL.
+  --memory-auth-token <token>    Bearer token for backend memory API.
+  --memory-db-url <url>          Postgres URL used to discover the latest memory session.
+  --memory-session-id <uuid>     Memory session id, avoids DB discovery.
+  --memory-auth-token-file <p>   File with a raw token or auth_store.json.
   --keep-audio                   Keep generated TTS files.
 `);
 }
@@ -150,6 +177,23 @@ async function readBridgeToken() {
   }
 
   return { token: '', path: '' };
+}
+
+async function readMemoryAuthToken(options) {
+  if (options.memoryAuthToken.trim()) return options.memoryAuthToken.trim();
+  if (!options.memoryAuthTokenFile.trim()) return '';
+
+  const raw = (await readFile(options.memoryAuthTokenFile, 'utf8')).trim();
+  if (!raw) return '';
+
+  try {
+    const json = JSON.parse(raw);
+    return String(
+      json.session?.access_token || json.access_token || json.token || json.data?.access_token || '',
+    ).trim();
+  } catch {
+    return raw;
+  }
 }
 
 function commandExists(command) {
@@ -448,6 +492,110 @@ async function runAiContextPhase(options) {
   };
 }
 
+function sqlStringLiteral(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+async function discoverMemorySessionId(options) {
+  if (options.memorySessionId.trim()) return options.memorySessionId.trim();
+  if (!options.memoryDbUrl.trim()) {
+    throw new Error('Memory verification needs --memory-session-id or --memory-db-url');
+  }
+  if (!commandExists('psql')) {
+    throw new Error('Memory verification with --memory-db-url requires psql');
+  }
+
+  const sql = [
+    'select session_id::text',
+    'from interview_memory_chunks',
+    `where created_at > now() - interval '30 minutes'`,
+    `and (text like ${sqlStringLiteral(`%${CODE_MARKER}%`)} or text like ${sqlStringLiteral(`%${LATE_MARKER}%`)})`,
+    'group by session_id',
+    'order by max(created_at) desc',
+    'limit 1;',
+  ].join(' ');
+  const { stdout } = await run('psql', ['-At', '-d', options.memoryDbUrl, '-c', sql]);
+  const sessionId = stdout.trim().split(/\r?\n/).find(Boolean);
+  if (!sessionId) throw new Error('Could not discover latest interview memory session id');
+  return sessionId;
+}
+
+function retrievedMemoryText(contextText) {
+  const marker = '## retrieved_memory';
+  const index = contextText.indexOf(marker);
+  if (index < 0) return '';
+  const rest = contextText.slice(index + marker.length);
+  const nextSectionIndex = rest.search(/\n##\s+/);
+  return nextSectionIndex >= 0 ? rest.slice(0, nextSectionIndex) : rest;
+}
+
+function scoreMemoryContext(contextText) {
+  const retrieved = normalizedText(retrievedMemoryText(contextText));
+  return MEMORY_EXPECTATIONS.map((expectation) => ({
+    label: expectation.label,
+    ok: expectation.terms.every((term) => retrieved.includes(normalizedText(term))),
+    terms: expectation.terms,
+  }));
+}
+
+async function runMemoryContextPhase(options) {
+  if (!options.memoryApiUrl) throw new Error('Memory verification needs --memory-api-url');
+
+  const authToken = await readMemoryAuthToken(options);
+  if (!authToken) {
+    throw new Error('Memory verification needs --memory-auth-token or --memory-auth-token-file');
+  }
+
+  const sessionId = await discoverMemorySessionId(options);
+  const body = {
+    session_id: sessionId,
+    current_request: {
+      id: `companion-e2e-memory-${Date.now()}`,
+      label: 'memory_verification_request',
+      text: [
+        'Собери релевантный контекст интервью для ответа кандидата по проекту Северный мост.',
+        'Нужны ранний кодовый вопрос, голосовой вопрос про debounceSearch, таймер и последний аргумент, поздняя инструкция, очередь вместо стека и линейная сложность.',
+      ].join(' '),
+    },
+    budget_max_chars: 22_000,
+    max_memory_candidates: 80,
+    max_memory_results: 24,
+  };
+
+  const response = await fetch(`${options.memoryApiUrl}/api/v1/interview-memory/context`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${authToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+  const responseText = await response.text();
+  let payload;
+  try {
+    payload = JSON.parse(responseText);
+  } catch {
+    payload = { raw: responseText };
+  }
+  if (!response.ok || payload.success === false) {
+    throw new Error(`Memory context failed: ${response.status} ${JSON.stringify(payload)}`);
+  }
+
+  const context = payload.data?.text || '';
+  const checks = scoreMemoryContext(context);
+  const ok = checks.every((check) => check.ok);
+  return {
+    ok,
+    sessionId,
+    checks,
+    budgetUsed: payload.data?.artifact?.budget_used,
+    budgetTotal: payload.data?.artifact?.budget_total,
+    criticalBudgetPressure: payload.data?.artifact?.critical_budget_pressure,
+    includedChunks: payload.data?.artifact?.included_chunks?.length ?? 0,
+    droppedChunks: payload.data?.artifact?.dropped_chunks?.length ?? 0,
+  };
+}
+
 async function writeArtifact(options, data) {
   await mkdir(options.artifactsDir, { recursive: true });
   const artifactPath = join(
@@ -502,6 +650,14 @@ async function main() {
     console.log(`${icon} AI context: ${aiResult.checks.map((check) => `${check.label}=${check.ok ? 'ok' : 'miss'}`).join(', ')}`);
   }
 
+  let memoryResult = null;
+  if (options.verifyMemory) {
+    console.log('[companion-context] verifying backend interview memory retrieval');
+    memoryResult = await runMemoryContextPhase(options);
+    const icon = memoryResult.ok ? '✅' : '❌';
+    console.log(`${icon} memory context: ${memoryResult.checks.map((check) => `${check.label}=${check.ok ? 'ok' : 'miss'}`).join(', ')}`);
+  }
+
   const final = await getState(options);
   const artifactPath = await writeArtifact(options, {
     createdAt: new Date().toISOString(),
@@ -511,6 +667,8 @@ async function main() {
       fillerChars: options.fillerChars,
       skipVoice: options.skipVoice,
       skipAi: options.skipAi,
+      verifyMemory: options.verifyMemory,
+      memoryApiUrl: options.memoryApiUrl,
       openaiResponsesWebSearch: options.openaiResponsesWebSearch,
     },
     initial: {
@@ -521,6 +679,7 @@ async function main() {
     },
     voiceResult,
     aiResult,
+    memoryResult,
     final: {
       timelineCount: final.timeline.length,
       maxSeq: maxSeq(final),
@@ -536,6 +695,9 @@ async function main() {
     process.exitCode = 1;
   }
   if (aiResult && !aiResult.ok && !options.allowAiMiss) {
+    process.exitCode = 1;
+  }
+  if (memoryResult && !memoryResult.ok) {
     process.exitCode = 1;
   }
 }
