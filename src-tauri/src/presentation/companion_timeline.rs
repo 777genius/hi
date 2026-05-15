@@ -2,7 +2,9 @@ use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::RecordingStatus;
-use crate::presentation::companion::{CompanionAttachment, CompanionMessage, LIVE_STT_MESSAGE_ID};
+use crate::presentation::companion::{
+    CompanionAttachment, CompanionLlmCandidate, CompanionMessage, LIVE_STT_MESSAGE_ID,
+};
 use crate::presentation::events::{FinalTranscriptionPayload, PartialTranscriptionPayload};
 use crate::presentation::AppState;
 
@@ -25,6 +27,8 @@ pub struct CompanionHaikuStart {
     pub request_id: String,
     pub insert_after_id: Option<String>,
     pub created_at_ms: i64,
+    pub candidates: Vec<CompanionLlmCandidate>,
+    pub active_candidate_id: Option<String>,
 }
 
 pub fn now_ms() -> i64 {
@@ -693,6 +697,8 @@ pub async fn append_system_final(
         stt_index: Some(stt_index),
         deleted: false,
         attachments: None,
+        candidates: None,
+        active_candidate_id: None,
     });
 
     for item in timeline.iter_mut() {
@@ -745,6 +751,8 @@ pub async fn append_focus_copy_system_final(
         stt_index: Some(stt_index),
         deleted: false,
         attachments: None,
+        candidates: None,
+        active_candidate_id: None,
     });
 
     for item in timeline.iter_mut() {
@@ -790,6 +798,8 @@ pub async fn append_prompt_message(state: &AppState, prompt: CompanionPromptDraf
             stt_index: None,
             deleted: false,
             attachments: (!prompt.attachments.is_empty()).then_some(prompt.attachments),
+            candidates: None,
+            active_candidate_id: None,
         });
     prune_timeline(state).await;
 }
@@ -824,6 +834,8 @@ pub async fn begin_haiku_message(state: &AppState, request: CompanionHaikuStart)
             stt_index: None,
             deleted: false,
             attachments: None,
+            candidates: (!request.candidates.is_empty()).then_some(request.candidates),
+            active_candidate_id: request.active_candidate_id,
         });
     prune_timeline(state).await;
 }
@@ -847,6 +859,13 @@ pub async fn settle_active_haiku_generation(state: &AppState) -> bool {
 
             settled_request_ids.push(message.id.clone());
             message.status = "final".to_string();
+            if let Some(candidates) = message.candidates.as_mut() {
+                for candidate in candidates.iter_mut() {
+                    if candidate.status == "streaming" {
+                        candidate.status = "final".to_string();
+                    }
+                }
+            }
             if message.text.trim().is_empty() {
                 message.deleted = true;
             }
@@ -871,6 +890,15 @@ pub async fn settle_active_haiku_generation(state: &AppState) -> bool {
 }
 
 pub async fn append_haiku_delta(state: &AppState, request_id: &str, delta: &str) {
+    append_haiku_candidate_delta(state, request_id, None, delta).await;
+}
+
+pub async fn append_haiku_candidate_delta(
+    state: &AppState,
+    request_id: &str,
+    candidate_id: Option<&str>,
+    delta: &str,
+) {
     if request_id.trim().is_empty() || delta.is_empty() {
         return;
     }
@@ -894,12 +922,50 @@ pub async fn append_haiku_delta(state: &AppState, request_id: &str, delta: &str)
         if message.generation != Some(current_generation) {
             return;
         }
-        message.status = "streaming".to_string();
-        message.text.push_str(delta);
+        if let Some(candidate_id) = candidate_id.filter(|value| !value.trim().is_empty()) {
+            let active_candidate_id = message
+                .active_candidate_id
+                .as_deref()
+                .or_else(|| {
+                    message
+                        .candidates
+                        .as_ref()
+                        .and_then(|candidates| candidates.first())
+                        .map(|candidate| candidate.id.as_str())
+                })
+                .map(str::to_string);
+
+            if let Some(candidate) = message
+                .candidates
+                .as_mut()
+                .and_then(|candidates| candidates.iter_mut().find(|item| item.id == candidate_id))
+            {
+                if candidate.status != "streaming" {
+                    return;
+                }
+                candidate.status = "streaming".to_string();
+                candidate.text.push_str(delta);
+                message.status = "streaming".to_string();
+                if active_candidate_id.as_deref() == Some(candidate_id) {
+                    message.text = candidate.text.clone();
+                }
+            }
+        } else {
+            message.status = "streaming".to_string();
+            message.text.push_str(delta);
+        }
     }
 }
 
 pub async fn finalize_haiku_message(state: &AppState, request_id: &str) {
+    finalize_haiku_candidate(state, request_id, None).await;
+}
+
+pub async fn finalize_haiku_candidate(
+    state: &AppState,
+    request_id: &str,
+    candidate_id: Option<&str>,
+) {
     if request_id.trim().is_empty() {
         return;
     }
@@ -918,6 +984,7 @@ pub async fn finalize_haiku_message(state: &AppState, request_id: &str) {
         return;
     }
 
+    let mut should_remove_generation = true;
     if let Some(message) = state
         .companion_timeline
         .write()
@@ -925,16 +992,55 @@ pub async fn finalize_haiku_message(state: &AppState, request_id: &str) {
         .iter_mut()
         .find(|item| item.id == request_id)
     {
-        message.status = "final".to_string();
+        if let Some(candidate_id) = candidate_id.filter(|value| !value.trim().is_empty()) {
+            let active_candidate_id = message
+                .active_candidate_id
+                .as_deref()
+                .or_else(|| {
+                    message
+                        .candidates
+                        .as_ref()
+                        .and_then(|candidates| candidates.first())
+                        .map(|candidate| candidate.id.as_str())
+                })
+                .map(str::to_string);
+
+            if let Some(candidate) = message
+                .candidates
+                .as_mut()
+                .and_then(|candidates| candidates.iter_mut().find(|item| item.id == candidate_id))
+            {
+                candidate.status = "final".to_string();
+                if active_candidate_id.as_deref() == Some(candidate_id) {
+                    message.text = candidate.text.clone();
+                }
+            }
+
+            should_remove_generation = update_haiku_group_status(message);
+        } else {
+            message.status = "final".to_string();
+        }
     }
-    state
-        .companion_request_generations
-        .write()
-        .await
-        .remove(request_id);
+
+    if should_remove_generation {
+        state
+            .companion_request_generations
+            .write()
+            .await
+            .remove(request_id);
+    }
 }
 
 pub async fn fail_haiku_message(state: &AppState, request_id: &str, error: &str) {
+    fail_haiku_candidate(state, request_id, None, error).await;
+}
+
+pub async fn fail_haiku_candidate(
+    state: &AppState,
+    request_id: &str,
+    candidate_id: Option<&str>,
+    error: &str,
+) {
     if request_id.trim().is_empty() {
         return;
     }
@@ -953,6 +1059,7 @@ pub async fn fail_haiku_message(state: &AppState, request_id: &str, error: &str)
         return;
     }
 
+    let mut should_remove_generation = true;
     if let Some(message) = state
         .companion_timeline
         .write()
@@ -960,16 +1067,76 @@ pub async fn fail_haiku_message(state: &AppState, request_id: &str, error: &str)
         .iter_mut()
         .find(|item| item.id == request_id)
     {
-        message.status = "error".to_string();
-        if message.text.trim().is_empty() {
-            message.text = format!("Ошибка: {}", error.trim());
+        if let Some(candidate_id) = candidate_id.filter(|value| !value.trim().is_empty()) {
+            let active_candidate_id = message
+                .active_candidate_id
+                .as_deref()
+                .or_else(|| {
+                    message
+                        .candidates
+                        .as_ref()
+                        .and_then(|candidates| candidates.first())
+                        .map(|candidate| candidate.id.as_str())
+                })
+                .map(str::to_string);
+            let error_text = format!("Ошибка: {}", error.trim());
+
+            if let Some(candidate) = message
+                .candidates
+                .as_mut()
+                .and_then(|candidates| candidates.iter_mut().find(|item| item.id == candidate_id))
+            {
+                candidate.status = "error".to_string();
+                candidate.error = Some(error.trim().to_string());
+                if candidate.text.trim().is_empty() {
+                    candidate.text = error_text.clone();
+                }
+                if active_candidate_id.as_deref() == Some(candidate_id) {
+                    message.text = candidate.text.clone();
+                }
+            }
+
+            should_remove_generation = update_haiku_group_status(message);
+        } else {
+            message.status = "error".to_string();
+            if message.text.trim().is_empty() {
+                message.text = format!("Ошибка: {}", error.trim());
+            }
         }
     }
-    state
-        .companion_request_generations
-        .write()
-        .await
-        .remove(request_id);
+
+    if should_remove_generation {
+        state
+            .companion_request_generations
+            .write()
+            .await
+            .remove(request_id);
+    }
+}
+
+fn update_haiku_group_status(message: &mut CompanionMessage) -> bool {
+    let Some(candidates) = message.candidates.as_ref() else {
+        return true;
+    };
+
+    if candidates
+        .iter()
+        .any(|candidate| candidate.status == "streaming")
+    {
+        message.status = "streaming".to_string();
+        return false;
+    }
+
+    if candidates
+        .iter()
+        .any(|candidate| candidate.status == "final")
+    {
+        message.status = "final".to_string();
+    } else {
+        message.status = "error".to_string();
+    }
+
+    true
 }
 
 pub async fn on_microphone_partial(state: &AppState, payload: &PartialTranscriptionPayload) {
@@ -1110,6 +1277,8 @@ async fn append_microphone_message(
             stt_index: None,
             deleted: false,
             attachments: None,
+            candidates: None,
+            active_candidate_id: None,
         });
     prune_timeline(state).await;
 }
@@ -1282,6 +1451,18 @@ mod tests {
         }
     }
 
+    fn test_candidate(id: &str, label: &str) -> CompanionLlmCandidate {
+        CompanionLlmCandidate {
+            id: id.to_string(),
+            label: label.to_string(),
+            provider: id.to_string(),
+            model: format!("{id}-model"),
+            status: "streaming".to_string(),
+            text: String::new(),
+            error: None,
+        }
+    }
+
     #[tokio::test]
     async fn system_final_reanchors_live_haiku_insert_after_id() {
         let state = AppState::default();
@@ -1292,6 +1473,8 @@ mod tests {
                 request_id: "haiku:req-1".to_string(),
                 insert_after_id: Some(LIVE_STT_MESSAGE_ID.to_string()),
                 created_at_ms: 100,
+                candidates: Vec::new(),
+                active_candidate_id: None,
             },
         )
         .await;
@@ -1571,6 +1754,8 @@ mod tests {
                 request_id: "haiku:req-2".to_string(),
                 insert_after_id: Some("prompt:1".to_string()),
                 created_at_ms: 260,
+                candidates: Vec::new(),
+                active_candidate_id: None,
             },
         )
         .await;
@@ -1644,6 +1829,8 @@ mod tests {
                 request_id: "haiku:streaming".to_string(),
                 insert_after_id: None,
                 created_at_ms: 120,
+                candidates: Vec::new(),
+                active_candidate_id: None,
             },
         )
         .await;
@@ -1654,6 +1841,8 @@ mod tests {
                 request_id: "haiku:error".to_string(),
                 insert_after_id: None,
                 created_at_ms: 130,
+                candidates: Vec::new(),
+                active_candidate_id: None,
             },
         )
         .await;
@@ -1686,6 +1875,8 @@ mod tests {
                 request_id: "haiku:req-final".to_string(),
                 insert_after_id: None,
                 created_at_ms: 300,
+                candidates: Vec::new(),
+                active_candidate_id: None,
             },
         )
         .await;
@@ -1709,6 +1900,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grouped_haiku_tracks_candidates_and_ignores_late_candidate_deltas() {
+        let state = AppState::default();
+
+        begin_haiku_message(
+            &state,
+            CompanionHaikuStart {
+                request_id: "haiku:req-group".to_string(),
+                insert_after_id: None,
+                created_at_ms: 300,
+                candidates: vec![
+                    test_candidate("anthropic", "Anthropic"),
+                    test_candidate("openai_responses", "OpenAI"),
+                ],
+                active_candidate_id: Some("anthropic".to_string()),
+            },
+        )
+        .await;
+
+        append_haiku_candidate_delta(&state, "haiku:req-group", Some("anthropic"), "primary").await;
+        append_haiku_candidate_delta(
+            &state,
+            "haiku:req-group",
+            Some("openai_responses"),
+            "secondary",
+        )
+        .await;
+        finalize_haiku_candidate(&state, "haiku:req-group", Some("openai_responses")).await;
+        append_haiku_candidate_delta(&state, "haiku:req-group", Some("openai_responses"), " late")
+            .await;
+
+        {
+            let timeline = state.companion_timeline.read().await;
+            let haiku = timeline
+                .iter()
+                .find(|message| message.id == "haiku:req-group")
+                .expect("haiku message");
+            let candidates = haiku.candidates.as_ref().expect("candidate list");
+            let openai = candidates
+                .iter()
+                .find(|candidate| candidate.id == "openai_responses")
+                .expect("openai candidate");
+
+            assert_eq!(haiku.status, "streaming");
+            assert_eq!(haiku.text, "primary");
+            assert_eq!(openai.status, "final");
+            assert_eq!(openai.text, "secondary");
+            assert!(state
+                .companion_request_generations
+                .read()
+                .await
+                .contains_key("haiku:req-group"));
+        }
+
+        fail_haiku_candidate(&state, "haiku:req-group", Some("anthropic"), "boom").await;
+        append_haiku_candidate_delta(&state, "haiku:req-group", Some("anthropic"), " late").await;
+
+        let timeline = state.companion_timeline.read().await;
+        let haiku = timeline
+            .iter()
+            .find(|message| message.id == "haiku:req-group")
+            .expect("haiku message");
+        let candidates = haiku.candidates.as_ref().expect("candidate list");
+        let anthropic = candidates
+            .iter()
+            .find(|candidate| candidate.id == "anthropic")
+            .expect("anthropic candidate");
+        let openai = candidates
+            .iter()
+            .find(|candidate| candidate.id == "openai_responses")
+            .expect("openai candidate");
+
+        assert_eq!(haiku.status, "final");
+        assert_eq!(haiku.text, "primary");
+        assert_eq!(anthropic.status, "error");
+        assert_eq!(anthropic.text, "primary");
+        assert_eq!(openai.text, "secondary");
+        assert!(!state
+            .companion_request_generations
+            .read()
+            .await
+            .contains_key("haiku:req-group"));
+    }
+
+    #[tokio::test]
     async fn settling_active_generation_prevents_late_ai_deltas_after_clear() {
         let state = AppState::default();
 
@@ -1718,6 +1993,8 @@ mod tests {
                 request_id: "haiku:req-3".to_string(),
                 insert_after_id: None,
                 created_at_ms: 300,
+                candidates: Vec::new(),
+                active_candidate_id: None,
             },
         )
         .await;

@@ -6,6 +6,7 @@ import { isTauriAvailable } from '../utils/tauri';
 import type { CompanionSnapshotData } from '@/windowing/stateSync';
 import { CMD_SET_COMPANION_SYSTEM_PROMPT } from '@/windowing/stateSync';
 import {
+  EVENT_HAIKU_CANDIDATE_START,
   EVENT_HAIKU_DELTA,
   EVENT_HAIKU_DONE,
   EVENT_HAIKU_ERROR,
@@ -13,6 +14,7 @@ import {
   EVENT_TRANSCRIPTION_FINAL,
   EVENT_TRANSCRIPTION_PARTIAL,
   type FinalTranscriptionPayload,
+  type HaikuCandidateStartPayload,
   type HaikuDeltaPayload,
   type HaikuDonePayload,
   type HaikuErrorPayload,
@@ -34,6 +36,16 @@ export type ChatAttachment =
       dataUrl: string;
     };
 
+export interface ChatLlmCandidate {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
+  status: ChatMessageStatus;
+  text: string;
+  error?: string;
+}
+
 export interface ChatMessage {
   id: string;
   kind: ChatMessageKind;
@@ -48,6 +60,8 @@ export interface ChatMessage {
   // Для STT сообщений: индекс utterance, чтобы выбирать anchor
   sttIndex?: number;
   attachments?: ChatAttachment[];
+  candidates?: ChatLlmCandidate[];
+  activeCandidateId?: string;
 }
 
 const MAX_CONTEXT_CHARS = 12_000;
@@ -88,6 +102,7 @@ const DEFAULT_SYSTEM_PROMPT = `Ты — ассистент на техничес
 - Если полный код слишком длинный, допускается сокращать только с помощью комментариев соответствующего языка (например "// ...", "# ...", "/* ... */") и после блока 1 строкой объяснить, что именно опущено. Не вставляй голые "..." как код.`;
 const SYSTEM_PROMPT_STORAGE_KEY = 'llmSystemPrompt';
 const LEGACY_SYSTEM_PROMPT_STORAGE_KEY = 'anthropicSystemPrompt';
+const OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY = 'openaiResponsesWebSearchEnabled';
 
 export const useChatStore = defineStore('chat', () => {
   const transcription = useTranscriptionStore();
@@ -114,6 +129,22 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   const systemPrompt = ref<string>(readStoredSystemPrompt() || DEFAULT_SYSTEM_PROMPT);
+
+  function readStoredBoolean(key: string, fallback = false): boolean {
+    if (typeof localStorage === 'undefined') return fallback;
+    try {
+      const value = localStorage.getItem(key);
+      if (value === '1' || value === 'true') return true;
+      if (value === '0' || value === 'false') return false;
+    } catch {
+      // ignore
+    }
+    return fallback;
+  }
+
+  const openaiResponsesWebSearchEnabled = ref<boolean>(
+    readStoredBoolean(OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY, true)
+  );
 
   // "Очистка контекста" для LLM без удаления сообщений:
   // новые запросы берут STT только начиная с этого индекса.
@@ -311,6 +342,29 @@ export const useChatStore = defineStore('chat', () => {
   const hasSelection = computed(() => selectedCount.value > 0);
 
   const selectedSet = computed<Set<string>>(() => new Set(selectedMessageIds.value));
+
+  function primaryCandidate(message: ChatMessage): ChatLlmCandidate | null {
+    return (
+      message.candidates?.find((candidate) => candidate.id === 'anthropic') ??
+      message.candidates?.[0] ??
+      null
+    );
+  }
+
+  function activeCandidate(message: ChatMessage): ChatLlmCandidate | null {
+    if (!message.candidates?.length) return null;
+    const activeId = message.activeCandidateId || primaryCandidate(message)?.id;
+    return message.candidates.find((candidate) => candidate.id === activeId) ?? primaryCandidate(message);
+  }
+
+  function assistantTextForContext(message: ChatMessage): string {
+    if (message.kind !== 'haiku') return String(message.text ?? '').trim();
+    const selectedCandidate = activeCandidate(message);
+    const activeText = String(selectedCandidate?.text ?? '').trim();
+    if (activeText) return activeText;
+    const primaryText = String(primaryCandidate(message)?.text ?? '').trim();
+    return primaryText || String(message.text ?? '').trim();
+  }
 
   function normalizeForDedup(v: string): string {
     return String(v ?? '')
@@ -515,6 +569,25 @@ export const useChatStore = defineStore('chat', () => {
     void syncCompanionSystemPrompt();
   }
 
+  function setOpenAiResponsesWebSearchEnabled(enabled: boolean): void {
+    openaiResponsesWebSearchEnabled.value = !!enabled;
+  }
+
+  function toggleOpenAiResponsesWebSearch(): void {
+    setOpenAiResponsesWebSearchEnabled(!openaiResponsesWebSearchEnabled.value);
+  }
+
+  watch(
+    () => openaiResponsesWebSearchEnabled.value,
+    (enabled) => {
+      try {
+        localStorage.setItem(OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY, enabled ? '1' : '0');
+      } catch {
+        // ignore
+      }
+    }
+  );
+
   async function syncCompanionSystemPrompt(): Promise<void> {
     if (!isTauriAvailable()) return;
     try {
@@ -636,7 +709,7 @@ export const useChatStore = defineStore('chat', () => {
     const parts: string[] = [];
 
     function formatLine(msg: ChatMessage): string {
-      const t = String(msg.text ?? '').trim();
+      const t = msg.kind === 'haiku' ? assistantTextForContext(msg) : String(msg.text ?? '').trim();
       if (!t) return '';
       if (msg.kind === 'mic') return `МИКРОФОН: ${t}`;
       if (msg.kind === 'prompt') return `ЗАПРОС: ${t}`;
@@ -674,7 +747,7 @@ export const useChatStore = defineStore('chat', () => {
     const parts: string[] = [];
 
     function formatLine(msg: ChatMessage): string {
-      const t = String(msg.text ?? '').trim();
+      const t = msg.kind === 'haiku' ? assistantTextForContext(msg) : String(msg.text ?? '').trim();
       if (!t) return '';
       if (msg.kind === 'mic') return `МИКРОФОН: ${t}`;
       if (msg.kind === 'prompt') return `ЗАПРОС: ${t}`;
@@ -698,7 +771,7 @@ export const useChatStore = defineStore('chat', () => {
     const parts: string[] = [];
 
     function formatLine(msg: ChatMessage): string {
-      const t = String(msg.text ?? '').trim();
+      const t = msg.kind === 'haiku' ? assistantTextForContext(msg) : String(msg.text ?? '').trim();
       if (!t) return '';
       if (msg.kind === 'mic') return `МИКРОФОН: ${t}`;
       if (msg.kind === 'prompt') return `ЗАПРОС: ${t}`;
@@ -780,6 +853,129 @@ export const useChatStore = defineStore('chat', () => {
     });
   }
 
+  function normalizeCandidateStatus(status: string | null | undefined): ChatMessageStatus {
+    return status === 'final' || status === 'error' || status === 'streaming' ? status : 'streaming';
+  }
+
+  function recomputeHaikuMessageFromCandidates(message: ChatMessage): ChatMessage {
+    const candidates = message.candidates ?? [];
+    if (candidates.length === 0) return message;
+
+    const primary = primaryCandidate(message) ?? candidates[0];
+    const active = activeCandidate(message) ?? primary;
+    const hasStreaming = candidates.some((candidate) => candidate.status === 'streaming');
+    const hasFinal = candidates.some((candidate) => candidate.status === 'final');
+    const status: ChatMessageStatus = hasStreaming ? 'streaming' : hasFinal ? 'final' : 'error';
+
+    return {
+      ...message,
+      status,
+      text: primary?.text || message.text,
+      activeCandidateId: active?.id ?? primary?.id ?? message.activeCandidateId,
+    };
+  }
+
+  function settlePendingHaikuCandidates(
+    message: ChatMessage,
+    status: Exclude<ChatMessageStatus, 'streaming'>,
+    fallbackError?: string
+  ): ChatMessage {
+    const candidates = message.candidates ?? [];
+    if (candidates.length === 0) return { ...message, status };
+
+    return recomputeHaikuMessageFromCandidates({
+      ...message,
+      candidates: candidates.map((candidate) => {
+        if (candidate.status !== 'streaming') return candidate;
+        if (status === 'error') {
+          const error = fallbackError || 'Ошибка';
+          return {
+            ...candidate,
+            status,
+            text: candidate.text || `Ошибка: ${error}`,
+            error,
+          };
+        }
+        return { ...candidate, status };
+      }),
+    });
+  }
+
+  function upsertHaikuCandidate(
+    requestId: string,
+    patch: Partial<ChatLlmCandidate> & { id: string }
+  ): void {
+    upsertHaikuMessage(requestId, { status: 'streaming' });
+
+    const idx = haikuMessages.value.findIndex((m) => m.id === requestId);
+    if (idx < 0) return;
+
+    const message = haikuMessages.value[idx];
+    const candidates = [...(message.candidates ?? [])];
+    const candidateIdx = candidates.findIndex((candidate) => candidate.id === patch.id);
+    const previous = candidateIdx >= 0 ? candidates[candidateIdx] : null;
+    const nextCandidate: ChatLlmCandidate = {
+      id: patch.id,
+      label: patch.label ?? previous?.label ?? patch.id,
+      provider: patch.provider ?? previous?.provider ?? '',
+      model: patch.model ?? previous?.model ?? '',
+      status: normalizeCandidateStatus(patch.status ?? previous?.status),
+      text: patch.text ?? previous?.text ?? '',
+      error: patch.error ?? previous?.error,
+    };
+
+    if (candidateIdx >= 0) {
+      candidates[candidateIdx] = nextCandidate;
+    } else {
+      candidates.push(nextCandidate);
+    }
+
+    const activeCandidateId = message.activeCandidateId ?? primaryCandidate({ ...message, candidates })?.id ?? patch.id;
+    haikuMessages.value[idx] = recomputeHaikuMessageFromCandidates({
+      ...message,
+      candidates,
+      activeCandidateId,
+    });
+  }
+
+  function appendHaikuCandidateDelta(
+    requestId: string,
+    payload: HaikuDeltaPayload
+  ): void {
+    const candidateId = payload.candidate_id;
+    if (!candidateId) {
+      upsertHaikuMessage(requestId, {
+        status: 'streaming',
+        text: (haikuMessages.value.find((m) => m.id === requestId)?.text ?? '') + payload.delta,
+      });
+      return;
+    }
+
+    const existing = haikuMessages.value
+      .find((message) => message.id === requestId)
+      ?.candidates?.find((candidate) => candidate.id === candidateId);
+    upsertHaikuCandidate(requestId, {
+      id: candidateId,
+      label: payload.candidate_label ?? existing?.label ?? candidateId,
+      provider: payload.provider ?? existing?.provider ?? '',
+      model: payload.model ?? existing?.model ?? '',
+      status: 'streaming',
+      text: (existing?.text ?? '') + payload.delta,
+    });
+  }
+
+  function selectHaikuCandidate(messageId: string, candidateId: string): void {
+    if (!messageId || !candidateId) return;
+    const idx = haikuMessages.value.findIndex((message) => message.id === messageId);
+    if (idx < 0) return;
+    const message = haikuMessages.value[idx];
+    if (!message.candidates?.some((candidate) => candidate.id === candidateId)) return;
+    haikuMessages.value[idx] = recomputeHaikuMessageFromCandidates({
+      ...message,
+      activeCandidateId: candidateId,
+    });
+  }
+
   async function requestHaikuFromAnchor(): Promise<void> {
     if (!isTauriAvailable()) return;
 
@@ -795,6 +991,7 @@ export const useChatStore = defineStore('chat', () => {
     const requestId = await invoke<string>('start_haiku_stream', {
       text: contextText,
       system_prompt: sanitizeSystemPrompt(systemPrompt.value),
+      openaiResponsesWebSearch: openaiResponsesWebSearchEnabled.value,
       companionMeta: {
         insertAfterId,
         createdAtMs: now,
@@ -868,6 +1065,7 @@ export const useChatStore = defineStore('chat', () => {
           dataBase64: img.dataBase64,
         })),
         systemPrompt: sanitizeSystemPrompt(systemPrompt.value),
+        openaiResponsesWebSearch: openaiResponsesWebSearchEnabled.value,
         companionMeta: {
           promptMessageId,
           promptCreatedAtMs: createdAtMs,
@@ -914,6 +1112,7 @@ export const useChatStore = defineStore('chat', () => {
         questionText: questionText,
         images: [],
         systemPrompt: sanitizeSystemPrompt(systemPrompt.value),
+        openaiResponsesWebSearch: openaiResponsesWebSearchEnabled.value,
         companionMeta: {
           insertAfterId: messageId,
           createdAtMs,
@@ -1022,6 +1221,7 @@ export const useChatStore = defineStore('chat', () => {
   let unlistenDelta: UnlistenFn | null = null;
   let unlistenDone: UnlistenFn | null = null;
   let unlistenError: UnlistenFn | null = null;
+  let unlistenCandidateStart: UnlistenFn | null = null;
   let unlistenMicPartial: UnlistenFn | null = null;
   let unlistenMicFinal: UnlistenFn | null = null;
   let unlistenSystemLevel: UnlistenFn | null = null;
@@ -1056,6 +1256,7 @@ export const useChatStore = defineStore('chat', () => {
       unlistenDelta ||
       unlistenDone ||
       unlistenError ||
+      unlistenCandidateStart ||
       unlistenMicPartial ||
       unlistenMicFinal ||
       unlistenSystemLevel ||
@@ -1090,24 +1291,60 @@ export const useChatStore = defineStore('chat', () => {
       applyMicrophoneMuteState(event.payload);
     });
 
+    unlistenCandidateStart = await listen<HaikuCandidateStartPayload>(
+      EVENT_HAIKU_CANDIDATE_START,
+      (event) => {
+        const requestId = event.payload.request_id;
+        const candidateId = event.payload.candidate_id;
+        if (!requestId || !candidateId) return;
+        if (ignoredHaikuRequestIds.value[requestId]) return;
+        markRequestActive(requestId);
+        upsertHaikuCandidate(requestId, {
+          id: candidateId,
+          label: event.payload.candidate_label || candidateId,
+          provider: event.payload.provider || '',
+          model: event.payload.model || '',
+          status: 'streaming',
+          text: '',
+        });
+      }
+    );
+
     unlistenDelta = await listen<HaikuDeltaPayload>(EVENT_HAIKU_DELTA, (event) => {
       const requestId = event.payload.request_id;
       const delta = event.payload.delta;
       if (!requestId || !delta) return;
       if (ignoredHaikuRequestIds.value[requestId]) return;
 
-      upsertHaikuMessage(requestId, {
-        status: 'streaming',
-        text: (haikuMessages.value.find((m) => m.id === requestId)?.text ?? '') + delta,
-      });
+      appendHaikuCandidateDelta(requestId, event.payload);
     });
 
     unlistenDone = await listen<HaikuDonePayload>(EVENT_HAIKU_DONE, (event) => {
       const requestId = event.payload.request_id;
       if (!requestId) return;
       if (ignoredHaikuRequestIds.value[requestId]) return;
+      if (event.payload.candidate_id) {
+        const existing = haikuMessages.value
+          .find((message) => message.id === requestId)
+          ?.candidates?.find((candidate) => candidate.id === event.payload.candidate_id);
+        upsertHaikuCandidate(requestId, {
+          id: event.payload.candidate_id,
+          label: event.payload.candidate_label ?? existing?.label ?? event.payload.candidate_id,
+          provider: event.payload.provider ?? existing?.provider ?? '',
+          model: event.payload.model ?? existing?.model ?? '',
+          status: 'final',
+          text: existing?.text ?? '',
+        });
+        return;
+      }
       markRequestDone(requestId);
-      upsertHaikuMessage(requestId, { status: 'final' });
+      const existing = haikuMessages.value.find((message) => message.id === requestId);
+      upsertHaikuMessage(
+        requestId,
+        existing?.candidates?.length
+          ? settlePendingHaikuCandidates(existing, 'final')
+          : { status: 'final' }
+      );
     });
 
     unlistenError = await listen<HaikuErrorPayload>(EVENT_HAIKU_ERROR, (event) => {
@@ -1115,11 +1352,32 @@ export const useChatStore = defineStore('chat', () => {
       const error = event.payload.error;
       if (!requestId) return;
       if (ignoredHaikuRequestIds.value[requestId]) return;
+      if (event.payload.candidate_id) {
+        const existing = haikuMessages.value
+          .find((message) => message.id === requestId)
+          ?.candidates?.find((candidate) => candidate.id === event.payload.candidate_id);
+        upsertHaikuCandidate(requestId, {
+          id: event.payload.candidate_id,
+          label: event.payload.candidate_label ?? existing?.label ?? event.payload.candidate_id,
+          provider: event.payload.provider ?? existing?.provider ?? '',
+          model: event.payload.model ?? existing?.model ?? '',
+          status: 'error',
+          text: existing?.text || (error ? `Ошибка: ${error}` : 'Ошибка'),
+          error: error || 'Ошибка',
+        });
+        return;
+      }
       markRequestDone(requestId);
-      upsertHaikuMessage(requestId, {
-        status: 'error',
-        text: error ? `Ошибка: ${error}` : 'Ошибка',
-      });
+      const existing = haikuMessages.value.find((message) => message.id === requestId);
+      upsertHaikuMessage(
+        requestId,
+        existing?.candidates?.length
+          ? settlePendingHaikuCandidates(existing, 'error', error || 'Ошибка')
+          : {
+              status: 'error',
+              text: error ? `Ошибка: ${error}` : 'Ошибка',
+            }
+      );
     });
 
     unlistenMicPartial = await listen<PartialTranscriptionPayload>(
@@ -1231,6 +1489,7 @@ export const useChatStore = defineStore('chat', () => {
     if (unlistenDelta) unlistenDelta();
     if (unlistenDone) unlistenDone();
     if (unlistenError) unlistenError();
+    if (unlistenCandidateStart) unlistenCandidateStart();
     if (unlistenMicPartial) unlistenMicPartial();
     if (unlistenMicFinal) unlistenMicFinal();
     if (unlistenSystemLevel) unlistenSystemLevel();
@@ -1239,6 +1498,7 @@ export const useChatStore = defineStore('chat', () => {
     unlistenDelta = null;
     unlistenDone = null;
     unlistenError = null;
+    unlistenCandidateStart = null;
     unlistenMicPartial = null;
     unlistenMicFinal = null;
     unlistenSystemLevel = null;
@@ -1289,6 +1549,19 @@ export const useChatStore = defineStore('chat', () => {
         dataUrl: attachment.dataUrl,
       }));
 
+    const toCandidates = (candidates: CompanionSnapshotData['timeline'][number]['candidates']) =>
+      (candidates ?? [])
+        .filter((candidate) => candidate?.id)
+        .map((candidate) => ({
+          id: candidate.id,
+          label: candidate.label || candidate.id,
+          provider: candidate.provider || '',
+          model: candidate.model || '',
+          status: normalizeCandidateStatus(candidate.status),
+          text: candidate.text || '',
+          error: candidate.error ?? undefined,
+        }));
+
     micMessages.value = timeline
       .filter((message) => message.kind === 'mic')
       .map((message) => ({
@@ -1327,6 +1600,8 @@ export const useChatStore = defineStore('chat', () => {
         seq: message.seq,
         insertAfterId: message.insertAfterId ?? undefined,
         attachments: toAttachments(message.attachments),
+        candidates: toCandidates(message.candidates),
+        activeCandidateId: message.activeCandidateId ?? undefined,
       }));
 
     activeHaikuRequests.value = Object.fromEntries(
@@ -1387,6 +1662,9 @@ export const useChatStore = defineStore('chat', () => {
     hasContextToClear,
     systemPrompt,
     saveSystemPrompt,
+    openaiResponsesWebSearchEnabled,
+    setOpenAiResponsesWebSearchEnabled,
+    toggleOpenAiResponsesWebSearch,
     clearLlmContext,
     isMessageOutOfContext,
     livePartialText,
@@ -1396,6 +1674,7 @@ export const useChatStore = defineStore('chat', () => {
     requestHaikuFromAnchor,
     sendPromptToLlm,
     replyToMessageWithAi,
+    selectHaikuCandidate,
     cancelActiveHaikuStreams,
     clearChatOutgoing,
     clearAllHistory,

@@ -19,6 +19,7 @@ pub const EVENT_TRANSCRIPTION_ERROR: &str = "transcription:error";
 pub const EVENT_CONNECTION_QUALITY: &str = "connection:quality";
 
 // Haiku (Anthropic) streaming events
+pub const EVENT_HAIKU_CANDIDATE_START: &str = "haiku:candidate-start";
 pub const EVENT_HAIKU_DELTA: &str = "haiku:delta";
 pub const EVENT_HAIKU_DONE: &str = "haiku:done";
 pub const EVENT_HAIKU_ERROR: &str = "haiku:error";
@@ -240,17 +241,50 @@ pub struct ConnectionQualityPayload {
 pub struct HaikuDeltaPayload {
     pub request_id: String,
     pub delta: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HaikuDonePayload {
     pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HaikuErrorPayload {
     pub request_id: String,
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HaikuCandidateStartPayload {
+    pub request_id: String,
+    pub candidate_id: String,
+    pub candidate_label: String,
+    pub provider: String,
+    pub model: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

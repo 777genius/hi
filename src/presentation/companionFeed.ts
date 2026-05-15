@@ -1,4 +1,8 @@
-import type { ConversationFeedAttachment, ConversationFeedMessage } from './conversationFeed';
+import type {
+  ConversationFeedAttachment,
+  ConversationFeedMessage,
+  ConversationLlmCandidate,
+} from './conversationFeed';
 import type { CompanionSnapshotData } from '@/windowing/stateSync';
 
 const LIVE_STT_MESSAGE_ID = 'stt:live';
@@ -25,6 +29,28 @@ function toAttachments(
   }));
 }
 
+function toCandidateStatus(status: string | null | undefined): ConversationLlmCandidate['status'] {
+  return FEED_STATUSES.has(status as ConversationLlmCandidate['status'])
+    ? (status as ConversationLlmCandidate['status'])
+    : 'streaming';
+}
+
+function toCandidates(
+  candidates: CompanionSnapshotData['timeline'][number]['candidates']
+): ConversationLlmCandidate[] {
+  return (candidates ?? [])
+    .filter((candidate) => candidate?.id)
+    .map((candidate) => ({
+      id: candidate.id,
+      label: candidate.label || candidate.id,
+      provider: candidate.provider || '',
+      model: candidate.model || '',
+      status: toCandidateStatus(candidate.status),
+      text: candidate.text || '',
+      error: candidate.error ?? undefined,
+    }));
+}
+
 function toFeedMessage(message: CompanionSnapshotData['timeline'][number]): ConversationFeedMessage {
   const kind = FEED_KINDS.has(message.kind as ConversationFeedMessage['kind'])
     ? (message.kind as ConversationFeedMessage['kind'])
@@ -48,6 +74,8 @@ function toFeedMessage(message: CompanionSnapshotData['timeline'][number]): Conv
     deleted: !!message.deleted,
     sttIndex: message.sttIndex ?? undefined,
     attachments: toAttachments(message.attachments),
+    candidates: toCandidates(message.candidates),
+    activeCandidateId: message.activeCandidateId ?? undefined,
   };
 }
 

@@ -98,15 +98,35 @@ export interface MicrophoneMuteStatePayload {
 export interface HaikuDeltaPayload {
   request_id: string;
   delta: string;
+  candidate_id?: string | null;
+  candidate_label?: string | null;
+  provider?: string | null;
+  model?: string | null;
 }
 
 export interface HaikuDonePayload {
   request_id: string;
+  candidate_id?: string | null;
+  candidate_label?: string | null;
+  provider?: string | null;
+  model?: string | null;
 }
 
 export interface HaikuErrorPayload {
   request_id: string;
   error: string;
+  candidate_id?: string | null;
+  candidate_label?: string | null;
+  provider?: string | null;
+  model?: string | null;
+}
+
+export interface HaikuCandidateStartPayload {
+  request_id: string;
+  candidate_id: string;
+  candidate_label: string;
+  provider: string;
+  model: string;
 }
 
 export interface CodeExplainDeltaPayload {
@@ -132,6 +152,7 @@ export const EVENT_CONNECTION_QUALITY = 'connection:quality';
 export const EVENT_HAIKU_DELTA = 'haiku:delta';
 export const EVENT_HAIKU_DONE = 'haiku:done';
 export const EVENT_HAIKU_ERROR = 'haiku:error';
+export const EVENT_HAIKU_CANDIDATE_START = 'haiku:candidate-start';
 export const EVENT_CODE_EXPLAIN_DELTA = 'code_explain:delta';
 export const EVENT_CODE_EXPLAIN_DONE = 'code_explain:done';
 export const EVENT_CODE_EXPLAIN_ERROR = 'code_explain:error';

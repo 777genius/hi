@@ -262,6 +262,7 @@ pub async fn request_ai(
     state: &AppState,
     app_handle: &AppHandle,
     question_text: Option<String>,
+    openai_responses_web_search: Option<bool>,
 ) -> Result<CompanionActionResponse, String> {
     let Some(_guard) = acquire_action_lock(state).await else {
         return busy_transition(app_handle).await;
@@ -301,6 +302,7 @@ pub async fn request_ai(
                 prompt_message_id: None,
                 prompt_created_at_ms: None,
             }),
+            openai_responses_web_search,
         )
         .await?;
     } else {
@@ -320,6 +322,7 @@ pub async fn request_ai(
                 prompt_message_id: Some(prompt_message_id),
                 prompt_created_at_ms: Some(created_at_ms),
             }),
+            openai_responses_web_search,
         )
         .await?;
     }
@@ -332,6 +335,7 @@ pub async fn send_prompt(
     app_handle: &AppHandle,
     text: String,
     images: Vec<commands::LlmImageInput>,
+    openai_responses_web_search: Option<bool>,
 ) -> Result<CompanionActionResponse, String> {
     let Some(_guard) = acquire_action_lock(state).await else {
         return busy_transition(app_handle).await;
@@ -381,6 +385,7 @@ pub async fn send_prompt(
             prompt_message_id: Some(prompt_message_id),
             prompt_created_at_ms: Some(created_at_ms),
         }),
+        openai_responses_web_search,
     )
     .await?;
 

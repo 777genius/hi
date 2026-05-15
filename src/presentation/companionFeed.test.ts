@@ -125,6 +125,49 @@ describe('buildCompanionConversationFeedMessages', () => {
     });
   });
 
+  it('maps assistant candidates from companion snapshots', () => {
+    const snapshot = makeSnapshot({
+      timeline: [
+        {
+          id: 'haiku-1',
+          seq: 1,
+          kind: 'haiku',
+          role: 'outgoing',
+          status: 'streaming',
+          text: 'Primary',
+          createdAtMs: 100,
+          activeCandidateId: 'anthropic',
+          candidates: [
+            {
+              id: 'anthropic',
+              label: 'Anthropic',
+              provider: 'anthropic',
+              model: 'claude-test',
+              status: 'streaming',
+              text: 'Primary',
+            },
+            {
+              id: 'openai_responses',
+              label: 'OpenAI',
+              provider: 'openai_responses',
+              model: 'gpt-5.4-mini',
+              status: 'final',
+              text: 'Secondary',
+            },
+          ],
+        },
+      ],
+    });
+
+    const [message] = buildCompanionConversationFeedMessages(snapshot);
+
+    expect(message.activeCandidateId).toBe('anthropic');
+    expect(message.candidates).toMatchObject([
+      { id: 'anthropic', label: 'Anthropic', status: 'streaming', text: 'Primary' },
+      { id: 'openai_responses', label: 'OpenAI', status: 'final', text: 'Secondary' },
+    ]);
+  });
+
   it('suppresses a live stt duplicate that exactly matches a fresh durable final message', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-23T10:00:00Z'));

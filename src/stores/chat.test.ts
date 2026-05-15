@@ -108,6 +108,7 @@ describe('chat store (selection + context)', () => {
     try {
       localStorage.removeItem('llmSystemPrompt');
       localStorage.removeItem('anthropicSystemPrompt');
+      localStorage.removeItem('openaiResponsesWebSearchEnabled');
     } catch {
       // ignore
     }
@@ -298,6 +299,34 @@ describe('chat store (selection + context)', () => {
     );
   });
 
+  it('forwards OpenAI Responses web search toggle to assistant requests', async () => {
+    transcriptionProxy.finalUtterances.push({ id: 'stt:1:1:hi', sessionId: 1, text: 'hi', timestamp: 1 });
+    invokeMock.mockResolvedValueOnce('r-web-1').mockResolvedValueOnce('r-web-2');
+
+    const store = useChatStore();
+    expect(store.openaiResponsesWebSearchEnabled).toBe(true);
+
+    await store.requestHaikuFromAnchor();
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_stream',
+      expect.objectContaining({
+        openaiResponsesWebSearch: true,
+      })
+    );
+
+    store.toggleOpenAiResponsesWebSearch();
+    expect(store.openaiResponsesWebSearchEnabled).toBe(false);
+
+    await store.sendPromptToLlm({ text: 'fresh docs?', images: [] });
+    expect(invokeMock).toHaveBeenLastCalledWith(
+      'start_haiku_chat_stream',
+      expect.objectContaining({
+        questionText: 'fresh docs?',
+        openaiResponsesWebSearch: false,
+      })
+    );
+  });
+
   it('manual prompt sends context + question to LLM and anchors response after prompt', async () => {
     transcriptionProxy.finalUtterances.push({ id: 'stt:1:1:a', sessionId: 1, text: 'one', timestamp: 1 });
     transcriptionProxy.partialText = 'partial';
@@ -453,6 +482,202 @@ describe('chat store (selection + context)', () => {
         dataUrl: 'data:image/png;base64,AAA=',
       },
     ]);
+  });
+
+  it('groups candidate-aware haiku events into one assistant message', async () => {
+    const store = useChatStore();
+    await store.initialize();
+
+    const startCb = listenMock.mock.calls.find((call) => call[0] === 'haiku:candidate-start')?.[1] as
+      | ((event: any) => void)
+      | undefined;
+    const deltaCb = listenMock.mock.calls.find((call) => call[0] === 'haiku:delta')?.[1] as
+      | ((event: any) => void)
+      | undefined;
+    const doneCb = listenMock.mock.calls.find((call) => call[0] === 'haiku:done')?.[1] as
+      | ((event: any) => void)
+      | undefined;
+
+    startCb?.({
+      payload: {
+        request_id: 'haiku:parallel',
+        candidate_id: 'anthropic',
+        candidate_label: 'Anthropic',
+        provider: 'anthropic',
+        model: 'claude-test',
+      },
+    });
+    startCb?.({
+      payload: {
+        request_id: 'haiku:parallel',
+        candidate_id: 'openai_responses',
+        candidate_label: 'OpenAI',
+        provider: 'openai_responses',
+        model: 'gpt-5.4-mini',
+      },
+    });
+
+    deltaCb?.({
+      payload: {
+        request_id: 'haiku:parallel',
+        candidate_id: 'anthropic',
+        candidate_label: 'Anthropic',
+        provider: 'anthropic',
+        model: 'claude-test',
+        delta: 'primary',
+      },
+    });
+    deltaCb?.({
+      payload: {
+        request_id: 'haiku:parallel',
+        candidate_id: 'openai_responses',
+        candidate_label: 'OpenAI',
+        provider: 'openai_responses',
+        model: 'gpt-5.4-mini',
+        delta: 'secondary',
+      },
+    });
+
+    expect(store.haikuMessages).toHaveLength(1);
+    expect(store.haikuMessages[0]).toMatchObject({
+      id: 'haiku:parallel',
+      status: 'streaming',
+      text: 'primary',
+      activeCandidateId: 'anthropic',
+    });
+    expect(store.haikuMessages[0]?.candidates).toMatchObject([
+      { id: 'anthropic', label: 'Anthropic', status: 'streaming', text: 'primary' },
+      { id: 'openai_responses', label: 'OpenAI', status: 'streaming', text: 'secondary' },
+    ]);
+
+    doneCb?.({ payload: { request_id: 'haiku:parallel', candidate_id: 'openai_responses' } });
+    expect(store.haikuMessages[0]?.status).toBe('streaming');
+    expect(store.haikuMessages[0]?.candidates?.[1]?.status).toBe('final');
+
+    doneCb?.({ payload: { request_id: 'haiku:parallel', candidate_id: 'anthropic' } });
+    doneCb?.({ payload: { request_id: 'haiku:parallel' } });
+    expect(store.haikuMessages[0]?.status).toBe('final');
+    expect(store.isHaikuStreaming).toBe(false);
+  });
+
+  it('group done settles candidates even if candidate done events arrive late', async () => {
+    const store = useChatStore();
+    await store.initialize();
+
+    const startCb = listenMock.mock.calls.find((call) => call[0] === 'haiku:candidate-start')?.[1] as
+      | ((event: any) => void)
+      | undefined;
+    const deltaCb = listenMock.mock.calls.find((call) => call[0] === 'haiku:delta')?.[1] as
+      | ((event: any) => void)
+      | undefined;
+    const doneCb = listenMock.mock.calls.find((call) => call[0] === 'haiku:done')?.[1] as
+      | ((event: any) => void)
+      | undefined;
+
+    for (const candidate of [
+      ['anthropic', 'Anthropic'],
+      ['openai_responses', 'OpenAI'],
+    ] as const) {
+      startCb?.({
+        payload: {
+          request_id: 'haiku:out-of-order',
+          candidate_id: candidate[0],
+          candidate_label: candidate[1],
+          provider: candidate[0],
+          model: `${candidate[0]}-model`,
+        },
+      });
+    }
+
+    deltaCb?.({ payload: { request_id: 'haiku:out-of-order', candidate_id: 'anthropic', delta: 'a' } });
+    deltaCb?.({ payload: { request_id: 'haiku:out-of-order', candidate_id: 'openai_responses', delta: 'b' } });
+    doneCb?.({ payload: { request_id: 'haiku:out-of-order' } });
+
+    expect(store.haikuMessages[0]?.status).toBe('final');
+    expect(store.haikuMessages[0]?.candidates?.map((candidate) => candidate.status)).toEqual([
+      'final',
+      'final',
+    ]);
+    expect(store.isHaikuStreaming).toBe(false);
+
+    doneCb?.({ payload: { request_id: 'haiku:out-of-order', candidate_id: 'openai_responses' } });
+    expect(store.haikuMessages[0]?.status).toBe('final');
+  });
+
+  it('keeps legacy single-provider haiku events working without candidate metadata', async () => {
+    const store = useChatStore();
+    await store.initialize();
+
+    const deltaCb = listenMock.mock.calls.find((call) => call[0] === 'haiku:delta')?.[1] as
+      | ((event: any) => void)
+      | undefined;
+    const doneCb = listenMock.mock.calls.find((call) => call[0] === 'haiku:done')?.[1] as
+      | ((event: any) => void)
+      | undefined;
+
+    deltaCb?.({ payload: { request_id: 'haiku:legacy', delta: 'hello ' } });
+    deltaCb?.({ payload: { request_id: 'haiku:legacy', delta: 'world' } });
+    doneCb?.({ payload: { request_id: 'haiku:legacy' } });
+
+    expect(store.haikuMessages[0]).toMatchObject({
+      id: 'haiku:legacy',
+      status: 'final',
+      text: 'hello world',
+    });
+    expect(store.haikuMessages[0]?.candidates).toBeUndefined();
+  });
+
+  it('uses selected assistant candidate text in subsequent context', async () => {
+    transcriptionProxy.finalUtterances.push({ id: 'stt:1:1:a', sessionId: 1, text: 'base', timestamp: 1 });
+    invokeMock.mockResolvedValue('r105');
+
+    const store = useChatStore();
+    store.haikuMessages.push({
+      id: 'haiku:done',
+      kind: 'haiku',
+      role: 'outgoing',
+      status: 'final',
+      text: 'primary answer',
+      createdAtMs: 2,
+      seq: 2,
+      activeCandidateId: 'anthropic',
+      candidates: [
+        {
+          id: 'anthropic',
+          label: 'Anthropic',
+          provider: 'anthropic',
+          model: 'claude-test',
+          status: 'final',
+          text: 'primary answer',
+        },
+        {
+          id: 'openai_responses',
+          label: 'OpenAI 5.4 mini',
+          provider: 'openai_responses',
+          model: 'gpt-5.4-mini',
+          status: 'final',
+          text: 'mini answer',
+        },
+        {
+          id: 'openai_responses_web',
+          label: 'OpenAI 5.5 web',
+          provider: 'openai_responses',
+          model: 'gpt-5.5',
+          status: 'final',
+          text: 'web answer',
+        },
+      ],
+    });
+
+    store.selectHaikuCandidate('haiku:done', 'openai_responses_web');
+    await store.requestHaikuFromAnchor();
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_stream',
+      expect.objectContaining({
+        text: ['ОС: base', 'ПОМОЩНИК: web answer'].join('\n'),
+      })
+    );
   });
 
   it('includes final assistant replies in subsequent context', async () => {
