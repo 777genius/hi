@@ -39,6 +39,7 @@ const WS_RECONNECT_DELAYS_MS: [u64; 5] = [250, 500, 1000, 2000, 3000];
 const REPLAY_BUFFER_MAX_MS: u64 = 10_000;
 const REPLAY_BUFFER_MAX_BYTES: usize = 512 * 1024;
 const DEFAULT_BACKEND_PROTOCOL_VERSION: u16 = 1;
+const LIMIT_REMAINING_THRESHOLD_SECS: f32 = 5.0;
 
 /// Проверяем, что URL указывает на локальный бэкенд (localhost/loopback).
 ///
@@ -172,6 +173,17 @@ impl CallbackState {
         }
         self.active.as_ref().map(|c| c.on_error.clone())
     }
+
+    fn connection_quality_callback(&self) -> Option<ConnectionQualityCallback> {
+        if self.swap_on_next_ack {
+            if let Some(pending) = self.pending.as_ref() {
+                return Some(pending.on_connection_quality.clone());
+            }
+        }
+        self.active
+            .as_ref()
+            .map(|c| c.on_connection_quality.clone())
+    }
 }
 
 fn category_for_server_error(code: &str) -> SttConnectionCategory {
@@ -198,6 +210,32 @@ fn server_error_closes_stream(code: &str) -> bool {
             | "PROVIDER_ERROR"
             | "INTERNAL_ERROR"
     )
+}
+
+fn category_for_backend_close(code_u16: Option<u16>, remaining_secs: f32) -> SttConnectionCategory {
+    let mut category = match code_u16 {
+        Some(1008) => SttConnectionCategory::LimitExceeded,
+        Some(1012) | Some(1013) | Some(1014) => SttConnectionCategory::ServerUnavailable,
+        Some(1000) => SttConnectionCategory::Closed,
+        _ => SttConnectionCategory::ServerUnavailable,
+    };
+
+    if category != SttConnectionCategory::LimitExceeded
+        && remaining_secs < LIMIT_REMAINING_THRESHOLD_SECS
+    {
+        log::warn!(
+            "Close frame without 1008, but last remaining={:.1}s < {:.0}s, treating as limit_exceeded",
+            remaining_secs,
+            LIMIT_REMAINING_THRESHOLD_SECS
+        );
+        category = SttConnectionCategory::LimitExceeded;
+    }
+
+    category
+}
+
+fn backend_close_should_emit_error(category: &SttConnectionCategory) -> bool {
+    matches!(category, SttConnectionCategory::LimitExceeded)
 }
 
 async fn handle_backend_server_message(
@@ -374,7 +412,6 @@ fn spawn_backend_receiver_task(
     tokio::spawn(async move {
         log::debug!("Backend receiver task started");
 
-        const LIMIT_REMAINING_THRESHOLD: f32 = 5.0;
         let mut server_error_reported = false;
 
         while let Some(msg_result) = read.next().await {
@@ -405,41 +442,38 @@ fn spawn_backend_receiver_task(
                         break;
                     }
                     is_closed_flag.store(true, Ordering::SeqCst);
-                    let cb = {
-                        let state = callbacks_state.lock().await;
-                        state.error_callback()
-                    };
-                    if let Some(cb) = cb {
-                        let code_u16 = frame.as_ref().map(|f| u16::from(f.code));
-                        let mut category = match code_u16 {
-                            Some(1008) => SttConnectionCategory::LimitExceeded,
-                            Some(1012) | Some(1013) | Some(1014) => {
-                                SttConnectionCategory::ServerUnavailable
-                            }
-                            Some(1000) => SttConnectionCategory::Closed,
-                            _ => SttConnectionCategory::ServerUnavailable,
+                    let code_u16 = frame.as_ref().map(|f| u16::from(f.code));
+                    let remaining = f32::from_bits(shared_remaining.load(Ordering::SeqCst));
+                    let category = category_for_backend_close(code_u16, remaining);
+
+                    if backend_close_should_emit_error(&category) {
+                        let cb = {
+                            let state = callbacks_state.lock().await;
+                            state.error_callback()
                         };
-
-                        let remaining = f32::from_bits(shared_remaining.load(Ordering::SeqCst));
-                        if category != SttConnectionCategory::LimitExceeded
-                            && remaining < LIMIT_REMAINING_THRESHOLD
-                        {
-                            log::warn!(
-                                "Close frame without 1008, but last remaining={:.1}s < {:.0}s, treating as limit_exceeded",
-                                remaining,
-                                LIMIT_REMAINING_THRESHOLD
-                            );
-                            category = SttConnectionCategory::LimitExceeded;
+                        if let Some(cb) = cb {
+                            cb(SttError::Connection(SttConnectionError {
+                                message: "WebSocket closed by server".to_string(),
+                                details: SttConnectionDetails {
+                                    category: Some(category),
+                                    ws_close_code: code_u16,
+                                    ..Default::default()
+                                },
+                            }));
                         }
-
-                        cb(SttError::Connection(SttConnectionError {
-                            message: "WebSocket closed by server".to_string(),
-                            details: SttConnectionDetails {
-                                category: Some(category),
-                                ws_close_code: code_u16,
-                                ..Default::default()
-                            },
-                        }));
+                    } else {
+                        let cb = {
+                            let state = callbacks_state.lock().await;
+                            state.connection_quality_callback()
+                        };
+                        if let Some(cb) = cb {
+                            cb(
+                                "Poor".to_string(),
+                                Some(
+                                    "STT connection closed, reconnecting on next audio".to_string(),
+                                ),
+                            );
+                        }
                     }
                     break;
                 }
@@ -505,12 +539,12 @@ fn spawn_backend_receiver_task(
 
                     let remaining = f32::from_bits(shared_remaining.load(Ordering::SeqCst));
                     if details.category != Some(SttConnectionCategory::LimitExceeded)
-                        && remaining < LIMIT_REMAINING_THRESHOLD
+                        && remaining < LIMIT_REMAINING_THRESHOLD_SECS
                     {
                         log::warn!(
                             "WS error with last remaining={:.1}s < {:.0}s, treating as limit_exceeded",
                             remaining,
-                            LIMIT_REMAINING_THRESHOLD
+                            LIMIT_REMAINING_THRESHOLD_SECS
                         );
                         details.category = Some(SttConnectionCategory::LimitExceeded);
                     }
@@ -529,10 +563,7 @@ fn spawn_backend_receiver_task(
                     } else {
                         let cb = {
                             let state = callbacks_state.lock().await;
-                            state
-                                .active
-                                .as_ref()
-                                .map(|c| c.on_connection_quality.clone())
+                            state.connection_quality_callback()
                         };
                         if let Some(cb) = cb {
                             cb("Poor".to_string(), Some(e.to_string()));
@@ -1906,6 +1937,25 @@ mod tests {
     }
 
     #[test]
+    fn test_backend_close_classification_is_recoverable_for_normal_close() {
+        let category = category_for_backend_close(Some(1000), 120.0);
+
+        assert_eq!(category, SttConnectionCategory::Closed);
+        assert!(!backend_close_should_emit_error(&category));
+    }
+
+    #[test]
+    fn test_backend_close_classification_is_fatal_for_limit_close() {
+        let policy_category = category_for_backend_close(Some(1008), 120.0);
+        let low_remaining_category = category_for_backend_close(Some(1000), 2.0);
+
+        assert_eq!(policy_category, SttConnectionCategory::LimitExceeded);
+        assert_eq!(low_remaining_category, SttConnectionCategory::LimitExceeded);
+        assert!(backend_close_should_emit_error(&policy_category));
+        assert!(backend_close_should_emit_error(&low_remaining_category));
+    }
+
+    #[test]
     fn test_error_callback_prefers_pending_during_resume() {
         fn callback_set(marker: Arc<AtomicUsize>, value: usize) -> CallbackSet {
             CallbackSet {
@@ -2350,6 +2400,108 @@ mod tests {
         assert!(events.iter().any(|event| event == "Poor"));
         assert!(events.iter().any(|event| event == "Recovering"));
         assert!(events.iter().any(|event| event == "Good"));
+
+        let _ = provider.abort().await;
+    }
+
+    #[tokio::test]
+    async fn test_backend_provider_recovers_after_close_without_error_callback() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_url = format!("ws://{}", listener.local_addr().unwrap());
+        let replayed = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let replayed_for_server = replayed.clone();
+
+        let server = tokio::spawn(async move {
+            let (stream1, _) = listener.accept().await.unwrap();
+            let mut ws1 = accept_async(stream1).await.unwrap();
+
+            let config = ws1.next().await.unwrap().unwrap();
+            let config_text = config.into_text().unwrap();
+            assert!(config_text.contains(r#""type":"config""#));
+            ws1.send(Message::Text(
+                r#"{"type":"ready","session_id":"session-close"}"#.to_string(),
+            ))
+            .await
+            .unwrap();
+
+            let audio1 = ws1.next().await.unwrap().unwrap();
+            let audio1_text = audio1.into_text().unwrap();
+            let audio1_json: serde_json::Value = serde_json::from_str(&audio1_text).unwrap();
+            assert_eq!(audio1_json["seq"], 1);
+            ws1.send(Message::Close(None)).await.unwrap();
+            drop(ws1);
+
+            let (stream2, _) = listener.accept().await.unwrap();
+            let mut ws2 = accept_async(stream2).await.unwrap();
+            let resume = ws2.next().await.unwrap().unwrap();
+            let resume_text = resume.into_text().unwrap();
+            let resume_json: serde_json::Value = serde_json::from_str(&resume_text).unwrap();
+            assert_eq!(resume_json["type"], "resume");
+            assert_eq!(resume_json["session_id"], "session-close");
+            assert_eq!(resume_json["last_seq"], 0);
+            ws2.send(Message::Text(
+                r#"{"type":"resumed","session_id":"session-close","last_seq_acked":0}"#.to_string(),
+            ))
+            .await
+            .unwrap();
+
+            for _ in 0..2 {
+                let audio = ws2.next().await.unwrap().unwrap();
+                let audio_text = audio.into_text().unwrap();
+                let audio_json: serde_json::Value = serde_json::from_str(&audio_text).unwrap();
+                replayed_for_server
+                    .lock()
+                    .await
+                    .push(audio_json["seq"].as_u64().unwrap());
+            }
+        });
+
+        let error_count = Arc::new(AtomicUsize::new(0));
+        let error_count_cb = error_count.clone();
+        let quality_events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let quality_events_cb = quality_events.clone();
+
+        let mut provider = BackendProvider::new();
+        let mut config = SttConfig::default();
+        config.backend_url = Some(backend_url);
+        config.backend_auth_token = Some("test-token".to_string());
+        provider.initialize(&config).await.unwrap();
+        provider
+            .start_stream(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(move |_| {
+                    error_count_cb.fetch_add(1, AtomicOrdering::Relaxed);
+                }),
+                Arc::new(move |quality, _| {
+                    quality_events_cb.lock().unwrap().push(quality);
+                }),
+            )
+            .await
+            .unwrap();
+
+        let chunk = AudioChunk::new(vec![0; 480], 16_000, 1);
+        provider.send_audio(&chunk).await.unwrap();
+
+        for _ in 0..50 {
+            if provider.is_closed.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(provider.is_closed.load(Ordering::SeqCst));
+        assert_eq!(error_count.load(AtomicOrdering::Relaxed), 0);
+
+        provider.send_audio(&chunk).await.unwrap();
+
+        server.await.unwrap();
+        assert_eq!(*replayed.lock().await, vec![1, 2]);
+        assert_eq!(error_count.load(AtomicOrdering::Relaxed), 0);
+        assert!(quality_events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event == "Poor"));
 
         let _ = provider.abort().await;
     }

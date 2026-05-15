@@ -40,7 +40,7 @@ pnpm tauri:dev
 
 ```bash
 pnpm copy-helper:brave:restart-cdp
-FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
 ```
 
 Продовый backend задеплоен через Render. Для проверки деплоя, логов и состояния продового backend можно использовать Render MCP.
