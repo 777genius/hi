@@ -24,6 +24,36 @@ pub struct AudioPermissionStatus {
 const DEFAULT_MICROPHONE_MUTE_HOTKEY: &str = "Alt+Z";
 const APP_MICROPHONE_MUTE_SOURCE: &str = "app-microphone-toggle";
 
+struct CompanionDeltaWriter {
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+    handle: tauri::async_runtime::JoinHandle<()>,
+}
+
+fn spawn_companion_delta_writer(app_handle: AppHandle, request_id: String) -> CompanionDeltaWriter {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let handle = tauri::async_runtime::spawn(async move {
+        while let Some(delta_text) = rx.recv().await {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                crate::presentation::companion_timeline::append_haiku_delta(
+                    state.inner(),
+                    &request_id,
+                    &delta_text,
+                )
+                .await;
+                let _ =
+                    crate::presentation::companion::publish_snapshot_sse_only(&app_handle).await;
+            }
+        }
+    });
+
+    CompanionDeltaWriter { tx, handle }
+}
+
+async fn drain_companion_delta_writer(writer: CompanionDeltaWriter) {
+    drop(writer.tx);
+    let _ = writer.handle.await;
+}
+
 #[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -2877,6 +2907,9 @@ pub async fn start_haiku_stream(
     tauri::async_runtime::spawn(async move {
         let app_handle_delta = app_handle_clone.clone();
         let request_id_delta = request_id_clone.clone();
+        let companion_delta_writer =
+            spawn_companion_delta_writer(app_handle_clone.clone(), request_id_clone.clone());
+        let companion_delta_tx = companion_delta_writer.tx.clone();
 
         let request = crate::domain::LlmStreamRequest::new(
             model_clone,
@@ -2898,25 +2931,12 @@ pub async fn start_haiku_stream(
                             delta: delta_text.clone(),
                         },
                     );
-                    let app_handle_companion = app_handle_delta.clone();
-                    let request_id = request_id_delta.clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Some(state) = app_handle_companion.try_state::<AppState>() {
-                            crate::presentation::companion_timeline::append_haiku_delta(
-                                state.inner(),
-                                &request_id,
-                                &delta_text,
-                            )
-                            .await;
-                            let _ = crate::presentation::companion::publish_snapshot_sse_only(
-                                &app_handle_companion,
-                            )
-                            .await;
-                        }
-                    });
+                    let _ = companion_delta_tx.send(delta_text);
                 }),
             )
             .await;
+
+        drain_companion_delta_writer(companion_delta_writer).await;
 
         match result {
             Ok(()) => {
@@ -3305,6 +3325,8 @@ pub async fn start_haiku_chat_stream(
         let request_id_for_delta_openai = request_id_clone.clone();
         let app_handle_delta_anthropic = app_handle_delta.clone();
         let app_handle_delta_openai = app_handle_delta.clone();
+        let companion_delta_writer =
+            spawn_companion_delta_writer(app_handle_clone.clone(), request_id_clone.clone());
 
         let combined_text = if context_clone.is_empty() {
             question_clone.clone()
@@ -3330,6 +3352,7 @@ pub async fn start_haiku_chat_stream(
                         &combined_text_for_anthropic,
                         &images_clone,
                     );
+                    let companion_delta_tx = companion_delta_writer.tx.clone();
 
                     crate::infrastructure::ai::anthropic::stream_user_content_deltas(
                         crate::infrastructure::ai::anthropic::StreamUserContentOptions {
@@ -3349,23 +3372,7 @@ pub async fn start_haiku_chat_stream(
                                     delta: delta_text.clone(),
                                 },
                             );
-                            let app_handle_companion = app_handle_delta_anthropic.clone();
-                            let request_id = request_id_for_delta_anthropic.clone();
-                            tauri::async_runtime::spawn(async move {
-                                if let Some(state) = app_handle_companion.try_state::<AppState>() {
-                                    crate::presentation::companion_timeline::append_haiku_delta(
-                                        state.inner(),
-                                        &request_id,
-                                        &delta_text,
-                                    )
-                                    .await;
-                                    let _ =
-                                        crate::presentation::companion::publish_snapshot_sse_only(
-                                            &app_handle_companion,
-                                        )
-                                        .await;
-                                }
-                            });
+                            let _ = companion_delta_tx.send(delta_text);
                         },
                     )
                     .await
@@ -3395,6 +3402,7 @@ pub async fn start_haiku_chat_stream(
                 );
             }
 
+            let companion_delta_tx = companion_delta_writer.tx.clone();
             let request = crate::domain::LlmStreamRequest::new(
                 model_clone.clone(),
                 system_prompt_clone.clone(),
@@ -3415,26 +3423,13 @@ pub async fn start_haiku_chat_stream(
                                 delta: delta_text.clone(),
                             },
                         );
-                        let app_handle_companion = app_handle_delta_openai.clone();
-                        let request_id = request_id_for_delta_openai.clone();
-                        tauri::async_runtime::spawn(async move {
-                            if let Some(state) = app_handle_companion.try_state::<AppState>() {
-                                crate::presentation::companion_timeline::append_haiku_delta(
-                                    state.inner(),
-                                    &request_id,
-                                    &delta_text,
-                                )
-                                .await;
-                                let _ = crate::presentation::companion::publish_snapshot_sse_only(
-                                    &app_handle_companion,
-                                )
-                                .await;
-                            }
-                        });
+                        let _ = companion_delta_tx.send(delta_text);
                     }),
                 )
                 .await
         };
+
+        drain_companion_delta_writer(companion_delta_writer).await;
 
         match result {
             Ok(()) => {

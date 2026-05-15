@@ -878,6 +878,17 @@ pub async fn append_haiku_delta(state: &AppState, request_id: &str, delta: &str)
     let current_generation = state
         .companion_conversation_generation
         .load(Ordering::Relaxed);
+    if state
+        .companion_request_generations
+        .read()
+        .await
+        .get(request_id)
+        .copied()
+        != Some(current_generation)
+    {
+        return;
+    }
+
     let mut timeline = state.companion_timeline.write().await;
     if let Some(message) = timeline.iter_mut().find(|item| item.id == request_id) {
         if message.generation != Some(current_generation) {
@@ -1663,6 +1674,38 @@ mod tests {
         assert!(!context.contains("question"));
         assert!(!context.contains("draft answer"));
         assert!(!context.contains("failed answer"));
+    }
+
+    #[tokio::test]
+    async fn finalized_haiku_ignores_late_deltas_in_same_generation() {
+        let state = AppState::default();
+
+        begin_haiku_message(
+            &state,
+            CompanionHaikuStart {
+                request_id: "haiku:req-final".to_string(),
+                insert_after_id: None,
+                created_at_ms: 300,
+            },
+        )
+        .await;
+        append_haiku_delta(&state, "haiku:req-final", "ordered answer").await;
+        finalize_haiku_message(&state, "haiku:req-final").await;
+        append_haiku_delta(&state, "haiku:req-final", " late delta").await;
+
+        let timeline = state.companion_timeline.read().await;
+        let haiku = timeline
+            .iter()
+            .find(|message| message.id == "haiku:req-final")
+            .expect("haiku message");
+
+        assert_eq!(haiku.status, "final");
+        assert_eq!(haiku.text, "ordered answer");
+        assert!(!state
+            .companion_request_generations
+            .read()
+            .await
+            .contains_key("haiku:req-final"));
     }
 
     #[tokio::test]
