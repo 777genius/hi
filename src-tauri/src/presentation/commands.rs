@@ -2757,6 +2757,7 @@ pub async fn start_haiku_stream(
 Контекст ниже — транскрипция, возможны ошибки распознавания. В нём есть строки:
 - "ОС:" — то, что я слышу (обычно реплики собеседника/вопросы).
 - "МИКРОФОН:" — то, что говорю я (мои ответы/мысли/иногда могу повторить вопрос).
+- "ПОМОЩНИК:" — предыдущие ответы ассистента (можно использовать как контекст).
 
 Твоя задача:
 1) Найти последний явный или неявный вопрос/задачу: в первую очередь из строк "ОС:". Если строк "ОС:" нет — используй строки "МИКРОФОН:".
@@ -2767,7 +2768,7 @@ pub async fn start_haiku_stream(
 Формат ответа:
 - Сначала 3–7 буллетов с ответом (каждый пункт начинай с "- ").
 - Затем (если нужно) короткий пример кода.
-- Не пересказывай весь контекст и не цитируй теги "ОС:"/"МИКРОФОН:".
+- Не пересказывай весь контекст и не цитируй теги "ОС:"/"МИКРОФОН:"/"ПОМОЩНИК:".
 
 Правила для кода:
 - Если приводишь код, выводи его в Markdown fenced-блоке:
@@ -2971,6 +2972,85 @@ pub struct LlmImageInput {
     pub data_base64: String,
 }
 
+fn is_valid_llm_image_input(image: &LlmImageInput) -> bool {
+    let media_type = image.media_type.trim();
+    let data = image.data_base64.trim();
+    media_type.starts_with("image/") && !data.is_empty()
+}
+
+fn build_anthropic_chat_user_content(text: &str, images: &[LlmImageInput]) -> serde_json::Value {
+    let trimmed_text = text.trim();
+    let valid_images = images
+        .iter()
+        .filter(|image| is_valid_llm_image_input(image))
+        .collect::<Vec<_>>();
+
+    if valid_images.is_empty() {
+        return serde_json::json!(trimmed_text);
+    }
+
+    let mut parts: Vec<serde_json::Value> = Vec::new();
+    if !trimmed_text.is_empty() {
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": trimmed_text
+        }));
+    }
+
+    for image in valid_images {
+        parts.push(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.media_type.trim(),
+                "data": image.data_base64.trim()
+            }
+        }));
+    }
+
+    serde_json::json!(parts)
+}
+
+#[cfg(test)]
+mod ai_prompt_payload_tests {
+    use super::{build_anthropic_chat_user_content, LlmImageInput};
+
+    fn image(media_type: &str, data_base64: &str) -> LlmImageInput {
+        LlmImageInput {
+            media_type: media_type.to_string(),
+            data_base64: data_base64.to_string(),
+        }
+    }
+
+    #[test]
+    fn anthropic_chat_user_content_keeps_text_only_requests_as_plain_text() {
+        let payload = build_anthropic_chat_user_content("  ОС: question  ", &[]);
+
+        assert_eq!(payload, serde_json::json!("ОС: question"));
+    }
+
+    #[test]
+    fn anthropic_chat_user_content_omits_empty_text_block_for_image_only_requests() {
+        let payload = build_anthropic_chat_user_content("", &[image("image/png", "AAA=")]);
+        let blocks = payload
+            .as_array()
+            .expect("image request must use content blocks");
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "image");
+    }
+
+    #[test]
+    fn anthropic_chat_user_content_filters_invalid_images() {
+        let payload = build_anthropic_chat_user_content(
+            "ЗАПРОС: explain",
+            &[image("text/plain", "AAA="), image("image/png", "")],
+        );
+
+        assert_eq!(payload, serde_json::json!("ЗАПРОС: explain"));
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanionAiRequestMeta {
@@ -2998,7 +3078,11 @@ pub async fn start_haiku_chat_stream(
 ) -> Result<String, String> {
     let context = context_text.trim().to_string();
     let question = question_text.trim().to_string();
-    let images = images.unwrap_or_default();
+    let images = images
+        .unwrap_or_default()
+        .into_iter()
+        .filter(is_valid_llm_image_input)
+        .collect::<Vec<_>>();
 
     if context.is_empty() && question.is_empty() && images.is_empty() {
         return Err("Empty input".to_string());
@@ -3060,6 +3144,7 @@ pub async fn start_haiku_chat_stream(
 - "ОС:" — то, что я слышу (обычно реплики собеседника/вопросы).
 - "МИКРОФОН:" — то, что говорю я (мои ответы/мысли/иногда могу повторить вопрос).
 - "ЗАПРОС:" — мой ручной вопрос/вставка.
+- "ПОМОЩНИК:" — предыдущие ответы ассистента (можно использовать как контекст).
 
 Твоя задача:
 1) Ответить на "ЗАПРОС:" с учётом контекста выше.
@@ -3241,32 +3326,10 @@ pub async fn start_haiku_chat_stream(
 
             match key {
                 Ok(k) => {
-                    let mut parts: Vec<serde_json::Value> = vec![serde_json::json!({
-                        "type": "text",
-                        "text": combined_text_for_anthropic
-                    })];
-
-                    for img in images_clone.iter() {
-                        let mt = img.media_type.trim().to_string();
-                        let data = img.data_base64.trim().to_string();
-                        if mt.is_empty() || data.is_empty() {
-                            continue;
-                        }
-                        parts.push(serde_json::json!({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": mt,
-                                "data": data
-                            }
-                        }));
-                    }
-
-                    let user_content = if parts.len() == 1 {
-                        serde_json::json!(combined_text_for_anthropic)
-                    } else {
-                        serde_json::json!(parts)
-                    };
+                    let user_content = build_anthropic_chat_user_content(
+                        &combined_text_for_anthropic,
+                        &images_clone,
+                    );
 
                     crate::infrastructure::ai::anthropic::stream_user_content_deltas(
                         crate::infrastructure::ai::anthropic::StreamUserContentOptions {
