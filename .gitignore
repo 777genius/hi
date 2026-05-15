@@ -60,5 +60,6 @@ src-tauri/src/infrastructure/embedded_keys.rs
 src-tauri/target/
 src-tauri/tests/fixtures/*.bin
 src-tauri/examples/target/
+.e2e-artifacts/
 api/.env
 api/target/

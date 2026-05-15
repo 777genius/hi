@@ -28,7 +28,8 @@
     "cursor-extension:e2e": "node tools/cursor-focus-copy-extension/e2e/run-extension-e2e.mjs",
     "copy-helper:brave:open-cdp": "tools/browser-focus-copy-extension/open-brave-silent-debugger.sh open",
     "copy-helper:brave:restart-cdp": "tools/browser-focus-copy-extension/open-brave-silent-debugger.sh restart",
-    "e2e:tauri": "node e2e-tests/run-e2e.mjs"
+    "e2e:tauri": "node e2e-tests/run-e2e.mjs",
+    "e2e:companion-audio": "node e2e-tests/companion-dual-audio-smoke.mjs"
   },
   "dependencies": {
     "@mdi/font": "^7.4.47",
