@@ -70,6 +70,12 @@ INTERVIEW_MEMORY_AUTH_TOKEN="<local-user-jwt>" INTERVIEW_MEMORY_API_URL=http://1
 
 `INTERVIEW_MEMORY_AUTH_TOKEN` намеренно имеет приоритет только для memory bridge. Это позволяет гонять local backend memory E2E без замены основного app auth/provider flow.
 
+Для полного local canary, где auth, STT websocket и memory routes идут в локальный backend, сначала залогинь desktop app в local backend или положи валидную native-сессию в `~/Library/Application Support/HackInterview/auth_store.json`, затем запускай:
+
+```bash
+VITE_API_URL=http://127.0.0.1:8080 VOICE_TO_TEXT_API_URL=http://127.0.0.1:8080 VOICE_TO_TEXT_BACKEND_URL=ws://127.0.0.1:8080 INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080 INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+```
+
 Backend, против которого идёт проверка, должен иметь включённые memory routes:
 
 ```bash
