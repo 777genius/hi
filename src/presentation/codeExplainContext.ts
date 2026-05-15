@@ -1,6 +1,6 @@
 import type { ChatMessage } from '@/stores/chat';
 
-const DEFAULT_MAX_CONTEXT_CHARS = 12_000;
+const DEFAULT_MAX_CONTEXT_CHARS = 48_000;
 
 type CodeExplainContextMessage = Pick<ChatMessage, 'id' | 'kind' | 'status' | 'text' | 'deleted'>;
 

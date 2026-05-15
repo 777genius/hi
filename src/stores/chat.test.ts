@@ -724,11 +724,39 @@ describe('chat store (selection + context)', () => {
 
     const payload = invokeMock.mock.calls[0]?.[1] as { text?: string } | undefined;
     expect(payload?.text).toBeTypeOf('string');
-    expect(payload!.text!.length).toBeLessThanOrEqual(12_000);
+    expect(payload!.text!.length).toBeLessThanOrEqual(48_000);
     expect(payload!.text).toMatch(/^ОС: bulk-\d{3}/);
     expect(payload!.text).toContain('ОС: bulk-449');
-    expect(payload!.text).not.toContain('ОС: bulk-000');
     expect(store.haikuMessages[0]?.insertAfterId).toBe('stt:bulk:449');
+  });
+
+  it('keeps early code marker in the default long interview context budget', async () => {
+    transcriptionProxy.finalUtterances.push({
+      id: 'stt:code:early',
+      sessionId: 1,
+      text: `CODE-JS-ORDER-MAP-001\nfunction totals(orders) {}\n${'x'.repeat(2_000)}`,
+      timestamp: 1,
+    });
+
+    for (let i = 0; i < 120; i++) {
+      transcriptionProxy.finalUtterances.push({
+        id: `stt:follow:${i}`,
+        sessionId: 1,
+        text: `FOLLOW-UP-${String(i).padStart(3, '0')} ${'long context chunk '.repeat(10)}`,
+        timestamp: i + 2,
+      });
+    }
+    transcriptionProxy.partialText = '';
+    invokeMock.mockResolvedValue('r301');
+
+    const store = useChatStore();
+    await store.requestHaikuFromAnchor();
+
+    const payload = invokeMock.mock.calls[0]?.[1] as { text?: string } | undefined;
+    expect(payload?.text).toBeTypeOf('string');
+    expect(payload!.text!.length).toBeLessThanOrEqual(48_000);
+    expect(payload!.text).toContain('CODE-JS-ORDER-MAP-001');
+    expect(payload!.text).toContain('FOLLOW-UP-119');
   });
 
   it('filters system STT utterance when it duplicates microphone utterance', async () => {

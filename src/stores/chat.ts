@@ -50,7 +50,7 @@ export interface ChatMessage {
   attachments?: ChatAttachment[];
 }
 
-const MAX_CONTEXT_CHARS = 12_000;
+const MAX_CONTEXT_CHARS = 48_000;
 const MIN_HOVER_TRIGGER_MS = 800;
 const MIC_DOMINANCE_HOLD_MS = 1200;
 const LIVE_STT_MESSAGE_ID = 'stt:live';

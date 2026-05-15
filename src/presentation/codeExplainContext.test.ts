@@ -59,4 +59,27 @@ describe('buildCodeExplainContextUpToMessageId', () => {
     expect(context).toContain('ОС: строка 79');
     expect(context).not.toContain('ОС: строка 00');
   });
+
+  it('keeps early code marker in the default long interview context budget', () => {
+    const messages = [
+      message({
+        id: 'code:early',
+        kind: 'stt',
+        text: `CODE-EXPLAIN-EARLY-001\nfunction totals(orders) {}\n${'x'.repeat(2_000)}`,
+      }),
+      ...Array.from({ length: 120 }, (_, index) =>
+        message({
+          id: `stt:${index}`,
+          kind: 'stt',
+          text: `FOLLOW-UP-${String(index).padStart(3, '0')} ${'ж'.repeat(180)}`,
+        })
+      ),
+    ];
+
+    const context = buildCodeExplainContextUpToMessageId(messages, 'stt:119');
+
+    expect(context.length).toBeLessThanOrEqual(48_000);
+    expect(context).toContain('CODE-EXPLAIN-EARLY-001');
+    expect(context).toContain('FOLLOW-UP-119');
+  });
 });
