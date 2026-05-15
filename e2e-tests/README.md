@@ -47,6 +47,32 @@ COMPANION_URL="http://127.0.0.1:43821/companion.html?token=<token>" pnpm e2e:com
 pnpm e2e:companion-audio -- --allow-mic-miss
 ```
 
+## Companion synthetic interview + AI context
+
+Для проверки, что длинный companion-контекст реально попадает в AI prompt и AI отвечает как помощник на интервью-вопросы собеседника:
+
+```bash
+pnpm e2e:companion-context
+```
+
+Что делает тест:
+
+- добавляет ранний кодовый anchor через `/api/focus-copy/ingest`;
+- генерирует русские голосовые вопросы интервью через macOS `say` voice `Milena`;
+- проигрывает их через `afplay`, чтобы companion/STT создал реальные system-audio сообщения;
+- добавляет длинный filler-контекст, чтобы проверить context trimming;
+- добавляет поздний anchor с инструкцией отвечать как кандидат;
+- отправляет реальный `/api/prompt/send` и проверяет, что AI ответил по голосовым interview-вопросам про `debounceSearch`, очередь вместо стека и линейную сложность.
+
+Полезные флаги:
+
+```bash
+pnpm e2e:companion-context -- --filler-chars 80000
+pnpm e2e:companion-context -- --skip-voice
+pnpm e2e:companion-context -- --skip-ai
+pnpm e2e:companion-context -- --allow-ai-miss
+```
+
 ## Важно про macOS
 
 По текущей документации Tauri v2 WebDriver **не поддерживается на macOS** (нет WKWebView driver).

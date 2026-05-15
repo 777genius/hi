@@ -13,6 +13,7 @@ const CROSS_STREAM_DEDUP_RECENT_LIMIT: usize = 6;
 const MIC_DOMINANCE_HOLD_MS: u64 = 1_200;
 const MIC_SYSTEM_LOOKBACK_MS: i64 = 20_000;
 const MAX_CONTEXT_CHARS: usize = 48_000;
+const MAX_CONTEXT_ANCHOR_CHARS: usize = 4_000;
 const RECENT_CONTEXT_CHARS: usize = 32_000;
 const MAX_PRUNED_IMPORTANT_OLD_MESSAGES: usize = 40;
 
@@ -1462,8 +1463,16 @@ fn add_anchor_candidate(
         return;
     }
 
-    if can_append_indexed(anchors, &part.line, anchor_budget) {
+    let candidate_line = trim_context_anchor_line(&part.line);
+    if candidate_line.is_empty() {
+        return;
+    }
+
+    if can_append_indexed(anchors, &candidate_line, anchor_budget) {
         anchors.push((index, part.clone()));
+        if let Some((_, inserted)) = anchors.last_mut() {
+            inserted.line = candidate_line;
+        }
         selected_indexes.push(index);
         return;
     }
@@ -1477,7 +1486,7 @@ fn add_anchor_candidate(
         return;
     }
 
-    let line = trim_context_line_head_to(&part.line, remaining);
+    let line = trim_context_line_head_to(&candidate_line, remaining);
     if line.is_empty() {
         return;
     }
@@ -1490,6 +1499,10 @@ fn add_anchor_candidate(
         },
     ));
     selected_indexes.push(index);
+}
+
+fn trim_context_anchor_line(line: &str) -> String {
+    trim_context_line_head_to(line, MAX_CONTEXT_ANCHOR_CHARS)
 }
 
 fn is_important_older_context_part(part: &ContextPart) -> bool {
@@ -1524,6 +1537,19 @@ fn is_important_older_context_part(part: &ContextPart) -> bool {
         "exception",
         "stack",
         "trace",
+        "requirement",
+        "constraint",
+        "input",
+        "output",
+        "complexity",
+        "project",
+        "fact",
+        "must ",
+        "should ",
+        "queue",
+        "algorithm",
+        "remember",
+        "important",
         "deadlock",
         "race",
         "sql",
@@ -1533,6 +1559,26 @@ fn is_important_older_context_part(part: &ContextPart) -> bool {
         "javascript",
         "rust",
         "код",
+        "факт",
+        "маркер",
+        "требован",
+        "услов",
+        "огранич",
+        "пример",
+        "вход",
+        "выход",
+        "сложност",
+        "проект",
+        "запомни",
+        "важно",
+        "должен",
+        "нужно",
+        "нельзя",
+        "использовать",
+        "очеред",
+        "стек",
+        "данн",
+        "алгоритм",
         "почему",
         "как ",
         "что ",
@@ -2209,6 +2255,54 @@ mod tests {
         assert!(context.contains("CODE-OLD-23"));
         assert!(context.contains("RECENT-HOUR-179"));
         assert!(!context.contains("ASSISTANT-OLD-NOISE-001"));
+    }
+
+    #[test]
+    fn trim_context_parts_keeps_compact_voice_facts_when_long_filler_competes() {
+        let parts = vec![
+            ContextPart {
+                kind: "stt".to_string(),
+                line: format!(
+                    "ОС: CODE_CTX_E2E_ALPHA function debounceSearch() {{ return true; }} {}",
+                    "x".repeat(900)
+                ),
+            },
+            ContextPart {
+                kind: "stt".to_string(),
+                line: "ОС: Контрольный голосовой факт номер один. Проект называется Северный мост."
+                    .to_string(),
+            },
+            ContextPart {
+                kind: "stt".to_string(),
+                line: "ОС: Контрольный голосовой факт номер два. Для очереди событий нужно использовать очередь, а не стек."
+                    .to_string(),
+            },
+            ContextPart {
+                kind: "stt".to_string(),
+                line: "ОС: Контрольный голосовой факт номер три. Сложность решения должна быть линейная."
+                    .to_string(),
+            },
+            ContextPart {
+                kind: "stt".to_string(),
+                line: format!(
+                    "ОС: длинный filler без контрольных фактов {}",
+                    "y".repeat(65_000)
+                ),
+            },
+            ContextPart {
+                kind: "stt".to_string(),
+                line: "ОС: Поздний маркер LATE_CTX_E2E_OMEGA.".to_string(),
+            },
+        ];
+
+        let context = trim_context_parts(&parts);
+
+        assert!(context.chars().count() <= MAX_CONTEXT_CHARS);
+        assert!(context.contains("CODE_CTX_E2E_ALPHA"));
+        assert!(context.contains("Северный мост"));
+        assert!(context.contains("очереди событий"));
+        assert!(context.contains("линейная"));
+        assert!(context.contains("LATE_CTX_E2E_OMEGA"));
     }
 
     #[tokio::test]
