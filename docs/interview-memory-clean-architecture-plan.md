@@ -9,6 +9,7 @@ Implemented baseline:
 - backend `features/interview_memory` domain/application/ports/adapters, storage migration and HTTP API under `/api/v1/interview-memory/*`;
 - backend routes are registered only when `interview_memory.enabled=true`, env `INTERVIEW_MEMORY__ENABLED=true`;
 - deterministic ingest, keyword/entity retrieval and strict context packing without embeddings or external extractors;
+- deterministic backend long-context tests cover early code questions and early negative constraints under large filler;
 - Tauri bridge for final system audio, microphone, focus-copy, manual prompts and final AI answers;
 - desktop `ActiveContext` bridge is opt-in only and falls back to local context on timeout, auth miss or backend error.
 - clear context/history rotates the desktop memory session and sends a best-effort backend delete for the previous session;
@@ -16,7 +17,7 @@ Implemented baseline:
 
 Not yet promoted to default:
 
-- long synthetic interview E2E with real companion UI;
+- long synthetic interview E2E with real companion UI and synthetic voice/audio input;
 - production/staging canary with prompt artifact review;
 - cleanup or shrink of old local anchor fallback after `ActiveContext` is stable.
 
@@ -4342,6 +4343,12 @@ Test lanes:
 | Deterministic CI | no | no | prompt artifact and memory correctness without token cost |
 | Local audio smoke | no | yes | recording/STT/memory ingest with synthetic voice |
 | Manual paid smoke | yes | yes | real companion/chat behavior before canary |
+
+Current deterministic backend coverage:
+
+- `retrieves_early_code_question_in_long_interview` verifies early code question recall after filler;
+- `long_interview_active_context_preserves_early_negative_constraint` verifies early "queue, not stack" correction survives filler and later low-priority AI distractor;
+- `preserves_selected_messages_before_retrieved_memory_under_pressure` verifies selected/current evidence beats retrieved memory under budget pressure.
 
 Planned reusable scripts:
 
