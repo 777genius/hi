@@ -17,3 +17,11 @@
   ```
 
 - When touching transcription/STT behavior, prefer testing both against the Render backend and, when needed, against the local backend above.
+- Interview memory is off by default. Backend routes require backend config `interview_memory.enabled=true`, which maps to env `INTERVIEW_MEMORY__ENABLED=true` with the current backend config loader. For a desktop canary run against the production backend, enable the Tauri bridge with:
+
+  ```bash
+  pnpm copy-helper:brave:restart-cdp
+  VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+  ```
+
+- The desktop memory bridge calls `/api/v1/interview-memory/ingest` and `/api/v1/interview-memory/context`. It must remain best-effort for ingest and must fall back to local context if active context retrieval fails.

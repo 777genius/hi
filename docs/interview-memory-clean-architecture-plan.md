@@ -1,6 +1,23 @@
 # Interview Memory Clean Architecture Plan
 
-Статус: draft, готов к техническому ревью перед реализацией.
+Статус: implementation baseline in progress, backend V1 core merged, desktop bridge added behind opt-in flags.
+
+Last audit: 2026-05-16.
+
+Implemented baseline:
+
+- backend `features/interview_memory` domain/application/ports/adapters, storage migration and HTTP API under `/api/v1/interview-memory/*`;
+- backend routes are registered only when `interview_memory.enabled=true`, env `INTERVIEW_MEMORY__ENABLED=true`;
+- deterministic ingest, keyword/entity retrieval and strict context packing without embeddings or external extractors;
+- Tauri bridge for final system audio, microphone, focus-copy, manual prompts and final AI answers;
+- desktop `ActiveContext` bridge is opt-in only and falls back to local context on timeout, auth miss or backend error.
+- clear context/history rotates the desktop memory session and sends a best-effort backend delete for the previous session.
+
+Not yet promoted to default:
+
+- long synthetic interview E2E with real companion UI;
+- production/staging canary with prompt artifact review;
+- cleanup or shrink of old local anchor fallback after `ActiveContext` is stable.
 
 Цель: сделать долговременную память для интервью так, чтобы AI стабильно отвечал по длинной истории голосовых вопросов, кода, selected messages и уточнений, но без раздувания prompt, vendor lock-in и неконтролируемой "магии памяти".
 
@@ -827,8 +844,8 @@ Rules:
 Potential API:
 
 ```text
-POST /api/interview-memory/v1/chunks/{chunkId}/pin
-DELETE /api/interview-memory/v1/chunks/{chunkId}/pin
+POST /api/v1/interview-memory/chunks/{chunkId}/pin
+DELETE /api/v1/interview-memory/chunks/{chunkId}/pin
 ```
 
 Do not implement in first slice, but do not make schema choices that prevent it.
@@ -1326,7 +1343,7 @@ Expected additions:
 
 - new feature module `features/interview_memory`;
 - migrations for chunks/facts/embeddings/jobs;
-- routes registered under `/api/interview-memory/v1`;
+- routes registered under `/api/v1/interview-memory`;
 - app state wiring for repositories/providers;
 - background job runner for embeddings/extraction/summaries.
 
@@ -2032,8 +2049,8 @@ alter table interview_memory_facts
 DTOs should use URL versioning:
 
 ```text
-/api/interview-memory/v1/ingest
-/api/interview-memory/v1/build-context
+/api/v1/interview-memory/ingest
+/api/v1/interview-memory/context
 ```
 
 Prompt artifacts should include:
@@ -2675,7 +2692,7 @@ This prevents frontend/backend drift and makes companion parity easier to test.
 ### Ingest endpoint
 
 ```text
-POST /api/interview-memory/v1/ingest
+POST /api/v1/interview-memory/ingest
 ```
 
 Request:
@@ -2721,7 +2738,7 @@ Rules:
 ### Build context endpoint
 
 ```text
-POST /api/interview-memory/v1/build-context
+POST /api/v1/interview-memory/context
 ```
 
 Request:
@@ -2762,7 +2779,7 @@ This endpoint is useful for Tauri modes that still call LLM locally. If backend 
 ### Delete endpoint
 
 ```text
-DELETE /api/interview-memory/v1/session/{sessionId}
+DELETE /api/v1/interview-memory/sessions/{sessionId}
 ```
 
 Response:
@@ -2783,7 +2800,7 @@ This is required before production enablement.
 Useful for debug UI and support:
 
 ```text
-GET /api/interview-memory/v1/session/{sessionId}/status
+GET /api/v1/interview-memory/sessions/{sessionId}/status
 ```
 
 Response:
@@ -2808,7 +2825,7 @@ This endpoint must be user/session scoped.
 Optional V1.5 endpoint for catch-up after offline/dev mode:
 
 ```text
-POST /api/interview-memory/v1/ingest-batch
+POST /api/v1/interview-memory/ingest-batch
 ```
 
 Rules:
@@ -3415,7 +3432,7 @@ Not responsible for:
 Tauri companion sends events:
 
 ```text
-POST /api/interview-memory/v1/ingest
+POST /api/v1/interview-memory/ingest
 ```
 
 for:

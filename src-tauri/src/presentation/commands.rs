@@ -3110,6 +3110,12 @@ pub async fn start_haiku_stream(
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let companion_meta = companion_meta.unwrap_or_default();
+    let effective_prompt =
+        crate::presentation::interview_memory_bridge::assemble_stream_context_or_fallback(
+            state.inner(),
+            prompt,
+        )
+        .await;
     *state.companion_system_prompt.write().await = system_prompt.clone();
 
     let parallel_openai_enabled = provider == crate::domain::LlmProviderType::Anthropic
@@ -3211,12 +3217,12 @@ pub async fn start_haiku_stream(
                 log::info!(
                     "Command: start_haiku_stream parallel request_id={} prompt_len={}",
                     request_id,
-                    prompt.len()
+                    effective_prompt.len()
                 );
 
                 let request_id_clone = request_id.clone();
                 let app_handle_clone = app_handle.clone();
-                let user_text = prompt.to_string();
+                let user_text = effective_prompt.clone();
                 let anthropic_model = model.clone();
                 let system_prompt_clone = system_prompt.clone();
                 let anthropic_candidate_clone = anthropic_candidate.clone();
@@ -3417,12 +3423,12 @@ pub async fn start_haiku_stream(
     log::info!(
         "Command: start_haiku_stream request_id={} prompt_len={}",
         request_id,
-        prompt.len()
+        effective_prompt.len()
     );
 
     let request_id_clone = request_id.clone();
     let app_handle_clone = app_handle.clone();
-    let user_text = prompt.to_string();
+    let user_text = effective_prompt;
     let model_clone = model.clone();
     let system_prompt_clone = system_prompt.clone();
     let provider_clone = provider;
@@ -3929,6 +3935,20 @@ pub async fn start_haiku_chat_stream(
         .await;
     }
 
+    let mut llm_context = context.clone();
+    let mut llm_question = question.clone();
+    if let Some(memory_context) =
+        crate::presentation::interview_memory_bridge::assemble_chat_context_or_fallback(
+            state.inner(),
+            &context,
+            &question,
+        )
+        .await
+    {
+        llm_context = memory_context;
+        llm_question.clear();
+    }
+
     let parallel_openai_enabled = provider == crate::domain::LlmProviderType::Anthropic
         && env_flag("LLM_PARALLEL_OPENAI_RESPONSES")
         && std::env::var("OPENAI_API_KEY")
@@ -4031,8 +4051,8 @@ pub async fn start_haiku_chat_stream(
                 log::info!(
                     "Command: start_haiku_chat_stream parallel request_id={} ctx_len={} q_len={} images={}",
                     request_id,
-                    context.len(),
-                    question.len(),
+                    llm_context.len(),
+                    llm_question.len(),
                     images.len()
                 );
 
@@ -4041,8 +4061,8 @@ pub async fn start_haiku_chat_stream(
                 let anthropic_model = model.clone();
                 let system_prompt_clone = system_prompt.clone();
                 let images_clone = images.clone();
-                let context_clone = context.clone();
-                let question_clone = question.clone();
+                let context_clone = llm_context.clone();
+                let question_clone = llm_question.clone();
                 let api_key_clone = api_key.clone();
                 let anthropic_candidate_clone = anthropic_candidate.clone();
                 let openai_mini_candidate_clone = openai_mini_candidate.clone();
@@ -4285,8 +4305,8 @@ pub async fn start_haiku_chat_stream(
     log::info!(
         "Command: start_haiku_chat_stream request_id={} ctx_len={} q_len={} images={}",
         request_id,
-        context.len(),
-        question.len(),
+        llm_context.len(),
+        llm_question.len(),
         images.len()
     );
 
@@ -4299,8 +4319,8 @@ pub async fn start_haiku_chat_stream(
     let provider_clone = provider;
     let api_key_clone = api_key.clone();
     let images_clone = images.clone();
-    let context_clone = context.clone();
-    let question_clone = question.clone();
+    let context_clone = llm_context.clone();
+    let question_clone = llm_question.clone();
 
     tauri::async_runtime::spawn(async move {
         let request_id_for_done = request_id_clone.clone();

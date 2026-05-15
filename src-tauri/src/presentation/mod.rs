@@ -5,6 +5,7 @@ pub mod companion;
 pub mod companion_actions;
 pub mod companion_timeline;
 pub mod events;
+pub mod interview_memory_bridge;
 pub mod state;
 pub mod tray;
 

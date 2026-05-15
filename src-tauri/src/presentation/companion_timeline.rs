@@ -691,6 +691,20 @@ pub async fn append_system_final(
     }
     drop(timeline);
 
+    crate::presentation::interview_memory_bridge::spawn_ingest_timeline_event(
+        state,
+        crate::presentation::interview_memory_bridge::MemoryTimelineEvent {
+            source: crate::presentation::interview_memory_bridge::MemoryTimelineSource::SystemAudio,
+            event_id: message_id,
+            text: transcription.text.clone(),
+            created_at_ms: transcription.timestamp,
+            seq: Some(seq),
+            attached_to_prompt: false,
+            final_answer: false,
+        },
+    )
+    .await;
+
     prune_timeline(state).await;
     state
         .companion_live_system_started_at_ms
@@ -706,6 +720,7 @@ pub async fn append_focus_copy_system_final(
     if text.trim().is_empty() {
         return None;
     }
+    let memory_text = text.trim().to_string();
 
     let seq = next_seq(state);
     let stt_index = state
@@ -745,6 +760,20 @@ pub async fn append_focus_copy_system_final(
     }
     drop(timeline);
 
+    crate::presentation::interview_memory_bridge::spawn_ingest_timeline_event(
+        state,
+        crate::presentation::interview_memory_bridge::MemoryTimelineEvent {
+            source: crate::presentation::interview_memory_bridge::MemoryTimelineSource::FocusCopy,
+            event_id: message_id.clone(),
+            text: memory_text,
+            created_at_ms,
+            seq: Some(seq),
+            attached_to_prompt: true,
+            final_answer: false,
+        },
+    )
+    .await;
+
     prune_timeline(state).await;
     state
         .companion_live_system_started_at_ms
@@ -762,6 +791,9 @@ pub async fn append_prompt_message(state: &AppState, prompt: CompanionPromptDraf
         .companion_conversation_generation
         .load(Ordering::Relaxed);
     let seq = next_seq(state);
+    let prompt_id = prompt.id.clone();
+    let prompt_text = prompt.text.clone();
+    let prompt_created_at_ms = prompt.created_at_ms;
     state
         .companion_timeline
         .write()
@@ -784,6 +816,20 @@ pub async fn append_prompt_message(state: &AppState, prompt: CompanionPromptDraf
             candidates: None,
             active_candidate_id: None,
         });
+    crate::presentation::interview_memory_bridge::spawn_ingest_timeline_event(
+        state,
+        crate::presentation::interview_memory_bridge::MemoryTimelineEvent {
+            source:
+                crate::presentation::interview_memory_bridge::MemoryTimelineSource::ManualPrompt,
+            event_id: prompt_id,
+            text: prompt_text,
+            created_at_ms: prompt_created_at_ms,
+            seq: Some(seq),
+            attached_to_prompt: true,
+            final_answer: false,
+        },
+    )
+    .await;
     prune_timeline(state).await;
 }
 
@@ -968,6 +1014,7 @@ pub async fn finalize_haiku_candidate(
     }
 
     let mut should_remove_generation = true;
+    let mut final_answer_to_ingest: Option<(String, String, i64, u64)> = None;
     if let Some(message) = state
         .companion_timeline
         .write()
@@ -1000,9 +1047,42 @@ pub async fn finalize_haiku_candidate(
             }
 
             should_remove_generation = update_haiku_group_status(message);
+            if message.status == "final" && !message.text.trim().is_empty() {
+                final_answer_to_ingest = Some((
+                    message.id.clone(),
+                    message.text.clone(),
+                    message.created_at_ms,
+                    message.seq,
+                ));
+            }
         } else {
             message.status = "final".to_string();
+            if !message.text.trim().is_empty() {
+                final_answer_to_ingest = Some((
+                    message.id.clone(),
+                    message.text.clone(),
+                    message.created_at_ms,
+                    message.seq,
+                ));
+            }
         }
+    }
+
+    if let Some((event_id, text, created_at_ms, seq)) = final_answer_to_ingest {
+        crate::presentation::interview_memory_bridge::spawn_ingest_timeline_event(
+            state,
+            crate::presentation::interview_memory_bridge::MemoryTimelineEvent {
+                source:
+                    crate::presentation::interview_memory_bridge::MemoryTimelineSource::AiResponse,
+                event_id,
+                text,
+                created_at_ms,
+                seq: Some(seq),
+                attached_to_prompt: false,
+                final_answer: true,
+            },
+        )
+        .await;
     }
 
     if should_remove_generation {
@@ -1263,6 +1343,19 @@ async fn append_microphone_message(
             candidates: None,
             active_candidate_id: None,
         });
+    crate::presentation::interview_memory_bridge::spawn_ingest_timeline_event(
+        state,
+        crate::presentation::interview_memory_bridge::MemoryTimelineEvent {
+            source: crate::presentation::interview_memory_bridge::MemoryTimelineSource::Microphone,
+            event_id: format!("mic:{}:{}", session_id, seq),
+            text: text.to_string(),
+            created_at_ms,
+            seq: Some(seq),
+            attached_to_prompt: false,
+            final_answer: false,
+        },
+    )
+    .await;
     prune_timeline(state).await;
 }
 

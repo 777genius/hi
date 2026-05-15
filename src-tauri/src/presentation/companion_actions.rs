@@ -245,6 +245,7 @@ pub async fn ensure_context_cleared(
     state
         .companion_conversation_generation
         .fetch_add(1, Ordering::Relaxed);
+    crate::presentation::interview_memory_bridge::reset_session(state).await;
 
     success(state, app_handle, "cleared_context").await
 }
@@ -295,6 +296,7 @@ pub async fn ensure_history_cleared(
     state
         .companion_conversation_generation
         .fetch_add(1, Ordering::Relaxed);
+    crate::presentation::interview_memory_bridge::reset_session(state).await;
     crate::presentation::companion_timeline::clear_system_live_buffers(state).await;
     *state.final_transcription.write().await = None;
     crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
