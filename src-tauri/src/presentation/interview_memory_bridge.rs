@@ -7,6 +7,7 @@ const DEFAULT_API_BASE_URL: &str = "https://api.voicetext.site";
 const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 48_000;
 const DEFAULT_MAX_MEMORY_CANDIDATES: u64 = 2_000;
 const DEFAULT_MAX_MEMORY_RESULTS: usize = 32;
+const MAX_INGEST_EVENT_TEXT_CHARS: usize = 25_000;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct MemoryMetadataRequest {
@@ -139,17 +140,23 @@ pub async fn spawn_ingest_timeline_event(state: &AppState, event: MemoryTimeline
         return;
     }
     let session_id = memory_session_id(state).await;
-    let request = build_ingest_request(session_id, MemoryTimelineEvent { text, ..event });
+    let requests = build_ingest_requests(session_id, MemoryTimelineEvent { text, ..event });
 
     tauri::async_runtime::spawn(async move {
-        if let Err(err) = post_json::<_, serde_json::Value>(
-            "/api/v1/interview-memory/ingest",
-            &auth_token,
-            &request,
-        )
-        .await
-        {
-            log::warn!("Interview memory ingest skipped: {}", err);
+        for request in requests {
+            if let Err(err) = post_json::<_, serde_json::Value>(
+                "/api/v1/interview-memory/ingest",
+                &auth_token,
+                &request,
+            )
+            .await
+            {
+                log::warn!(
+                    "Interview memory ingest skipped for event {:?}: {}",
+                    request.event_id,
+                    err
+                );
+            }
         }
     });
 }
@@ -295,6 +302,14 @@ async fn delete_session(session_id: Uuid, auth_token: &str) -> Result<(), String
 }
 
 async fn auth_token(state: &AppState) -> Option<String> {
+    if let Some(token) = std::env::var("INTERVIEW_MEMORY_AUTH_TOKEN")
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+    {
+        return Some(token);
+    }
+
     state
         .auth_store
         .read()
@@ -303,11 +318,34 @@ async fn auth_token(state: &AppState) -> Option<String> {
         .as_ref()
         .map(|session| session.access_token.trim().to_string())
         .filter(|token| !token.is_empty())
-        .or_else(|| std::env::var("INTERVIEW_MEMORY_AUTH_TOKEN").ok())
 }
 
 async fn memory_session_id(state: &AppState) -> Uuid {
     *state.companion_memory_session_id.read().await
+}
+
+fn build_ingest_requests(session_id: Uuid, event: MemoryTimelineEvent) -> Vec<IngestMemoryRequest> {
+    let text_parts = split_text_for_ingest(&event.text, MAX_INGEST_EVENT_TEXT_CHARS);
+    if text_parts.len() <= 1 {
+        return vec![build_ingest_request(session_id, event)];
+    }
+
+    let total_parts = text_parts.len();
+    let original_event_id = event.event_id.clone();
+    text_parts
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let mut part_event = event.clone();
+            part_event.event_id = format!(
+                "{original_event_id}:part:{:03}-of-{:03}",
+                index + 1,
+                total_parts
+            );
+            part_event.text = text;
+            build_ingest_request(session_id, part_event)
+        })
+        .collect()
 }
 
 fn build_ingest_request(session_id: Uuid, event: MemoryTimelineEvent) -> IngestMemoryRequest {
@@ -407,9 +445,68 @@ fn timestamp_ms_to_rfc3339(timestamp_ms: i64) -> Option<String> {
 }
 
 fn api_base_url() -> String {
-    std::env::var("VOICE_TO_TEXT_API_URL")
+    std::env::var("INTERVIEW_MEMORY_API_URL")
+        .or_else(|_| std::env::var("VOICE_TO_TEXT_API_URL"))
         .or_else(|_| std::env::var("VITE_API_URL"))
         .unwrap_or_else(|_| DEFAULT_API_BASE_URL.to_string())
+}
+
+fn split_text_for_ingest(text: &str, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 {
+        return Vec::new();
+    }
+
+    if text.chars().count() <= max_chars {
+        return vec![text.to_string()];
+    }
+
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut current_chars = 0usize;
+
+    for line in text.split_inclusive('\n') {
+        let line_chars = line.chars().count();
+        if line_chars > max_chars {
+            push_non_empty(&mut parts, &mut current, &mut current_chars);
+            push_hard_wrapped(&mut parts, line, max_chars);
+            continue;
+        }
+
+        if current_chars > 0 && current_chars + line_chars > max_chars {
+            push_non_empty(&mut parts, &mut current, &mut current_chars);
+        }
+
+        current.push_str(line);
+        current_chars += line_chars;
+    }
+
+    push_non_empty(&mut parts, &mut current, &mut current_chars);
+    parts
+}
+
+fn push_non_empty(parts: &mut Vec<String>, current: &mut String, current_chars: &mut usize) {
+    if !current.is_empty() {
+        parts.push(std::mem::take(current));
+        *current_chars = 0;
+    }
+}
+
+fn push_hard_wrapped(parts: &mut Vec<String>, text: &str, max_chars: usize) {
+    let mut current = String::new();
+    let mut current_chars = 0usize;
+
+    for ch in text.chars() {
+        if current_chars >= max_chars {
+            parts.push(std::mem::take(&mut current));
+            current_chars = 0;
+        }
+        current.push(ch);
+        current_chars += 1;
+    }
+
+    if !current.is_empty() {
+        parts.push(current);
+    }
 }
 
 fn env_flag(name: &str) -> bool {
@@ -424,6 +521,49 @@ fn env_flag(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ingest_requests_split_large_events_before_backend_limit() {
+        let session_id = Uuid::new_v4();
+        let text = format!(
+            "{}\n{}",
+            "строка с кодом и контекстом\n".repeat(1_000),
+            "tail marker"
+        );
+
+        let requests = build_ingest_requests(
+            session_id,
+            MemoryTimelineEvent {
+                source: MemoryTimelineSource::FocusCopy,
+                event_id: "focus-copy:large".to_string(),
+                text: text.clone(),
+                created_at_ms: 1_700_000_000_000,
+                seq: Some(99),
+                attached_to_prompt: false,
+                final_answer: false,
+            },
+        );
+
+        assert!(requests.len() > 1);
+        assert!(requests
+            .iter()
+            .all(|request| request.text.chars().count() <= MAX_INGEST_EVENT_TEXT_CHARS));
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.text.as_str())
+                .collect::<String>(),
+            text
+        );
+        assert_eq!(
+            requests[0].event_id.as_deref(),
+            Some("focus-copy:large:part:001-of-002")
+        );
+        assert_eq!(
+            requests[1].event_id.as_deref(),
+            Some("focus-copy:large:part:002-of-002")
+        );
+    }
 
     #[test]
     fn ingest_request_marks_microphone_as_explicit_session_context() {
@@ -481,5 +621,18 @@ mod tests {
         assert_eq!(request.recent_timeline.len(), 1);
         assert_eq!(request.recent_timeline[0].text, "ОС: previous question");
         assert_eq!(request.budget_max_chars, Some(DEFAULT_CONTEXT_BUDGET_CHARS));
+    }
+
+    #[test]
+    fn memory_api_url_is_dedicated_override() {
+        std::env::set_var("INTERVIEW_MEMORY_API_URL", "http://127.0.0.1:8080");
+        std::env::set_var("VOICE_TO_TEXT_API_URL", "https://wrong.example");
+        std::env::set_var("VITE_API_URL", "https://also-wrong.example");
+
+        assert_eq!(api_base_url(), "http://127.0.0.1:8080");
+
+        std::env::remove_var("INTERVIEW_MEMORY_API_URL");
+        std::env::remove_var("VOICE_TO_TEXT_API_URL");
+        std::env::remove_var("VITE_API_URL");
     }
 }

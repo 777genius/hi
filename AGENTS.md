@@ -25,3 +25,4 @@
   ```
 
 - The desktop memory bridge calls `/api/v1/interview-memory/ingest` and `/api/v1/interview-memory/context`. It must remain best-effort for ingest and must fall back to local context if active context retrieval fails.
+- For local memory backend canary while keeping STT on production, use `INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080` for the memory bridge and `INTERVIEW_MEMORY_AUTH_TOKEN=<local-user-jwt>` as the explicit memory-only auth override. Keep `VITE_API_URL=https://api.voicetext.site` and `VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site` if the rest of the app should remain pointed at production.

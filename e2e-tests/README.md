@@ -55,6 +55,35 @@ pnpm e2e:companion-audio -- --allow-mic-miss
 pnpm e2e:companion-context
 ```
 
+Для полной проверки новой interview memory path запускай desktop app с production backend и включённым memory bridge:
+
+```bash
+pnpm copy-helper:brave:restart-cdp
+VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+```
+
+Для local memory backend canary, когда STT остаётся на production websocket, а `/api/v1/interview-memory/*` идёт в локальный backend:
+
+```bash
+INTERVIEW_MEMORY_AUTH_TOKEN="<local-user-jwt>" INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080 VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+```
+
+`INTERVIEW_MEMORY_AUTH_TOKEN` намеренно имеет приоритет только для memory bridge. Это позволяет гонять local backend memory E2E без замены основного app auth/provider flow.
+
+Backend, против которого идёт проверка, должен иметь включённые memory routes:
+
+```bash
+INTERVIEW_MEMORY__ENABLED=true
+```
+
+Backend HTTP gate для памяти находится в `/Users/belief/dev/projects/VoicetextAI/backend`:
+
+```bash
+set -a; source .env >/dev/null 2>&1 || true; set +a
+cargo run -p migration -- up
+cargo test --test interview_memory_e2e -- --nocapture --test-threads=1
+```
+
 Что делает тест:
 
 - добавляет ранний кодовый anchor через `/api/focus-copy/ingest`;
@@ -71,6 +100,12 @@ pnpm e2e:companion-context -- --filler-chars 80000
 pnpm e2e:companion-context -- --skip-voice
 pnpm e2e:companion-context -- --skip-ai
 pnpm e2e:companion-context -- --allow-ai-miss
+```
+
+Если desktop app не залогинен, voice/recording phase ожидаемо вернёт `authRequired`. Для проверки long context/focus-copy/memory split без записи:
+
+```bash
+pnpm e2e:companion-context -- --skip-voice --skip-ai --filler-chars 52000
 ```
 
 ## Важно про macOS

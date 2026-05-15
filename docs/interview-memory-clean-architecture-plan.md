@@ -13,11 +13,13 @@ Implemented baseline:
 - Tauri bridge for final system audio, microphone, focus-copy, manual prompts and final AI answers;
 - desktop `ActiveContext` bridge is opt-in only and falls back to local context on timeout, auth miss or backend error.
 - clear context/history rotates the desktop memory session and sends a best-effort backend delete for the previous session;
-- backend delete/status responses expose chunk/fact/job counts for canary and E2E verification.
+- backend delete/status responses expose chunk/fact/job counts for canary and E2E verification;
+- backend HTTP E2E now covers real `/api/v1/interview-memory/*` routes, JWT auth, Postgres storage, long filler, prompt artifacts, duplicate final-event ingest, same-user session isolation, cross-user isolation and session delete/status counts.
+- desktop memory bridge splits large timeline/focus-copy events into stable part events before ingest so backend `MAX_INGEST_TEXT_CHARS` cannot silently drop long code/context blocks.
 
 Not yet promoted to default:
 
-- long synthetic interview E2E with real companion UI and synthetic voice/audio input;
+- repeated companion UI smoke with synthetic voice/audio input, real STT and optional paid AI answer calls against the same session;
 - production/staging canary with prompt artifact review;
 - cleanup or shrink of old local anchor fallback after `ActiveContext` is stable.
 
@@ -4349,14 +4351,52 @@ Current deterministic backend coverage:
 - `retrieves_early_code_question_in_long_interview` verifies early code question recall after filler;
 - `long_interview_active_context_preserves_early_negative_constraint` verifies early "queue, not stack" correction survives filler and later low-priority AI distractor;
 - `preserves_selected_messages_before_retrieved_memory_under_pressure` verifies selected/current evidence beats retrieved memory under budget pressure.
+- `tests/interview_memory_e2e.rs::long_interview_memory_preserves_constraints_and_isolates_sessions` verifies the real HTTP API path with JWT, DB repository, long filler, prompt artifact reasons, duplicate final-event ingest, same-user session isolation, cross-user isolation and delete/status cleanup.
 
-Planned reusable scripts:
+Current reusable gates:
 
 ```text
-scripts/e2e/generate-interview-audio.mjs
-scripts/e2e/play-synthetic-interview-audio.mjs
-scripts/e2e/run-long-interview-memory-e2e.mjs
-scripts/e2e/assert-memory-prompt-artifacts.mjs
+Backend deterministic DB/HTTP gate:
+  cd /Users/belief/dev/projects/VoicetextAI/backend
+  set -a; source .env >/dev/null 2>&1 || true; set +a
+  cargo run -p migration -- up
+  cargo test --test interview_memory_e2e -- --nocapture --test-threads=1
+
+Frontend companion synthetic context gate:
+  cd /Users/belief/dev/projects/HackInterview
+  pnpm e2e:companion-context -- --filler-chars 80000
+
+Frontend companion dual audio gate:
+  cd /Users/belief/dev/projects/HackInterview
+  pnpm e2e:companion-audio -- --cycles 3 --allow-mic-miss
+```
+
+The current frontend gates are implemented as:
+
+```text
+e2e-tests/companion-synthetic-context.mjs
+e2e-tests/companion-dual-audio-smoke.mjs
+```
+
+Run the desktop app for the full memory path with:
+
+```bash
+pnpm copy-helper:brave:restart-cdp
+VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+```
+
+For local memory backend canary while keeping STT on the production websocket:
+
+```bash
+INTERVIEW_MEMORY_AUTH_TOKEN="<local-user-jwt>" INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080 VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+```
+
+`INTERVIEW_MEMORY_AUTH_TOKEN` is an explicit memory-bridge override for local E2E only. It must not change normal app auth semantics when unset.
+
+Backend must have memory routes enabled:
+
+```bash
+INTERVIEW_MEMORY__ENABLED=true
 ```
 
 Synthetic voice requirements:
@@ -4391,7 +4431,7 @@ Manual paid smoke flow:
 3. Play synthetic OS-audio interview segments.
 4. Play synthetic microphone/candidate segments if loopback is available.
 5. Send 10-20 real AI answer requests from companion and desktop.
-6. Verify prompt artifacts include required early chunks.
+6. Verify prompt artifacts include required early chunks through backend `context_snapshot_id` artifacts or local `.e2e-artifacts/companion-synthetic-context` output.
 7. Verify AI answers do not contradict preserved constraints.
 8. Verify no duplicate final STT chunks from repeated audio.
 9. Verify fallback by disabling memory retrieval and checking chat still answers with current-session fallback.
@@ -4408,6 +4448,7 @@ Hard stop conditions:
 - memory retrieval blocks recording or final transcript rendering;
 - prompt exceeds provider budget;
 - duplicate final STT creates duplicate high-priority memory;
+- a single large focus-copy/code event is rejected by backend ingest instead of being split into safe event parts;
 - web and desktop companion disagree on session memory scope.
 - another session's chunk appears in prompt artifact;
 - production-safe artifact contains raw transcript/code text;
