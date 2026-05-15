@@ -18,6 +18,7 @@ import UpdateIndicator from './UpdateIndicator.vue';
 import UpdateDialog from './UpdateDialog.vue';
 import AudioVisualizer from './AudioVisualizer.vue';
 import ConversationFeed from './ConversationFeed.vue';
+import { buildCodeExplainContextUpToMessageId } from '@/presentation/codeExplainContext';
 import { playShowSound, playDoneSound, preloadUiSounds } from '../../utils/sound';
 import { createPromptImageDraft, type PromptImageDraft } from '../../utils/promptImages';
 import { renderMarkdownToSafeHtml } from '@/utils/markdown';
@@ -452,49 +453,12 @@ function onSelectionChange(): void {
   });
 }
 
-function buildContextUpToMessageId(messageId: string): string {
-  const parts: string[] = [];
-  const list = chatStore.messages;
-
-  function formatLine(m: { kind: string; text: string }): string {
-    const t = String(m.text ?? '').trim();
-    if (!t) return '';
-    if (m.kind === 'stt') return `ОС: ${t}`;
-    if (m.kind === 'mic') return `МИКРОФОН: ${t}`;
-    if (m.kind === 'haiku') return `ПОМОЩНИК: ${t}`;
-    return t;
-  }
-
-  let reached = false;
-  for (const m of list) {
-    const line = formatLine(m);
-    if (line) parts.push(line);
-    if (m.id === messageId) {
-      reached = true;
-      break;
-    }
-  }
-
-  // Fallback: если по какой-то причине не нашли id в списке
-  if (!reached) {
-    const m = list.find((x) => x.id === messageId);
-    const line = m ? formatLine(m) : '';
-    if (line) parts.push(line);
-  }
-
-  // Ограничиваем размер контекста (best-effort), чтобы не взрывать запрос.
-  const MAX_CHARS = 12_000;
-  let text = parts.join('\n').trim();
-  if (text.length > MAX_CHARS) text = text.slice(text.length - MAX_CHARS);
-  return text;
-}
-
 const onExplainSelectedCode = async () => {
   const messageId = codeSelectionUi.value.messageId;
   const selectedText = codeSelectionUi.value.selectedText;
   if (!messageId || !selectedText) return;
 
-  const contextText = buildContextUpToMessageId(messageId);
+  const contextText = buildCodeExplainContextUpToMessageId(chatStore.messages, messageId);
   if (!contextText) return;
 
   const lang = codeSelectionUi.value.isCode ? (codeSelectionUi.value.language ?? '') : 'text';

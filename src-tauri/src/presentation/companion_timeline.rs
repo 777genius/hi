@@ -1605,6 +1605,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_context_text_full_history_ignores_context_floor() {
+        let state = AppState::default();
+
+        append_system_final(&state, 1, &test_transcription("old question", 100)).await;
+        append_system_final(&state, 1, &test_transcription("new question", 200)).await;
+        state
+            .companion_context_floor_seq
+            .store(2, Ordering::Relaxed);
+
+        let recent_context = build_context_text(&state, false).await;
+        let full_context = build_context_text(&state, true).await;
+
+        assert!(!recent_context.contains("old question"));
+        assert!(full_context.contains("ОС: old question"));
+        assert!(full_context.contains("ОС: new question"));
+    }
+
+    #[tokio::test]
+    async fn build_context_text_skips_deleted_and_unfinished_assistant_messages() {
+        let state = AppState::default();
+
+        append_system_final(&state, 1, &test_transcription("question", 100)).await;
+        begin_haiku_message(
+            &state,
+            CompanionHaikuStart {
+                request_id: "haiku:streaming".to_string(),
+                insert_after_id: None,
+                created_at_ms: 120,
+            },
+        )
+        .await;
+        append_haiku_delta(&state, "haiku:streaming", "draft answer").await;
+        begin_haiku_message(
+            &state,
+            CompanionHaikuStart {
+                request_id: "haiku:error".to_string(),
+                insert_after_id: None,
+                created_at_ms: 130,
+            },
+        )
+        .await;
+        append_haiku_delta(&state, "haiku:error", "failed answer").await;
+        fail_haiku_message(&state, "haiku:error", "boom").await;
+
+        {
+            let mut timeline = state.companion_timeline.write().await;
+            let question = timeline
+                .iter_mut()
+                .find(|message| message.kind == "stt")
+                .expect("stt message");
+            question.deleted = true;
+        }
+
+        let context = build_context_text(&state, false).await;
+
+        assert!(!context.contains("question"));
+        assert!(!context.contains("draft answer"));
+        assert!(!context.contains("failed answer"));
+    }
+
+    #[tokio::test]
     async fn settling_active_generation_prevents_late_ai_deltas_after_clear() {
         let state = AppState::default();
 
