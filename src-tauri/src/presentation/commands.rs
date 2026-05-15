@@ -1023,6 +1023,10 @@ pub async fn stop_recording_raw(
     )
     .await;
 
+    state
+        .active_transcription_session_id
+        .store(0, Ordering::Relaxed);
+
     // Emit status change
     log::debug!("Emitting status: Idle (stopped_via_hotkey: false)");
     let _ = app_handle.emit(
