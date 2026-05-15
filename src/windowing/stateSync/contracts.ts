@@ -128,6 +128,7 @@ export type CompanionSnapshotData = {
     contextFloorSeq: number;
     conversationGeneration: number;
     companionModeEnabled: boolean;
+    desktopBlackoutEnabled: boolean;
     lastAction?: string | null;
   };
   live: {

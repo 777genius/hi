@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 #[cfg(any(unix, target_os = "windows"))]
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::stream;
 use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
@@ -22,7 +23,8 @@ use tokio::time::{sleep, timeout};
 
 use crate::domain::RecordingStatus;
 use crate::presentation::events::{
-    MicrophoneMuteStatePayload, StateSyncInvalidationPayload, EVENT_STATE_SYNC_INVALIDATION,
+    MicrophoneMuteStatePayload, StateSyncInvalidationPayload, EVENT_COMPANION_SNAPSHOT,
+    EVENT_STATE_SYNC_INVALIDATION,
 };
 use crate::presentation::AppState;
 
@@ -32,10 +34,15 @@ const COMPANION_PORT_RECLAIM_GRACE_MS: u64 = 350;
 const COMPANION_SSE_RETRY_MS: u64 = 1500;
 const COMPANION_SSE_HEARTBEAT_SECS: u64 = 15;
 const COMPANION_TOPIC: &str = "companion-ui";
+const COMPANION_ICON_128_PNG: &[u8] = include_bytes!("../../icons/128x128.png");
+const COMPANION_ICON_512_PNG: &[u8] = include_bytes!("../../icons/icon.png");
 pub const LIVE_STT_MESSAGE_ID: &str = "stt:live";
 
 type CompanionBody = BoxBody<Bytes, Infallible>;
 const COMPANION_TOKEN_HEADER: &str = "x-companion-token";
+const COMPANION_REQUEST_ID_HEADER: &str = "x-companion-request-id";
+const COMPANION_IDEMPOTENCY_TTL_SECS: u64 = 5 * 60;
+const COMPANION_IDEMPOTENCY_MAX_ENTRIES: usize = 256;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -64,6 +71,7 @@ pub struct CompanionControlState {
     pub context_floor_seq: u64,
     pub conversation_generation: u64,
     pub companion_mode_enabled: bool,
+    pub desktop_blackout_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_action: Option<String>,
 }
@@ -157,6 +165,106 @@ pub struct CompanionRuntime {
     pub security_token: Arc<RwLock<String>>,
     pub enabled: Arc<RwLock<bool>>,
     pub port: Arc<RwLock<Option<u16>>>,
+    pub action_cache: Arc<RwLock<CompanionActionIdempotencyCache>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCompanionAction {
+    ok: bool,
+    action_result: String,
+}
+
+#[derive(Debug, Clone)]
+enum CompanionActionIdempotencyState {
+    InFlight,
+    Completed(CachedCompanionAction),
+}
+
+#[derive(Debug, Clone)]
+struct CompanionActionIdempotencyEntry {
+    created_at: Instant,
+    state: CompanionActionIdempotencyState,
+}
+
+#[derive(Debug)]
+enum CompanionActionIdempotencyDecision {
+    Start(String),
+    InFlight,
+    Completed(CachedCompanionAction),
+}
+
+#[derive(Debug, Default)]
+pub struct CompanionActionIdempotencyCache {
+    entries: HashMap<String, CompanionActionIdempotencyEntry>,
+}
+
+impl CompanionActionIdempotencyCache {
+    fn begin(&mut self, key: String) -> CompanionActionIdempotencyDecision {
+        self.prune();
+        if let Some(entry) = self.entries.get(&key) {
+            return match &entry.state {
+                CompanionActionIdempotencyState::InFlight => {
+                    CompanionActionIdempotencyDecision::InFlight
+                }
+                CompanionActionIdempotencyState::Completed(cached) => {
+                    CompanionActionIdempotencyDecision::Completed(cached.clone())
+                }
+            };
+        }
+
+        self.entries.insert(
+            key.clone(),
+            CompanionActionIdempotencyEntry {
+                created_at: Instant::now(),
+                state: CompanionActionIdempotencyState::InFlight,
+            },
+        );
+        self.enforce_capacity();
+        CompanionActionIdempotencyDecision::Start(key)
+    }
+
+    fn complete(
+        &mut self,
+        key: String,
+        response: &crate::presentation::companion_actions::CompanionActionResponse,
+    ) {
+        self.entries.insert(
+            key,
+            CompanionActionIdempotencyEntry {
+                created_at: Instant::now(),
+                state: CompanionActionIdempotencyState::Completed(CachedCompanionAction {
+                    ok: response.ok,
+                    action_result: response.action_result.clone(),
+                }),
+            },
+        );
+        self.enforce_capacity();
+    }
+
+    fn forget(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+
+    fn prune(&mut self) {
+        let ttl = Duration::from_secs(COMPANION_IDEMPOTENCY_TTL_SECS);
+        let now = Instant::now();
+        self.entries
+            .retain(|_, entry| now.saturating_duration_since(entry.created_at) <= ttl);
+    }
+
+    fn enforce_capacity(&mut self) {
+        while self.entries.len() > COMPANION_IDEMPOTENCY_MAX_ENTRIES {
+            let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.created_at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&oldest_key);
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +288,31 @@ struct CompanionPromptSendBody {
     images: Vec<crate::presentation::commands::LlmImageInput>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct FocusCopyIngestBody {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    app_name: Option<String>,
+    #[serde(default)]
+    bundle_id: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    file_path: Option<String>,
+    #[serde(default)]
+    language_id: Option<String>,
+    #[serde(default)]
+    line_count: Option<usize>,
+    #[serde(default)]
+    character_count: Option<usize>,
+}
+
 pub fn new_runtime() -> CompanionRuntime {
     let snapshot = CompanionSnapshotEnvelope::default();
     let (sse_tx, _sse_rx) = watch::channel(snapshot.clone());
@@ -190,6 +323,7 @@ pub fn new_runtime() -> CompanionRuntime {
         security_token: Arc::new(RwLock::new(generate_security_token())),
         enabled: Arc::new(RwLock::new(false)),
         port: Arc::new(RwLock::new(None)),
+        action_cache: Arc::new(RwLock::new(CompanionActionIdempotencyCache::default())),
     }
 }
 
@@ -205,7 +339,28 @@ async fn ensure_persisted_security_token(state: &AppState) -> Result<String, Str
         normalize_persisted_security_token(config.companion_access_token.clone())
     };
     if let Some(token) = existing {
+        persist_companion_bridge_token(&token).await;
         return Ok(token);
+    }
+
+    match crate::infrastructure::ConfigStore::load_companion_bridge_token().await {
+        Ok(Some(token)) => {
+            let config_snapshot = {
+                let mut config = state.config.write().await;
+                config.companion_access_token = Some(token.clone());
+                config.clone()
+            };
+            crate::infrastructure::ConfigStore::save_app_config(&config_snapshot)
+                .await
+                .map_err(|e| format!("Failed to restore companion token: {}", e))?;
+            persist_companion_bridge_token(&token).await;
+            log::info!("Restored companion token from bridge file");
+            return Ok(token);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            log::warn!("Failed to load companion bridge token: {}", error);
+        }
     }
 
     let token = generate_security_token();
@@ -219,7 +374,15 @@ async fn ensure_persisted_security_token(state: &AppState) -> Result<String, Str
         .await
         .map_err(|e| format!("Failed to persist companion token: {}", e))?;
 
+    persist_companion_bridge_token(&token).await;
     Ok(token)
+}
+
+async fn persist_companion_bridge_token(token: &str) {
+    if let Err(error) = crate::infrastructure::ConfigStore::save_companion_bridge_token(token).await
+    {
+        log::warn!("Failed to persist companion bridge token: {}", error);
+    }
 }
 
 pub async fn reset_session_timeline(state: &AppState) {
@@ -316,6 +479,10 @@ async fn publish_snapshot_internal(
     *runtime.snapshot.write().await = envelope.clone();
     let _ = runtime.sse_tx.send(envelope.clone());
 
+    if envelope.data.controls.companion_mode_enabled {
+        let _ = app_handle.emit(EVENT_COMPANION_SNAPSHOT, envelope.clone());
+    }
+
     if emit_tauri_invalidation {
         emit_invalidation(app_handle, revision).await;
     }
@@ -379,6 +546,13 @@ pub async fn disable_mode(app_handle: &AppHandle) -> Result<(), String> {
     }
 
     let runtime = state.companion_runtime.read().await.clone();
+    let had_blackout = state
+        .companion_desktop_blackout_enabled
+        .swap(false, std::sync::atomic::Ordering::Relaxed);
+    if had_blackout {
+        let _ = publish_snapshot(app_handle).await;
+    }
+
     *runtime.enabled.write().await = false;
     *runtime.port.write().await = None;
 
@@ -460,6 +634,9 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
             context_floor_seq,
             conversation_generation,
             companion_mode_enabled,
+            desktop_blackout_enabled: state
+                .companion_desktop_blackout_enabled
+                .load(std::sync::atomic::Ordering::Relaxed),
             last_action,
         },
         live: CompanionLiveState {
@@ -511,6 +688,24 @@ async fn route_request(
             json_response(StatusCode::OK, body)
         }
         (Method::HEAD, "/health") | (Method::HEAD, "/api/health") => empty_response(StatusCode::OK),
+        (Method::GET, "/manifest.webmanifest") => {
+            companion_manifest_response(&app_handle, req.uri()).await
+        }
+        (Method::HEAD, "/manifest.webmanifest") => {
+            without_body(companion_manifest_response(&app_handle, req.uri()).await)
+        }
+        (Method::GET, "/companion-icon-128.png") => companion_icon_response(COMPANION_ICON_128_PNG),
+        (Method::HEAD, "/companion-icon-128.png") => {
+            without_body(companion_icon_response(COMPANION_ICON_128_PNG))
+        }
+        (Method::GET, "/companion-icon-512.png")
+        | (Method::GET, "/companion-apple-touch-icon.png") => {
+            companion_icon_response(COMPANION_ICON_512_PNG)
+        }
+        (Method::HEAD, "/companion-icon-512.png")
+        | (Method::HEAD, "/companion-apple-touch-icon.png") => {
+            without_body(companion_icon_response(COMPANION_ICON_512_PNG))
+        }
         (Method::GET, "/api/state") => {
             if let Some(token) = parse_query_token(req.uri()) {
                 if is_valid_token(&app_handle, &token).await {
@@ -556,6 +751,12 @@ async fn route_request(
         (Method::POST, "/api/microphone/unmute") => {
             handle_mutating_post(app_handle.clone(), req, "microphone_unmute").await
         }
+        (Method::POST, "/api/desktop/blackout/enable") => {
+            handle_mutating_post(app_handle.clone(), req, "desktop_blackout_enable").await
+        }
+        (Method::POST, "/api/desktop/blackout/disable") => {
+            handle_mutating_post(app_handle.clone(), req, "desktop_blackout_disable").await
+        }
         (Method::POST, "/api/context/clear") => {
             handle_mutating_post(app_handle.clone(), req, "context_clear").await
         }
@@ -566,6 +767,9 @@ async fn route_request(
         (Method::POST, "/api/prompt/send") => {
             handle_prompt_send_post(app_handle.clone(), req).await
         }
+        (Method::POST, "/api/focus-copy/ingest") => {
+            handle_focus_copy_ingest_post(app_handle.clone(), req).await
+        }
         (Method::HEAD, path) if path.starts_with("/c/") => {
             let token = path.trim_start_matches("/c/").to_string();
             if is_valid_token(&app_handle, &token).await {
@@ -574,7 +778,7 @@ async fn route_request(
                     urlencoding::encode(&token)
                 )))
             } else {
-                text_response(StatusCode::FORBIDDEN, "Forbidden")
+                without_body(stale_companion_link_response())
             }
         }
         (Method::GET, path) if path.starts_with("/c/") => {
@@ -585,21 +789,21 @@ async fn route_request(
                     urlencoding::encode(&token)
                 ))
             } else {
-                text_response(StatusCode::FORBIDDEN, "Forbidden")
+                stale_companion_link_response()
             }
         }
         (Method::HEAD, "/companion.html") => match parse_query_token(req.uri()) {
             Some(token) if is_valid_token(&app_handle, &token).await => {
                 without_body(serve_companion_frontend(&app_handle, req.uri()).await)
             }
-            Some(_) => text_response(StatusCode::FORBIDDEN, "Forbidden"),
+            Some(_) => without_body(stale_companion_link_response()),
             None => text_response(StatusCode::UNAUTHORIZED, "Missing token"),
         },
         (Method::GET, "/companion.html") => match parse_query_token(req.uri()) {
             Some(token) if is_valid_token(&app_handle, &token).await => {
                 serve_companion_frontend(&app_handle, req.uri()).await
             }
-            Some(_) => text_response(StatusCode::FORBIDDEN, "Forbidden"),
+            Some(_) => stale_companion_link_response(),
             None => text_response(StatusCode::UNAUTHORIZED, "Missing token"),
         },
         (Method::HEAD, path) if is_companion_frontend_asset_path(path) => {
@@ -616,6 +820,101 @@ async fn route_request(
     Ok(response)
 }
 
+fn companion_action_status(action_result: &str) -> StatusCode {
+    match action_result {
+        "busy_transition" => StatusCode::CONFLICT,
+        "rejected_auth" => StatusCode::UNAUTHORIZED,
+        _ => StatusCode::OK,
+    }
+}
+
+fn companion_action_json_response(
+    response: crate::presentation::companion_actions::CompanionActionResponse,
+) -> Response<CompanionBody> {
+    json_response(
+        companion_action_status(&response.action_result),
+        serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+    )
+}
+
+async fn cached_companion_action_response(
+    app_handle: &AppHandle,
+    cached: CachedCompanionAction,
+) -> Response<CompanionBody> {
+    match build_current_snapshot(app_handle).await {
+        Ok(snapshot) => companion_action_json_response(
+            crate::presentation::companion_actions::CompanionActionResponse {
+                ok: cached.ok,
+                action_result: cached.action_result,
+                snapshot,
+            },
+        ),
+        Err(err) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+}
+
+fn companion_idempotency_key(token: &str, request_id: &str, path: &str) -> String {
+    format!("{}:{}:{}", token, request_id, path)
+}
+
+async fn begin_companion_action_idempotency(
+    app_handle: &AppHandle,
+    state: &AppState,
+    token: &str,
+    path: &str,
+    request_id: Option<String>,
+) -> Result<Option<String>, Response<CompanionBody>> {
+    let Some(request_id) = request_id else {
+        return Ok(None);
+    };
+    let key = companion_idempotency_key(token, &request_id, path);
+    let cache = {
+        let runtime = state.companion_runtime.read().await;
+        runtime.action_cache.clone()
+    };
+    let decision = cache.write().await.begin(key);
+    match decision {
+        CompanionActionIdempotencyDecision::Start(key) => Ok(Some(key)),
+        CompanionActionIdempotencyDecision::InFlight => Err(cached_companion_action_response(
+            app_handle,
+            CachedCompanionAction {
+                ok: false,
+                action_result: "busy_transition".to_string(),
+            },
+        )
+        .await),
+        CompanionActionIdempotencyDecision::Completed(cached) => {
+            Err(cached_companion_action_response(app_handle, cached).await)
+        }
+    }
+}
+
+async fn complete_companion_action_idempotency(
+    state: &AppState,
+    key: Option<String>,
+    response: &crate::presentation::companion_actions::CompanionActionResponse,
+) {
+    let Some(key) = key else {
+        return;
+    };
+    let cache = {
+        let runtime = state.companion_runtime.read().await;
+        runtime.action_cache.clone()
+    };
+    cache.write().await.complete(key, response);
+}
+
+async fn forget_companion_action_idempotency(state: &AppState, key: Option<String>) {
+    let Some(key) = key else {
+        return;
+    };
+    let cache = {
+        let runtime = state.companion_runtime.read().await;
+        runtime.action_cache.clone()
+    };
+    cache.write().await.forget(&key);
+}
+
 async fn handle_mutating_post(
     app_handle: AppHandle,
     req: Request<Incoming>,
@@ -624,6 +923,8 @@ async fn handle_mutating_post(
     let Some(token) = parse_header_token(req.headers()) else {
         return text_response(StatusCode::UNAUTHORIZED, "Missing token");
     };
+    let request_id = parse_request_id(req.headers());
+    let request_path = req.uri().path().to_string();
     if !is_valid_token(&app_handle, &token).await {
         return text_response(StatusCode::FORBIDDEN, "Forbidden");
     }
@@ -640,6 +941,19 @@ async fn handle_mutating_post(
     let state = match app_handle.try_state::<AppState>() {
         Some(state) => state,
         None => return text_response(StatusCode::INTERNAL_SERVER_ERROR, "AppState not available"),
+    };
+
+    let idempotency_key = match begin_companion_action_idempotency(
+        &app_handle,
+        state.inner(),
+        &token,
+        &request_path,
+        request_id,
+    )
+    .await
+    {
+        Ok(key) => key,
+        Err(response) => return response,
     };
 
     let result = match action {
@@ -674,6 +988,22 @@ async fn handle_mutating_post(
             )
             .await
         }
+        "desktop_blackout_enable" => {
+            crate::presentation::companion_actions::ensure_desktop_blackout(
+                state.inner(),
+                &app_handle,
+                true,
+            )
+            .await
+        }
+        "desktop_blackout_disable" => {
+            crate::presentation::companion_actions::ensure_desktop_blackout(
+                state.inner(),
+                &app_handle,
+                false,
+            )
+            .await
+        }
         "context_clear" => {
             crate::presentation::companion_actions::ensure_context_cleared(
                 state.inner(),
@@ -693,17 +1023,13 @@ async fn handle_mutating_post(
 
     match result {
         Ok(response) => {
-            let status = match response.action_result.as_str() {
-                "busy_transition" => StatusCode::CONFLICT,
-                "rejected_auth" => StatusCode::UNAUTHORIZED,
-                _ => StatusCode::OK,
-            };
-            json_response(
-                status,
-                serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
-            )
+            complete_companion_action_idempotency(state.inner(), idempotency_key, &response).await;
+            companion_action_json_response(response)
         }
-        Err(err) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &err),
+        Err(err) => {
+            forget_companion_action_idempotency(state.inner(), idempotency_key).await;
+            text_response(StatusCode::INTERNAL_SERVER_ERROR, &err)
+        }
     }
 }
 
@@ -714,6 +1040,8 @@ async fn handle_ai_request_post(
     let Some(token) = parse_header_token(req.headers()) else {
         return text_response(StatusCode::UNAUTHORIZED, "Missing token");
     };
+    let request_id = parse_request_id(req.headers());
+    let request_path = req.uri().path().to_string();
     if !is_valid_token(&app_handle, &token).await {
         return text_response(StatusCode::FORBIDDEN, "Forbidden");
     }
@@ -734,21 +1062,30 @@ async fn handle_ai_request_post(
         None => return text_response(StatusCode::INTERNAL_SERVER_ERROR, "AppState not available"),
     };
 
+    let idempotency_key = match begin_companion_action_idempotency(
+        &app_handle,
+        state.inner(),
+        &token,
+        &request_path,
+        request_id,
+    )
+    .await
+    {
+        Ok(key) => key,
+        Err(response) => return response,
+    };
+
     match crate::presentation::companion_actions::request_ai(state.inner(), &app_handle, body.text)
         .await
     {
         Ok(response) => {
-            let status = match response.action_result.as_str() {
-                "busy_transition" => StatusCode::CONFLICT,
-                "rejected_auth" => StatusCode::UNAUTHORIZED,
-                _ => StatusCode::OK,
-            };
-            json_response(
-                status,
-                serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
-            )
+            complete_companion_action_idempotency(state.inner(), idempotency_key, &response).await;
+            companion_action_json_response(response)
         }
-        Err(err) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &err),
+        Err(err) => {
+            forget_companion_action_idempotency(state.inner(), idempotency_key).await;
+            text_response(StatusCode::INTERNAL_SERVER_ERROR, &err)
+        }
     }
 }
 
@@ -759,6 +1096,8 @@ async fn handle_prompt_send_post(
     let Some(token) = parse_header_token(req.headers()) else {
         return text_response(StatusCode::UNAUTHORIZED, "Missing token");
     };
+    let request_id = parse_request_id(req.headers());
+    let request_path = req.uri().path().to_string();
     if !is_valid_token(&app_handle, &token).await {
         return text_response(StatusCode::FORBIDDEN, "Forbidden");
     }
@@ -779,6 +1118,19 @@ async fn handle_prompt_send_post(
         None => return text_response(StatusCode::INTERNAL_SERVER_ERROR, "AppState not available"),
     };
 
+    let idempotency_key = match begin_companion_action_idempotency(
+        &app_handle,
+        state.inner(),
+        &token,
+        &request_path,
+        request_id,
+    )
+    .await
+    {
+        Ok(key) => key,
+        Err(response) => return response,
+    };
+
     match crate::presentation::companion_actions::send_prompt(
         state.inner(),
         &app_handle,
@@ -788,17 +1140,91 @@ async fn handle_prompt_send_post(
     .await
     {
         Ok(response) => {
-            let status = match response.action_result.as_str() {
-                "busy_transition" => StatusCode::CONFLICT,
-                "rejected_auth" => StatusCode::UNAUTHORIZED,
-                _ => StatusCode::OK,
-            };
+            complete_companion_action_idempotency(state.inner(), idempotency_key, &response).await;
+            companion_action_json_response(response)
+        }
+        Err(err) => {
+            forget_companion_action_idempotency(state.inner(), idempotency_key).await;
+            text_response(StatusCode::INTERNAL_SERVER_ERROR, &err)
+        }
+    }
+}
+
+async fn handle_focus_copy_ingest_post(
+    app_handle: AppHandle,
+    req: Request<Incoming>,
+) -> Response<CompanionBody> {
+    let Some(token) = parse_header_token(req.headers()) else {
+        return text_response(StatusCode::UNAUTHORIZED, "Missing token");
+    };
+    if !is_valid_token(&app_handle, &token).await {
+        return text_response(StatusCode::FORBIDDEN, "Forbidden");
+    }
+    if !has_json_content_type(req.headers()) {
+        return text_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Expected application/json",
+        );
+    }
+
+    let body = match read_json_body::<FocusCopyIngestBody>(req).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+
+    let Some(text) = body.text else {
+        return text_response(StatusCode::BAD_REQUEST, "Missing text");
+    };
+    if text.trim().is_empty() {
+        return text_response(StatusCode::BAD_REQUEST, "Empty text");
+    }
+
+    let state = match app_handle.try_state::<AppState>() {
+        Some(state) => state,
+        None => return text_response(StatusCode::INTERNAL_SERVER_ERROR, "AppState not available"),
+    };
+
+    let created_at_ms = crate::presentation::companion_timeline::now_ms();
+    let message_id = crate::presentation::companion_timeline::append_focus_copy_system_final(
+        state.inner(),
+        text,
+        created_at_ms,
+        Some(format!("focus-copy:{}", uuid::Uuid::new_v4())),
+    )
+    .await;
+
+    let Some(message_id) = message_id else {
+        return text_response(StatusCode::BAD_REQUEST, "Empty text");
+    };
+
+    match publish_snapshot(&app_handle).await {
+        Ok(_) => {
+            let chars = body.character_count.unwrap_or_default();
+            log::info!(
+                "Focus copy ingested via HTTP id={} method={:?}, source={:?}, chars={}, app={:?}, bundle={:?}, url={:?}, file={:?}, language={:?}, lines={:?}",
+                message_id,
+                body.method,
+                body.source,
+                chars,
+                body.app_name,
+                body.bundle_id,
+                body.url,
+                body.file_path,
+                body.language_id,
+                body.line_count
+            );
+
             json_response(
-                status,
-                serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+                StatusCode::OK,
+                serde_json::json!({
+                    "ok": true,
+                    "messageId": message_id,
+                    "characterCount": chars,
+                })
+                .to_string(),
             )
         }
-        Err(err) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &err),
+        Err(error) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
 }
 
@@ -888,6 +1314,66 @@ async fn companion_health_json(app_handle: &AppHandle) -> String {
     .to_string()
 }
 
+async fn companion_manifest_response(
+    app_handle: &AppHandle,
+    uri: &hyper::Uri,
+) -> Response<CompanionBody> {
+    let Some(token) = parse_query_token(uri) else {
+        return text_response(StatusCode::UNAUTHORIZED, "Missing token");
+    };
+
+    if !is_valid_token(app_handle, &token).await {
+        return text_response(StatusCode::FORBIDDEN, "Forbidden");
+    }
+
+    let body = serde_json::json!({
+        "name": "HackInterview Companion",
+        "short_name": "Companion",
+        "description": "Local companion controls for HackInterview",
+        "id": "/companion",
+        "start_url": format!("/c/{}", urlencoding::encode(&token)),
+        "scope": "/",
+        "display": "standalone",
+        "display_override": ["standalone", "browser"],
+        "background_color": "#08111f",
+        "theme_color": "#0f172a",
+        "orientation": "portrait",
+        "icons": [
+            {
+                "src": "/companion-icon-128.png",
+                "sizes": "128x128",
+                "type": "image/png"
+            },
+            {
+                "src": "/companion-icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable"
+            }
+        ]
+    })
+    .to_string();
+
+    let mut response = bytes_response(
+        StatusCode::OK,
+        Bytes::from(body),
+        "application/manifest+json",
+    );
+    let _ = response
+        .headers_mut()
+        .insert(CACHE_CONTROL, "no-store".parse().unwrap());
+    response
+}
+
+fn companion_icon_response(bytes: &'static [u8]) -> Response<CompanionBody> {
+    let mut response = bytes_response(StatusCode::OK, Bytes::from_static(bytes), "image/png");
+    let _ = response.headers_mut().insert(
+        CACHE_CONTROL,
+        "public, max-age=31536000, immutable".parse().unwrap(),
+    );
+    response
+}
+
 fn is_companion_frontend_asset_path(path: &str) -> bool {
     path.starts_with("/assets/")
         || path.starts_with("/src/")
@@ -906,7 +1392,7 @@ async fn serve_companion_frontend(
         return proxy_companion_frontend_dev(app_handle, uri).await;
     }
 
-    serve_companion_frontend_asset(app_handle, uri.path())
+    serve_companion_frontend_asset(app_handle, uri)
 }
 
 #[cfg(debug_assertions)]
@@ -967,7 +1453,8 @@ async fn proxy_companion_frontend_dev(
     };
 
     if uri.path() == "/companion.html" && content_type.starts_with("text/html") {
-        body = strip_vite_hmr_client(&String::from_utf8_lossy(&body)).into_bytes();
+        let html = strip_vite_hmr_client(&String::from_utf8_lossy(&body));
+        body = inject_companion_pwa_manifest_href(&html, uri).into_bytes();
     }
 
     let mut response = bytes_response(status, Bytes::from(body), &content_type);
@@ -997,7 +1484,11 @@ async fn proxy_companion_frontend_dev(
     )
 }
 
-fn serve_companion_frontend_asset(app_handle: &AppHandle, path: &str) -> Response<CompanionBody> {
+fn serve_companion_frontend_asset(
+    app_handle: &AppHandle,
+    uri: &hyper::Uri,
+) -> Response<CompanionBody> {
+    let path = uri.path();
     let asset_key = if path == "/" || path.is_empty() {
         "companion.html".to_string()
     } else {
@@ -1008,7 +1499,15 @@ fn serve_companion_frontend_asset(app_handle: &AppHandle, path: &str) -> Respons
         Some(asset) => {
             let mime_type = asset.mime_type().to_string();
             let csp_header = asset.csp_header().map(str::to_string);
-            let mut response = bytes_response(StatusCode::OK, Bytes::from(asset.bytes), &mime_type);
+            let bytes = if content_type_is_html(&mime_type)
+                && (path == "/companion.html" || path == "/" || path.is_empty())
+            {
+                let html = String::from_utf8_lossy(&asset.bytes);
+                Bytes::from(inject_companion_pwa_manifest_href(&html, uri).into_bytes())
+            } else {
+                Bytes::from(asset.bytes)
+            };
+            let mut response = bytes_response(StatusCode::OK, bytes, &mime_type);
             if path == "/companion.html" || path == "/" || path.is_empty() {
                 let _ = response
                     .headers_mut()
@@ -1030,6 +1529,34 @@ fn strip_vite_hmr_client(html: &str) -> String {
         .filter(|line| !line.contains("/@vite/client"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn content_type_is_html(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .map(|value| value.trim().eq_ignore_ascii_case("text/html"))
+        .unwrap_or(false)
+}
+
+fn companion_manifest_href(uri: &hyper::Uri) -> String {
+    match parse_query_token(uri) {
+        Some(token) if !token.trim().is_empty() => {
+            format!(
+                "/manifest.webmanifest?token={}",
+                urlencoding::encode(&token)
+            )
+        }
+        _ => "/manifest.webmanifest".to_string(),
+    }
+}
+
+fn inject_companion_pwa_manifest_href(html: &str, uri: &hyper::Uri) -> String {
+    let manifest_href = companion_manifest_href(uri);
+    html.replace(
+        r#"<link rel="manifest" href="/manifest.webmanifest" />"#,
+        &format!(r#"<link rel="manifest" href="{}" />"#, manifest_href),
+    )
 }
 
 fn companion_proxy_client() -> &'static reqwest::Client {
@@ -1074,6 +1601,20 @@ fn parse_header_token(headers: &hyper::HeaderMap) -> Option<String> {
         .and_then(|value| value.to_str().ok())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn parse_request_id(headers: &hyper::HeaderMap) -> Option<String> {
+    headers
+        .get(COMPANION_REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
 }
 
 fn has_json_content_type(headers: &hyper::HeaderMap) -> bool {
@@ -1350,6 +1891,68 @@ fn text_response(status: StatusCode, body: &str) -> Response<CompanionBody> {
     )
 }
 
+fn stale_companion_link_response() -> Response<CompanionBody> {
+    let body = r##"<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f172a" />
+    <meta http-equiv="refresh" content="5" />
+    <title>Companion link expired</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #08111f;
+        color: #e5eefb;
+      }
+      main {
+        width: min(100%, 420px);
+        border: 1px solid rgba(148, 163, 184, 0.26);
+        border-radius: 8px;
+        padding: 22px;
+        background: rgba(15, 23, 42, 0.92);
+      }
+      h1 {
+        margin: 0 0 10px;
+        font-size: 20px;
+        line-height: 1.25;
+        letter-spacing: 0;
+      }
+      p {
+        margin: 0;
+        color: #b8c4d8;
+        font-size: 15px;
+        line-height: 1.5;
+      }
+      p + p { margin-top: 12px; }
+      strong { color: #ffffff; font-weight: 650; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Companion ссылка устарела</h1>
+      <p>Эта PWA открылась со старым token. Доступ к данным закрыт, поэтому приложение не подставляет новый token автоматически.</p>
+      <p>Открой окно приложения на компьютере, нажми <strong>Телефон</strong> и обнови ссылку. Если token восстановился из локального bridge-файла, эта страница сама переподключится после обновления.</p>
+    </main>
+  </body>
+</html>"##;
+
+    response_with_headers(
+        StatusCode::FORBIDDEN,
+        body.to_string(),
+        "text/html; charset=utf-8",
+        &[("Cache-Control", "no-store")],
+    )
+}
+
 fn empty_response(status: StatusCode) -> Response<CompanionBody> {
     let mut response = Response::new(empty_body());
     *response.status_mut() = status;
@@ -1582,4 +2185,56 @@ fn is_usable_companion_ipv4(ip: Ipv4Addr) -> bool {
         || ip.is_link_local()
         || ip.is_multicast()
         || ip.is_broadcast())
+}
+
+#[cfg(test)]
+mod idempotency_tests {
+    use super::*;
+    use crate::presentation::companion_actions::CompanionActionResponse;
+
+    #[test]
+    fn action_cache_marks_duplicate_in_flight_as_busy() {
+        let mut cache = CompanionActionIdempotencyCache::default();
+        assert!(matches!(
+            cache.begin("token:req:/api/record/start".to_string()),
+            CompanionActionIdempotencyDecision::Start(_)
+        ));
+        assert!(matches!(
+            cache.begin("token:req:/api/record/start".to_string()),
+            CompanionActionIdempotencyDecision::InFlight
+        ));
+    }
+
+    #[test]
+    fn action_cache_returns_completed_result_without_restart() {
+        let mut cache = CompanionActionIdempotencyCache::default();
+        let key = match cache.begin("token:req:/api/record/start".to_string()) {
+            CompanionActionIdempotencyDecision::Start(key) => key,
+            other => panic!("unexpected decision: {other:?}"),
+        };
+        let response = CompanionActionResponse {
+            ok: true,
+            action_result: "started_recording".to_string(),
+            snapshot: CompanionSnapshotEnvelope::default(),
+        };
+        cache.complete(key, &response);
+
+        match cache.begin("token:req:/api/record/start".to_string()) {
+            CompanionActionIdempotencyDecision::Completed(cached) => {
+                assert!(cached.ok);
+                assert_eq!(cached.action_result, "started_recording");
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_id_header_accepts_compact_ascii_ids_only() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(COMPANION_REQUEST_ID_HEADER, "abc-123_X".parse().unwrap());
+        assert_eq!(parse_request_id(&headers).as_deref(), Some("abc-123_X"));
+
+        headers.insert(COMPANION_REQUEST_ID_HEADER, "bad id".parse().unwrap());
+        assert_eq!(parse_request_id(&headers), None);
+    }
 }

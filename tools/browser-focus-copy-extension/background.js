@@ -45,6 +45,11 @@ function connectNativeHost() {
       return;
     }
 
+    if (message?.type === 'focus-copy-editor-api-request') {
+      void handleEditorApiCopyRequest(message);
+      return;
+    }
+
     if (message && message.ok === false) {
       console.warn('[focus-copy] native host rejected message', message.error);
     }
@@ -300,6 +305,72 @@ async function handleCdpCopyRequest(message) {
     url: tab?.url ?? latestFocus?.url ?? null,
     elapsedMs: Date.now() - startedAt,
   });
+}
+
+async function handleEditorApiCopyRequest(message) {
+  const startedAt = Date.now();
+  const requestId = String(message.requestId ?? '');
+  if (!requestId) {
+    return;
+  }
+
+  let tab = null;
+
+  try {
+    tab = await queryActiveTab();
+    if (!tab?.id) {
+      throw new Error('active-tab-not-found');
+    }
+
+    const scriptsReady = await ensureContentScriptsForTab(tab);
+    if (!scriptsReady) {
+      throw new Error('content-scripts-unavailable');
+    }
+
+    const frameId = activeFrameIdForTab(tab.id);
+    const response = await sendFrameMessage(tab.id, frameId, {
+      type: 'focus-copy-editor-api-read',
+      requestId,
+    });
+
+    if (!response?.ok) {
+      throw new Error(response?.error || 'editor-api-read-failed');
+    }
+
+    postToNativeHost({
+      type: 'focus-copy-editor-api-response',
+      requestId,
+      ok: true,
+      method: response.method || 'editor-api',
+      restored: true,
+      error: null,
+      url: response.url || tab.url || latestFocus?.url || null,
+      title: response.title || tab.title || null,
+      frameUrl: response.frameUrl || response.url || tab.url || null,
+      text: response.text ?? '',
+      kind: response.kind || 'editor-api',
+      tagName: response.tagName || null,
+      textLength: Number.isInteger(response.textLength) ? response.textLength : String(response.text ?? '').length,
+      elapsedMs: Date.now() - startedAt,
+    });
+  } catch (error) {
+    postToNativeHost({
+      type: 'focus-copy-editor-api-response',
+      requestId,
+      ok: false,
+      method: 'editor-api',
+      restored: false,
+      error: error instanceof Error ? error.message : String(error),
+      url: tab?.url ?? latestFocus?.url ?? null,
+      title: tab?.title ?? null,
+      frameUrl: latestFocus?.url ?? tab?.url ?? null,
+      text: null,
+      kind: null,
+      tagName: null,
+      textLength: null,
+      elapsedMs: Date.now() - startedAt,
+    });
+  }
 }
 
 chrome.runtime.onInstalled.addListener(() => {

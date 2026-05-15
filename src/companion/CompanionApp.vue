@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import ConversationFeed from '@/presentation/components/ConversationFeed.vue';
 import { buildCompanionConversationFeedMessages } from '@/presentation/companionFeed';
 import { createPromptImageDraft, type PromptImageDraft } from '@/utils/promptImages';
@@ -11,6 +11,13 @@ import {
   toneForCompanionFailure,
 } from './connectionErrors';
 import { isCompanionPageVisible } from './pageVisibility';
+import {
+  companionInstallHint,
+  createCompanionRequestId,
+  detectCompanionInstallPlatform,
+  isCompanionStandalone,
+  validateCompanionManifest,
+} from './pwa';
 import { abortCompanionRequests, wasCompanionRequestHiddenAborted } from './requestAbortState';
 import type {
   CompanionActionResponse,
@@ -21,11 +28,20 @@ import type {
 
 type StatusTone = '' | 'ok' | 'warn' | 'error' | 'pending';
 type ConnectionState = 'idle' | 'connected' | 'reconnecting' | 'disconnected';
+type PwaDiagnosticStatus = 'ok' | 'warn' | 'error' | 'pending';
+type PwaDiagnosticItem = {
+  id: string;
+  label: string;
+  status: PwaDiagnosticStatus;
+  message: string;
+};
 
 const token = new URLSearchParams(window.location.search).get('token')?.trim() ?? '';
 const companionAvailable = token.length > 0;
 const REQUEST_TIMEOUT_MS = 9000;
 const ACTION_REQUEST_TIMEOUT_MS = 30000;
+const PWA_CHECK_TIMEOUT_MS = 4500;
+const PWA_INSTALL_HINT_DISMISSED_KEY = 'companionPwaInstallHintDismissed';
 
 const companionFeedRef = ref<{ scrollEl: HTMLElement | null } | null>(null);
 const snapshot = ref<TauriSnapshotEnvelope<CompanionSnapshotData> | null>(null);
@@ -40,8 +56,18 @@ const aiQuestion = ref('');
 const aiComposerOpen = ref(false);
 const promptImages = ref<PromptImageDraft[]>([]);
 const promptFileInputRef = ref<HTMLInputElement | null>(null);
+const pwaStandalone = ref(false);
+const pwaDiagnosticItems = ref<PwaDiagnosticItem[]>([]);
+const pwaDiagnosticChecking = ref(false);
+const pwaDiagnosticExpanded = ref(false);
+const pwaInstallHintDismissed = ref(
+  typeof localStorage !== 'undefined' && localStorage.getItem(PWA_INSTALL_HINT_DISMISSED_KEY) === '1',
+);
+const feedScrolledDown = ref(false);
 
 let eventSource: EventSource | null = null;
+let displayModeMediaQuery: MediaQueryList | null = null;
+let displayModeChangeHandler: (() => void) | null = null;
 let statusTimer: number | null = null;
 let resyncPromise: Promise<void> | null = null;
 const requestControllers = new Set<AbortController>();
@@ -54,6 +80,11 @@ const connectionReady = computed(() => connectionState.value === 'connected');
 
 const authRequired = computed(() => !!snapshotData.value?.authRequired);
 const topConnectionText = computed(() => actionStatusText.value || connectionText.value);
+const showTopConnectionStatus = computed(() => (
+  actionStatusText.value.length > 0
+  || connectionState.value !== 'connected'
+));
+const topStackVisible = computed(() => showTopConnectionStatus.value || pwaNoticeVisible.value);
 const emptyFeedText = computed(() => {
   if (!companionAvailable) return 'Некорректная companion-ссылка. Открой QR из окна приложения заново.';
   if (authRequired.value) return 'Сначала авторизуйся в приложении на компьютере.';
@@ -69,6 +100,36 @@ const microphoneToggleTitle = computed(() => (microphoneMuted.value ? 'Вклю�
 const aiButtonTitle = computed(() => 'Сгенерировать ответ');
 const promptComposerTitle = computed(() => (aiComposerOpen.value ? 'Скрыть сообщение в AI' : 'Открыть сообщение в AI'));
 const canSendPrompt = computed(() => aiQuestion.value.trim().length > 0 || promptImages.value.length > 0);
+const pwaInstallPlatform = computed(() => detectCompanionInstallPlatform(
+  typeof navigator === 'undefined' ? null : navigator,
+));
+const pwaInstallText = computed(() => companionInstallHint(pwaInstallPlatform.value));
+const showPwaInstallHint = computed(() => (
+  companionAvailable
+  && !pwaStandalone.value
+  && !pwaInstallHintDismissed.value
+));
+const pwaDiagnosticProblems = computed(() => pwaDiagnosticItems.value.filter((item) => item.status === 'warn' || item.status === 'error'));
+const pwaDiagnosticHasError = computed(() => pwaDiagnosticItems.value.some((item) => item.status === 'error'));
+const pwaNoticeVisible = computed(() => (
+  showPwaInstallHint.value
+  || pwaDiagnosticChecking.value
+  || pwaDiagnosticProblems.value.length > 0
+  || pwaDiagnosticExpanded.value
+));
+const pwaNoticeTone = computed<StatusTone>(() => {
+  if (pwaDiagnosticHasError.value) return 'error';
+  if (pwaDiagnosticProblems.value.length > 0 || showPwaInstallHint.value) return 'warn';
+  if (pwaDiagnosticChecking.value) return 'pending';
+  return 'ok';
+});
+const pwaNoticeText = computed(() => {
+  if (showPwaInstallHint.value) return pwaInstallText.value;
+  if (pwaDiagnosticChecking.value) return 'Проверяю PWA и локальный companion...';
+  const problem = pwaDiagnosticProblems.value[0];
+  if (problem) return problem.message;
+  return 'PWA проверка прошла успешно';
+});
 const actionsDisabled = computed(() => (
   !companionAvailable
   || !snapshotReady.value
@@ -165,6 +226,10 @@ function describeActionResult(actionResult?: string | null): string {
       return 'Микрофон выключен';
     case 'unmuted':
       return 'Микрофон включён';
+    case 'desktop_blackout_enabled':
+      return 'Окно приложения затемнено';
+    case 'desktop_blackout_disabled':
+      return 'Окно приложения снова видно';
     case 'cleared_context':
       return 'AI контекст очищен';
     case 'cleared_history':
@@ -192,6 +257,154 @@ function pageVisible(): boolean {
   return isCompanionPageVisible(typeof document === 'undefined' ? null : document);
 }
 
+function updateFeedScrolledState(): void {
+  const element = scrollEl.value;
+  feedScrolledDown.value = !!element && element.scrollTop > 8;
+}
+
+function refreshPwaStandaloneState(): void {
+  pwaStandalone.value = isCompanionStandalone(typeof window === 'undefined' ? null : window);
+}
+
+function setPwaDiagnosticItem(item: PwaDiagnosticItem): void {
+  const nextItems = pwaDiagnosticItems.value.slice();
+  const index = nextItems.findIndex((candidate) => candidate.id === item.id);
+  if (index >= 0) {
+    nextItems[index] = item;
+  } else {
+    nextItems.push(item);
+  }
+  pwaDiagnosticItems.value = nextItems;
+}
+
+function dismissPwaInstallHint(): void {
+  pwaInstallHintDismissed.value = true;
+  try {
+    localStorage.setItem(PWA_INSTALL_HINT_DISMISSED_KEY, '1');
+  } catch {
+    // ignore storage failures in private browsing modes
+  }
+}
+
+async function fetchPwaCheck(path: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), PWA_CHECK_TIMEOUT_MS);
+  try {
+    return await fetch(path, {
+      cache: 'no-store',
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function pwaCheckErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.name === 'AbortError') {
+    return 'PWA проверка не дождалась ответа от локального companion';
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+async function checkPwaManifest(): Promise<void> {
+  try {
+    const response = await fetchPwaCheck(`/manifest.webmanifest?token=${encodeURIComponent(token)}`);
+    if (!response.ok) {
+      setPwaDiagnosticItem({
+        id: 'manifest',
+        label: 'Manifest',
+        status: 'error',
+        message: `PWA manifest не открылся: ${response.status}`,
+      });
+      return;
+    }
+
+    const manifest = await response.json() as unknown;
+    const validation = validateCompanionManifest(manifest);
+    setPwaDiagnosticItem({
+      id: 'manifest',
+      label: 'Manifest',
+      status: validation.ok ? 'ok' : 'error',
+      message: validation.ok
+        ? 'PWA manifest доступен'
+        : validation.problems[0] || 'PWA manifest неполный',
+    });
+  } catch (error) {
+    setPwaDiagnosticItem({
+      id: 'manifest',
+      label: 'Manifest',
+      status: 'error',
+      message: pwaCheckErrorMessage(error),
+    });
+  }
+}
+
+async function checkPwaIcon(): Promise<void> {
+  try {
+    const response = await fetchPwaCheck('/companion-icon-512.png', { method: 'HEAD' });
+    setPwaDiagnosticItem({
+      id: 'icon',
+      label: 'Icon',
+      status: response.ok ? 'ok' : 'warn',
+      message: response.ok ? 'PWA icon доступна' : `PWA icon не открылась: ${response.status}`,
+    });
+  } catch (error) {
+    setPwaDiagnosticItem({
+      id: 'icon',
+      label: 'Icon',
+      status: 'warn',
+      message: pwaCheckErrorMessage(error),
+    });
+  }
+}
+
+async function checkPwaStateApi(): Promise<void> {
+  try {
+    const response = await fetchPwaCheck(`/api/state?token=${encodeURIComponent(token)}`);
+    setPwaDiagnosticItem({
+      id: 'api',
+      label: 'API',
+      status: response.ok ? 'ok' : 'error',
+      message: response.ok ? 'Локальный API отвечает' : `Локальный API вернул ${response.status}`,
+    });
+  } catch (error) {
+    setPwaDiagnosticItem({
+      id: 'api',
+      label: 'API',
+      status: 'error',
+      message: pwaCheckErrorMessage(error),
+    });
+  }
+}
+
+async function runPwaDiagnostics(): Promise<void> {
+  if (!companionAvailable) return;
+  pwaDiagnosticChecking.value = true;
+  refreshPwaStandaloneState();
+  try {
+    await Promise.all([
+      checkPwaManifest(),
+      checkPwaIcon(),
+      checkPwaStateApi(),
+    ]);
+  } finally {
+    pwaDiagnosticChecking.value = false;
+  }
+}
+
+function setPwaLiveDiagnostic(status: PwaDiagnosticStatus, message: string): void {
+  setPwaDiagnosticItem({
+    id: 'live',
+    label: 'Live',
+    status,
+    message,
+  });
+}
+
 function extractErrorMessage(status: number, payload: CompanionActionResponse | null, raw: string): string {
   if (payload?.actionResult) {
     return describeActionResult(payload.actionResult);
@@ -199,7 +412,16 @@ function extractErrorMessage(status: number, payload: CompanionActionResponse | 
   if (status === 401 || status === 403) {
     return 'Ссылка устарела или companion перезапустился. Открой QR из окна приложения заново.';
   }
-  return raw || `Запрос завершился ошибкой: ${status}`;
+  return compactResponseError(raw, `Запрос завершился ошибкой: ${status}`);
+}
+
+function compactResponseError(raw: string, fallback: string): string {
+  const trimmed = String(raw ?? '').trim();
+  if (!trimmed) return fallback;
+  if (/^<!doctype\s+html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) {
+    return fallback;
+  }
+  return trimmed.length > 220 ? `${trimmed.slice(0, 217)}...` : trimmed;
 }
 
 function handleResyncFailure(error: unknown, fallbackText: string): void {
@@ -288,7 +510,7 @@ async function refreshSnapshot(): Promise<void> {
     throw new Error('Ссылка устарела или companion перезапустился. Открой QR из окна приложения заново.');
   }
   if (!response.ok || !json) {
-    throw new Error(raw || `Не удалось получить состояние: ${response.status}`);
+    throw new Error(compactResponseError(raw, `Не удалось получить состояние: ${response.status}`));
   }
 
   await applySnapshot(json);
@@ -334,7 +556,16 @@ async function resyncConnection(options: {
   return task;
 }
 
-async function sendAction(path: string, body: Record<string, unknown> = {}): Promise<boolean> {
+type SendActionOptions = {
+  requestId?: string;
+  retryOnRecoverable?: boolean;
+};
+
+async function sendAction(
+  path: string,
+  body: Record<string, unknown> = {},
+  options: SendActionOptions = {},
+): Promise<boolean> {
   if (
     actionInFlight.value
     || syncInFlight.value
@@ -346,6 +577,11 @@ async function sendAction(path: string, body: Record<string, unknown> = {}): Pro
     return false;
   }
 
+  const requestId = options.requestId ?? createCompanionRequestId();
+  const retryOnRecoverable = options.retryOnRecoverable ?? true;
+  let retryAfterRecover = false;
+  let originalError: unknown = null;
+
   actionInFlight.value = true;
   setStatus('Выполняю действие...', 'pending');
 
@@ -355,6 +591,7 @@ async function sendAction(path: string, body: Record<string, unknown> = {}): Pro
       headers: {
         'Content-Type': 'application/json',
         'X-Companion-Token': token,
+        'X-Companion-Request-Id': requestId,
       },
       body: JSON.stringify(body),
     }, ACTION_REQUEST_TIMEOUT_MS);
@@ -400,16 +637,28 @@ async function sendAction(path: string, body: Record<string, unknown> = {}): Pro
       shouldRecoverCompanionConnection(kind)
       && typeof document !== 'undefined'
       && document.visibilityState === 'visible'
+      && retryOnRecoverable
     ) {
-      void resyncConnection({ reconnect: true }).catch((resyncError) => {
-        handleResyncFailure(resyncError, 'Пытаюсь восстановить связь с компьютером...');
-      });
+      retryAfterRecover = true;
+      originalError = error;
+    } else {
+      throw error;
     }
-
-    throw error;
   } finally {
     actionInFlight.value = false;
   }
+
+  if (retryAfterRecover) {
+    try {
+      await resyncConnection({ reconnect: true });
+    } catch (resyncError) {
+      handleResyncFailure(resyncError, 'Пытаюсь восстановить связь с компьютером...');
+      throw originalError ?? resyncError;
+    }
+    return sendAction(path, body, { requestId, retryOnRecoverable: false });
+  }
+
+  return false;
 }
 
 async function onRecordClick(): Promise<void> {
@@ -503,11 +752,13 @@ function connectEvents(): void {
   if (!companionAvailable || !pageVisible()) return;
 
   disposeEventSource();
+  setPwaLiveDiagnostic('pending', 'Live updates подключаются');
   const source = new EventSource(`/events?token=${encodeURIComponent(token)}`);
   eventSource = source;
 
   source.onopen = () => {
     if (eventSource !== source) return;
+    setPwaLiveDiagnostic('ok', 'Live updates активны');
     setConnection('connected', 'Связь с компьютером активна');
     if (!actionInFlight.value) {
       setStatus('');
@@ -530,6 +781,7 @@ function connectEvents(): void {
           return;
         }
         disposeEventSource();
+        setPwaLiveDiagnostic('warn', 'Live updates повредились, пробую восстановить поток');
         setConnection('reconnecting', 'Поток обновлений прервался, обновляю состояние с компьютера...');
         setStatus('Live update повредился, пробую восстановить состояние...', 'warn');
         void resyncConnection({ reconnect: true }).catch((resyncError) => {
@@ -546,6 +798,7 @@ function connectEvents(): void {
       return;
     }
     void (async () => {
+      setPwaLiveDiagnostic('warn', 'Live updates временно недоступны');
       setConnection('reconnecting', 'Пытаюсь переподключиться к компьютеру...');
       try {
         await resyncConnection({ reconnect: true });
@@ -605,6 +858,24 @@ function onPageHide(): void {
   disposeEventSource();
 }
 
+function setupPwaDisplayModeListener(): void {
+  refreshPwaStandaloneState();
+  if (typeof window === 'undefined' || !window.matchMedia) return;
+
+  displayModeMediaQuery = window.matchMedia('(display-mode: standalone)');
+  displayModeChangeHandler = () => refreshPwaStandaloneState();
+  displayModeMediaQuery.addEventListener('change', displayModeChangeHandler);
+}
+
+function cleanupPwaDisplayModeListener(): void {
+  if (!displayModeMediaQuery || !displayModeChangeHandler) return;
+
+  displayModeMediaQuery.removeEventListener('change', displayModeChangeHandler);
+
+  displayModeMediaQuery = null;
+  displayModeChangeHandler = null;
+}
+
 async function bootstrap(): Promise<void> {
   if (!companionAvailable) {
     setConnection('disconnected', 'Companion ссылка некорректна');
@@ -631,7 +902,10 @@ async function bootstrap(): Promise<void> {
 }
 
 onMounted(() => {
-  void bootstrap();
+  setupPwaDisplayModeListener();
+  void bootstrap().finally(() => {
+    void runPwaDiagnostics();
+  });
   document.addEventListener('visibilitychange', onVisibilityChange);
   window.addEventListener('online', onOnline);
   window.addEventListener('offline', onOffline);
@@ -639,8 +913,20 @@ onMounted(() => {
   window.addEventListener('pagehide', onPageHide);
 });
 
+watch(
+  scrollEl,
+  (element, previous) => {
+    previous?.removeEventListener('scroll', updateFeedScrolledState);
+    element?.addEventListener('scroll', updateFeedScrolledState, { passive: true });
+    updateFeedScrolledState();
+  },
+  { immediate: true },
+);
+
 onUnmounted(() => {
   clearStatusTimer();
+  cleanupPwaDisplayModeListener();
+  scrollEl.value?.removeEventListener('scroll', updateFeedScrolledState);
   abortForHiddenLifecycle();
   document.removeEventListener('visibilitychange', onVisibilityChange);
   window.removeEventListener('online', onOnline);
@@ -653,9 +939,66 @@ onUnmounted(() => {
 
 <template>
   <main class="companion-page">
-    <section class="companion-shell">
-      <div class="top-connection-status" :class="[connectionState, actionStatusTone && `tone-${actionStatusTone}`]">
-        {{ topConnectionText }}
+    <section class="companion-shell" :class="{ 'feed-scrolled': feedScrolledDown }">
+      <div v-if="topStackVisible" class="top-stack">
+        <div
+          v-if="showTopConnectionStatus"
+          class="top-connection-status"
+          :class="[connectionState, actionStatusTone && `tone-${actionStatusTone}`]"
+        >
+          {{ topConnectionText }}
+        </div>
+
+        <section v-if="pwaNoticeVisible" class="pwa-notice" :class="[`tone-${pwaNoticeTone}`]">
+          <div class="pwa-notice-main">
+            <span class="pwa-notice-icon" :class="pwaDiagnosticChecking ? 'mdi mdi-loading pwa-icon-spin' : 'mdi mdi-cellphone-link'" />
+            <div class="pwa-notice-copy">
+              <div class="pwa-notice-title">
+                {{ pwaStandalone ? 'PWA companion' : 'Открыто как вкладка' }}
+              </div>
+              <div class="pwa-notice-text">{{ pwaNoticeText }}</div>
+            </div>
+          </div>
+
+          <div class="pwa-notice-actions">
+            <button
+              class="pwa-notice-button"
+              :disabled="pwaDiagnosticChecking"
+              @click="runPwaDiagnostics().catch(() => {})"
+            >
+              Проверить
+            </button>
+            <button
+              v-if="pwaDiagnosticItems.length > 0"
+              class="pwa-notice-icon-button"
+              :title="pwaDiagnosticExpanded ? 'Скрыть детали' : 'Показать детали'"
+              @click="pwaDiagnosticExpanded = !pwaDiagnosticExpanded"
+            >
+              <span :class="pwaDiagnosticExpanded ? 'mdi mdi-chevron-up' : 'mdi mdi-chevron-down'" />
+            </button>
+            <button
+              v-if="showPwaInstallHint"
+              class="pwa-notice-icon-button"
+              title="Скрыть"
+              @click="dismissPwaInstallHint"
+            >
+              <span class="mdi mdi-close" />
+            </button>
+          </div>
+
+          <div v-if="pwaDiagnosticExpanded && pwaDiagnosticItems.length > 0" class="pwa-diagnostics">
+            <div
+              v-for="item in pwaDiagnosticItems"
+              :key="item.id"
+              class="pwa-diagnostic-row"
+              :class="`status-${item.status}`"
+            >
+              <span class="pwa-diagnostic-dot" />
+              <span class="pwa-diagnostic-label">{{ item.label }}</span>
+              <span class="pwa-diagnostic-message">{{ item.message }}</span>
+            </div>
+          </div>
+        </section>
       </div>
 
       <section class="feed-card">
@@ -819,13 +1162,17 @@ onUnmounted(() => {
   padding:
     calc(10px + env(safe-area-inset-top, 0px))
     calc(12px + env(safe-area-inset-right, 0px))
-    calc(132px + env(safe-area-inset-bottom, 0px))
+    calc(10px + env(safe-area-inset-bottom, 0px))
     calc(12px + env(safe-area-inset-left, 0px));
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: 10px;
+  gap: 8px;
   box-sizing: border-box;
   overflow: hidden;
+}
+
+.companion-shell.feed-scrolled {
+  padding-top: 2px;
 }
 
 .companion-shell > * {
@@ -833,7 +1180,12 @@ onUnmounted(() => {
   min-height: 0;
 }
 
-.feed-card,
+.top-stack {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
 .ask-card {
   border-radius: 20px;
   border: 1px solid var(--glass-border);
@@ -841,7 +1193,6 @@ onUnmounted(() => {
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.24);
 }
 
-.feed-card,
 .ask-card {
   padding: 14px;
   min-width: 0;
@@ -874,6 +1225,152 @@ onUnmounted(() => {
   color: #9cc6ff;
 }
 
+.pwa-notice {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(17, 21, 29, 0.84);
+}
+
+.pwa-notice.tone-warn {
+  border-color: rgba(244, 201, 93, 0.22);
+  background: rgba(53, 43, 20, 0.68);
+}
+
+.pwa-notice.tone-error {
+  border-color: rgba(255, 154, 143, 0.28);
+  background: rgba(56, 22, 22, 0.7);
+}
+
+.pwa-notice.tone-pending {
+  border-color: rgba(156, 198, 255, 0.2);
+}
+
+.pwa-notice-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.pwa-notice-icon {
+  flex: 0 0 auto;
+  color: #9cc6ff;
+  font-size: 20px;
+}
+
+.pwa-notice-copy {
+  min-width: 0;
+}
+
+.pwa-notice-title {
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.pwa-notice-text {
+  margin-top: 2px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.pwa-notice-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pwa-notice-button,
+.pwa-notice-icon-button {
+  border: none;
+  color: var(--color-text);
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.pwa-notice-button {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.22);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pwa-notice-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.pwa-notice-icon-button {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 18px;
+}
+
+.pwa-diagnostics {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.pwa-diagnostic-row {
+  display: grid;
+  grid-template-columns: 8px minmax(58px, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.pwa-diagnostic-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #9cc6ff;
+}
+
+.pwa-diagnostic-row.status-ok .pwa-diagnostic-dot {
+  background: #8ee0a1;
+}
+
+.pwa-diagnostic-row.status-warn .pwa-diagnostic-dot,
+.pwa-diagnostic-row.status-pending .pwa-diagnostic-dot {
+  background: #f4c95d;
+}
+
+.pwa-diagnostic-row.status-error .pwa-diagnostic-dot {
+  background: #ff9a8f;
+}
+
+.pwa-diagnostic-label {
+  color: rgba(255, 255, 255, 0.74);
+  font-weight: 700;
+}
+
+.pwa-diagnostic-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pwa-icon-spin {
+  display: inline-block;
+  animation: dock-spin 1s linear infinite;
+}
+
 .summary-label {
   font-size: 12px;
   text-transform: uppercase;
@@ -882,7 +1379,20 @@ onUnmounted(() => {
 }
 
 .feed-card {
+  --chat-empty-font-size: 14px;
+  --chat-message-font-size: 14px;
+  --chat-message-line-height: 1.44;
+  --chat-code-font-size: 11.5px;
+  --chat-code-line-height: 1.42;
+  --chat-inline-code-font-size: 0.9em;
+  --chat-sticky-footer-bottom: calc(126px + env(safe-area-inset-bottom, 0px));
+  --chat-scroll-padding: 12px 6px 0 2px;
+  --chat-scroll-mobile-padding: 12px 4px 0 2px;
+  --chat-scroll-narrow-padding: 12px 2px 0 0;
+  --chat-scroll-end-space: calc(148px + env(safe-area-inset-bottom, 0px));
+
   display: flex;
+  min-width: 0;
   min-height: 340px;
   overflow: hidden;
 }
@@ -891,6 +1401,16 @@ onUnmounted(() => {
   min-height: 0;
   min-width: 0;
   flex: 1;
+}
+
+.feed-card :deep(.chat-row.incoming .chat-bubble) {
+  padding: 10px 12px;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.feed-card :deep(.chat-row.focus-copy .chat-bubble) {
+  font-size: 15px;
 }
 
 .feed-card :deep(.chat-scroll) {
@@ -904,9 +1424,39 @@ onUnmounted(() => {
   -webkit-overflow-scrolling: touch;
 }
 
+.feed-card :deep(.scroll-to-bottom-button) {
+  bottom: calc(126px + env(safe-area-inset-bottom, 0px));
+}
+
+.feed-card :deep(.chat-markdown .code-block pre),
+.feed-card :deep(.chat-markdown .code-block pre code),
+.feed-card :deep(.chat-text-highlighted .shiki),
+.feed-card :deep(.chat-text-highlighted .shiki code),
+.feed-card :deep(.chat-text-highlighted .shiki span) {
+  font-size: var(--chat-code-font-size);
+  line-height: var(--chat-code-line-height);
+}
+
+.feed-card :deep(.chat-row.focus-copy .chat-text-highlighted .code-block[data-lang="plaintext"] .shiki),
+.feed-card :deep(.chat-row.focus-copy .chat-text-highlighted .code-block[data-lang="plaintext"] .shiki code),
+.feed-card :deep(.chat-row.focus-copy .chat-text-highlighted .code-block[data-lang="plaintext"] .shiki span) {
+  min-width: 0;
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.feed-card :deep(.chat-row.focus-copy .chat-text-highlighted .code-block[data-lang="plaintext"] .shiki) {
+  overflow-x: hidden;
+}
+
 .ask-card {
   display: grid;
   gap: 10px;
+  margin-bottom: calc(122px + env(safe-area-inset-bottom, 0px));
 }
 
 .ask-card-header {
@@ -1056,7 +1606,7 @@ onUnmounted(() => {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
   z-index: 40;
   pointer-events: none;
 }
@@ -1120,6 +1670,11 @@ onUnmounted(() => {
 
 .dock-square-button.danger {
   background: rgba(244, 67, 54, 0.18);
+}
+
+.dock-square-button.active {
+  background: rgba(255, 255, 255, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
 }
 
 .dock-square-button:hover:not(:disabled),
@@ -1190,7 +1745,7 @@ onUnmounted(() => {
     padding:
       calc(12px + env(safe-area-inset-top, 0px))
       calc(10px + env(safe-area-inset-right, 0px))
-      calc(148px + env(safe-area-inset-bottom, 0px))
+      calc(10px + env(safe-area-inset-bottom, 0px))
       calc(10px + env(safe-area-inset-left, 0px));
   }
 
@@ -1201,22 +1756,64 @@ onUnmounted(() => {
   .feed-card :deep(.chat-scroll) {
     max-height: none;
   }
+
+  .ask-card {
+    position: fixed;
+    left: calc(10px + env(safe-area-inset-left, 0px));
+    right: calc(10px + env(safe-area-inset-right, 0px));
+    bottom: calc(110px + env(safe-area-inset-bottom, 0px));
+    max-height: calc(100vh - 132px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    max-height: calc(100dvh - 132px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    margin-bottom: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    z-index: 35;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ask-footer {
+    justify-content: flex-end;
+  }
+
+  .ask-hint {
+    display: none;
+  }
 }
 
 @media (max-width: 520px) {
+  .pwa-notice {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pwa-notice-actions {
+    justify-content: flex-end;
+  }
+
+  .pwa-diagnostic-row {
+    grid-template-columns: 8px minmax(48px, auto) minmax(0, 1fr);
+  }
+
   .controls-dock {
     width: calc(100vw - 16px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
-    gap: 8px;
+    gap: 14px;
+  }
+
+  .ask-card {
+    left: calc(8px + env(safe-area-inset-left, 0px));
+    right: calc(8px + env(safe-area-inset-right, 0px));
+    bottom: calc(134px + env(safe-area-inset-bottom, 0px));
+    max-height: calc(100vh - 156px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    max-height: calc(100dvh - 156px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
   }
 
   .controls-side {
     flex-direction: column;
-    gap: 8px;
+    gap: 12px;
     padding: 8px;
   }
 
   .controls-center {
-    gap: 10px;
+    gap: 20px;
     padding: 8px 10px;
   }
 
@@ -1238,6 +1835,43 @@ onUnmounted(() => {
     width: 60px;
     height: 60px;
     font-size: 26px;
+  }
+}
+
+@media (max-width: 360px) {
+  .controls-dock {
+    gap: 8px;
+  }
+
+  .ask-card {
+    bottom: calc(126px + env(safe-area-inset-bottom, 0px));
+    max-height: calc(100vh - 148px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    max-height: calc(100dvh - 148px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  }
+
+  .controls-side {
+    gap: 10px;
+    padding: 7px;
+  }
+
+  .controls-center {
+    gap: 12px;
+    padding: 7px 8px;
+  }
+
+  .dock-square-button {
+    width: 40px;
+    height: 40px;
+  }
+
+  .dock-circle-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .dock-record-button {
+    width: 56px;
+    height: 56px;
   }
 }
 </style>

@@ -1,0 +1,78 @@
+{
+  "name": "clipboard-tools",
+  "displayName": "Clipboard Tools",
+  "description": "Small clipboard utilities for editor workflows.",
+  "version": "0.0.4",
+  "publisher": "editorutils",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:clipboardTools.copyActiveFile"
+  ],
+  "main": "./src/extension.js",
+  "files": [
+    "README.md",
+    "LICENSE.txt",
+    "src/**/*.js"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "clipboardTools.copyActiveFile",
+        "title": "Copy Active File",
+        "category": "Clipboard"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "clipboardTools.copyActiveFile",
+        "key": "ctrl+shift+c",
+        "mac": "ctrl+shift+c",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Clipboard Tools",
+      "properties": {
+        "clipboardTools.backendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:43821/api/focus-copy/ingest",
+          "description": "Local service endpoint."
+        },
+        "clipboardTools.accessToken": {
+          "type": "string",
+          "default": "",
+          "description": "Access token. Leave empty to auto-read local config or CLIPBOARD_TOOLS_TOKEN."
+        },
+        "clipboardTools.autoDiscoverToken": {
+          "type": "boolean",
+          "default": true,
+          "description": "Read access token from local config when the setting is empty."
+        },
+        "clipboardTools.copyToClipboard": {
+          "type": "boolean",
+          "default": true,
+          "description": "Also copy the active file text to the system clipboard before sending."
+        },
+        "clipboardTools.requestTimeoutMs": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 100,
+          "maximum": 10000,
+          "description": "HTTP timeout for the local backend request."
+        },
+        "clipboardTools.debugNotifications": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show visible debug notifications. When disabled, diagnostics are written only to the output channel."
+        }
+      }
+    }
+  }
+}

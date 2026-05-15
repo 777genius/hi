@@ -505,6 +505,44 @@ function publishPageEditorSnapshot(payload) {
   });
 }
 
+async function readFocusedEditorApiPayload() {
+  const pageResult = await pageBridgeRequest('read-editor');
+  if (pageResult?.ok && typeof pageResult.text === 'string') {
+    const text = normalizeText(pageResult.text);
+    return {
+      ok: true,
+      method: pageResult.method || 'page-editor-api',
+      url: pageResult.url || location.href,
+      title: pageResult.title || document.title,
+      frameUrl: pageResult.frameUrl || location.href,
+      text,
+      kind: pageResult.kind || 'page-editor-api',
+      tagName: pageResult.tagName || null,
+      textLength: text.length,
+    };
+  }
+
+  const fallback = currentEditablePayload('editor-api-read-fallback');
+  if (fallback?.text !== null && typeof fallback?.text === 'string') {
+    return {
+      ok: true,
+      method: 'content-editor-fallback',
+      url: fallback.url || location.href,
+      title: fallback.title || document.title,
+      frameUrl: fallback.frameUrl || location.href,
+      text: fallback.text,
+      kind: fallback.kind || 'content-editor-fallback',
+      tagName: fallback.tagName || null,
+      textLength: fallback.text.length,
+    };
+  }
+
+  return {
+    ok: false,
+    error: pageResult?.error || 'focused-editor-api-unavailable',
+  };
+}
+
 function publish(reason, { force = false } = {}) {
   if (!document.hasFocus()) {
     return;
@@ -588,6 +626,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === 'focus-copy-ping') {
     sendResponse({ ok: true });
     return false;
+  }
+
+  if (message?.type === 'focus-copy-editor-api-read') {
+    readFocusedEditorApiPayload().then(sendResponse);
+    return true;
   }
 
   if (message?.type === 'focus-copy-selection-snapshot') {

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{AppConfig, SttConfig, UiPreferences};
 
@@ -115,6 +116,76 @@ impl ConfigStore {
 
         log::info!("App config saved to disk");
         Ok(())
+    }
+
+    /// Сохранить bridge-файл для локальных интеграций, которым нужен companion token.
+    pub async fn save_companion_bridge_token(token: &str) -> Result<()> {
+        let paths = Self::companion_bridge_token_paths()?;
+        let updated_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let json = serde_json::to_string_pretty(&serde_json::json!({
+            "schemaVersion": 1,
+            "companionAccessToken": token,
+            "updatedAtMs": updated_at_ms,
+        }))?;
+
+        for path in paths {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            Self::write_file_atomic(&path, &json).await?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                let permissions = std::fs::Permissions::from_mode(0o600);
+                if let Err(error) = tokio::fs::set_permissions(&path, permissions).await {
+                    log::warn!(
+                        "Failed to tighten companion bridge file permissions: {}",
+                        error
+                    );
+                }
+            }
+        }
+
+        log::debug!("Companion bridge token saved to disk");
+        Ok(())
+    }
+
+    /// Загрузить companion token из bridge-файла.
+    pub async fn load_companion_bridge_token() -> Result<Option<String>> {
+        for path in Self::companion_bridge_token_paths()? {
+            if !path.exists() {
+                continue;
+            }
+
+            let json = tokio::fs::read_to_string(path).await?;
+            let value: serde_json::Value = serde_json::from_str(&json)?;
+            if let Some(token) = value
+                .get("companionAccessToken")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+            {
+                return Ok(Some(token));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn companion_bridge_token_paths() -> Result<Vec<PathBuf>> {
+        let config_dir =
+            dirs::config_dir().ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
+        Ok(vec![
+            config_dir.join("ClipboardTools").join("bridge.json"),
+            Self::config_dir()?.join("companion_bridge.json"),
+        ])
     }
 
     /// Загрузить конфигурацию приложения

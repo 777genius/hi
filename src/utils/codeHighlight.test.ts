@@ -14,19 +14,31 @@ describe('highlightMessage', () => {
     expect(html).not.toContain('onclick=');
   }, 15_000);
 
-  it('renders raw captured code as compact collapsed code block', async () => {
+  it('does not collapse short raw captured code', async () => {
     const html = await highlightRawCodeBlock('function test() {\n  return 1;\n}', { compact: true });
+
+    expect(html).not.toContain('code-block-collapsible');
+    expect(html).toContain('code-block-compact');
+    expect(html).toContain('data-lang="typescript"');
+    expect(html).toContain('data-lines="3"');
+    expect(html).not.toContain('code-block-toggle');
+  }, 15_000);
+
+  it('renders long raw captured code as compact collapsed code block', async () => {
+    const lines = Array.from({ length: 6 }, (_value, index) => `const v${index} = ${index};`).join('\n');
+    const html = await highlightRawCodeBlock(lines, { compact: true });
 
     expect(html).toContain('code-block-collapsible');
     expect(html).toContain('code-block-compact');
     expect(html).toContain('collapsed');
     expect(html).toContain('data-lang="typescript"');
-    expect(html).toContain('data-lines="3"');
+    expect(html).toContain('data-lines="6"');
     expect(html).toContain('code-block-toggle');
   }, 15_000);
 
   it('can render raw captured code expanded', async () => {
-    const html = await highlightRawCodeBlock('const value = 1;', { collapsed: false });
+    const lines = Array.from({ length: 6 }, (_value, index) => `const v${index} = ${index};`).join('\n');
+    const html = await highlightRawCodeBlock(lines, { collapsed: false });
 
     expect(html).toContain('code-block-collapsible');
     expect(html).not.toContain(' collapsed"');

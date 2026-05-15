@@ -3,7 +3,7 @@ import { createI18n } from 'vue-i18n';
 const messages = {
   en: {
     app: {
-      title: 'Telegram',
+      title: 'Voice to text',
     },
     main: {
       minimize: 'Minimize',
@@ -229,10 +229,15 @@ const messages = {
       limitExceededDetailed: 'Usage limit reached ({used}/{total} min, {plan}). Activate a license to continue.',
       authentication: 'Authentication error. Sign in again or check the keys in Settings.',
       processing: 'Audio processing error. Try restarting the recording.',
+      audioDeviceUnavailable:
+        'Microphone is unavailable. Reconnect it and select it in your system sound settings, then try again.',
+      audioDeviceNotFound:
+        'Selected microphone is unavailable. Open settings and choose a different recording device.',
       generic: 'Error: {error}',
       actions: {
         signInAgain: 'Sign in again',
         openSettings: 'Open settings',
+        openSettingsForDevice: 'Open settings',
         reconnect: 'Reconnect',
         activateLicense: 'Activate license',
       },
@@ -343,7 +348,7 @@ const messages = {
   },
   ru: {
     app: {
-      title: 'Telegram',
+      title: 'Voice to text',
     },
     main: {
       minimize: 'Свернуть',
@@ -569,10 +574,15 @@ const messages = {
       limitExceededDetailed: 'Лимит исчерпан ({used}/{total} мин, {plan}). Активируйте лицензию для продолжения.',
       authentication: 'Ошибка авторизации. Войдите заново или проверьте ключи в настройках.',
       processing: 'Ошибка обработки аудио. Попробуйте перезапустить запись.',
+      audioDeviceUnavailable:
+        'Микрофон недоступен. Подключите/переподключите его и выберите в настройках звука системы, затем попробуйте снова.',
+      audioDeviceNotFound:
+        'Выбранный микрофон недоступен. Откройте настройки и выберите другое устройство записи.',
       generic: 'Ошибка: {error}',
       actions: {
         signInAgain: 'Войти заново',
         openSettings: 'Открыть настройки',
+        openSettingsForDevice: 'Перейти в настройки',
         reconnect: 'Переподключиться',
         activateLicense: 'Активировать лицензию',
       },
@@ -683,7 +693,7 @@ const messages = {
   },
   es: {
     app: {
-      title: 'Telegram',
+      title: 'Voice to text',
     },
     main: {
       minimize: 'Minimizar',
@@ -896,10 +906,15 @@ const messages = {
       limitExceededDetailed: 'Límite alcanzado ({used}/{total} min, {plan}). Active una licencia para continuar.',
       authentication: 'Error de autenticación. Inicie sesión de nuevo o compruebe las claves en ajustes.',
       processing: 'Error de procesamiento de audio. Reinicie la grabación.',
+      audioDeviceUnavailable:
+        'El micrófono no está disponible. Vuelva a conectarlo y selecciónelo en los ajustes de sonido del sistema, luego inténtelo de nuevo.',
+      audioDeviceNotFound:
+        'El micrófono seleccionado no está disponible. Abra ajustes y elija otro dispositivo de grabación.',
       generic: 'Error: {error}',
       actions: {
         signInAgain: 'Iniciar sesión de nuevo',
         openSettings: 'Abrir ajustes',
+        openSettingsForDevice: 'Abrir ajustes',
         reconnect: 'Reconectar',
         activateLicense: 'Activar licencia',
       },
@@ -1010,7 +1025,7 @@ const messages = {
   },
   fr: {
     app: {
-      title: 'Telegram',
+      title: 'Voice to text',
     },
     main: {
       minimize: 'Réduire',
@@ -1223,10 +1238,15 @@ const messages = {
       limitExceededDetailed: 'Limite atteinte ({used}/{total} min, {plan}). Activez une licence pour continuer.',
       authentication: "Erreur d'authentification. Reconnectez-vous ou vérifiez les clés dans les paramètres.",
       processing: "Erreur de traitement audio. Redémarrez l'enregistrement.",
+      audioDeviceUnavailable:
+        'Le microphone est indisponible. Reconnectez-le et sélectionnez-le dans les réglages audio du système, puis réessayez.',
+      audioDeviceNotFound:
+        'Le microphone sélectionné est indisponible. Ouvrez les paramètres et choisissez un autre appareil d\'enregistrement.',
       generic: 'Erreur : {error}',
       actions: {
         signInAgain: 'Se reconnecter',
         openSettings: 'Ouvrir les paramètres',
+        openSettingsForDevice: 'Ouvrir les paramètres',
         reconnect: 'Reconnexion',
         activateLicense: 'Activer la licence',
       },
@@ -1337,7 +1357,7 @@ const messages = {
   },
   de: {
     app: {
-      title: 'Telegram',
+      title: 'Voice to text',
     },
     main: {
       minimize: 'Minimieren',
@@ -1550,10 +1570,15 @@ const messages = {
       limitExceededDetailed: 'Limit erreicht ({used}/{total} Min, {plan}). Aktivieren Sie eine Lizenz, um fortzufahren.',
       authentication: 'Authentifizierungsfehler. Bitte erneut anmelden oder die Schlüssel in den Einstellungen prüfen.',
       processing: 'Audioverarbeitungsfehler. Aufnahme neu starten.',
+      audioDeviceUnavailable:
+        'Mikrofon nicht verfügbar. Bitte neu verbinden und in den Sound-Einstellungen des Systems auswählen, dann erneut versuchen.',
+      audioDeviceNotFound:
+        'Das ausgewählte Mikrofon ist nicht verfügbar. Öffnen Sie die Einstellungen und wählen Sie ein anderes Aufnahmegerät.',
       generic: 'Fehler: {error}',
       actions: {
         signInAgain: 'Erneut anmelden',
         openSettings: 'Einstellungen öffnen',
+        openSettingsForDevice: 'Einstellungen öffnen',
         reconnect: 'Erneut verbinden',
         activateLicense: 'Lizenz aktivieren',
       },
@@ -1664,7 +1689,7 @@ const messages = {
   },
   uk: {
     app: {
-      title: 'Telegram',
+      title: 'Voice to text',
     },
     main: {
       minimize: 'Згорнути',
@@ -1877,10 +1902,15 @@ const messages = {
       limitExceededDetailed: 'Ліміт вичерпано ({used}/{total} хв, {plan}). Активуйте ліцензію для продовження.',
       authentication: 'Помилка автентифікації. Увійдіть знову або перевірте ключі в налаштуваннях.',
       processing: 'Помилка обробки аудіо. Спробуйте перезапустити запис.',
+      audioDeviceUnavailable:
+        'Мікрофон недоступний. Підʼєднайте/перепідʼєднайте його та виберіть у налаштуваннях звуку системи, потім спробуйте ще раз.',
+      audioDeviceNotFound:
+        'Вибраний мікрофон недоступний. Відкрийте налаштування та виберіть інший пристрій запису.',
       generic: 'Помилка: {error}',
       actions: {
         signInAgain: 'Увійти знову',
         openSettings: 'Відкрити налаштування',
+        openSettingsForDevice: 'Перейти в налаштування',
         reconnect: 'Перепідключитись',
         activateLicense: 'Активувати ліцензію',
       },

@@ -31,6 +31,17 @@
       .replace(/[\u200B-\u200D\uFEFF]/g, '');
   }
 
+  function domPlainText(root) {
+    const textContent = normalizeText(root?.textContent ?? '');
+    const innerText = normalizeText(root?.innerText ?? '');
+
+    if (textContent.includes('\n') && !innerText.includes('\n')) {
+      return textContent;
+    }
+
+    return innerText || textContent;
+  }
+
   function closestEditor(node) {
     let element = node?.nodeType === Node.ELEMENT_NODE
       ? node
@@ -38,11 +49,24 @@
 
     while (element) {
       const editor = element.closest?.([
+        'textarea',
+        'input',
+        '[contenteditable=""]',
+        '[contenteditable="true"]',
+        '[contenteditable="plaintext-only"]',
+        '[role="textbox"]',
+        '[role="searchbox"]',
         '.cm-content',
         '.cm-editor',
         '.CodeMirror',
         '.ace_editor',
         '.monaco-editor',
+        '.ql-editor',
+        '.ProseMirror',
+        '[data-slate-editor="true"]',
+        '[data-lexical-editor="true"]',
+        '.public-DraftEditor-content',
+        '.codejar',
       ].join(','));
 
       if (editor) {
@@ -456,6 +480,28 @@
       return null;
     }
 
+    const tag = tagName(editor);
+    if (tag === 'textarea') {
+      return {
+        kind: 'textarea-api',
+        tagName: tag,
+        text: editor.value ?? '',
+      };
+    }
+
+    if (tag === 'input') {
+      const type = (editor.getAttribute('type') || 'text').toLowerCase();
+      const supported = ['', 'email', 'number', 'search', 'tel', 'text', 'url'];
+      if (type === 'password' || !supported.includes(type)) {
+        return null;
+      }
+      return {
+        kind: `input-${type || 'text'}-api`,
+        tagName: tag,
+        text: editor.value ?? '',
+      };
+    }
+
     const codeMirror5 = editor.closest?.('.CodeMirror');
     const codeMirror5Api = codeMirror5?.CodeMirror;
     if (codeMirror5Api && typeof codeMirror5Api.getValue === 'function') {
@@ -494,6 +540,138 @@
       if (result) {
         return result;
       }
+    }
+
+    const quill = readQuillEditor(editor);
+    if (quill) {
+      return quill;
+    }
+
+    const tinyMce = readTinyMceEditor(editor);
+    if (tinyMce) {
+      return tinyMce;
+    }
+
+    const proseMirror = readProseMirrorEditor(editor);
+    if (proseMirror) {
+      return proseMirror;
+    }
+
+    const richText = readKnownContentEditableEditor(editor);
+    if (richText) {
+      return richText;
+    }
+
+    return null;
+  }
+
+  function readQuillEditor(editor) {
+    const quillRoot = editor.closest?.('.ql-editor');
+    if (!quillRoot) {
+      return null;
+    }
+
+    try {
+      const container = quillRoot.closest?.('.ql-container') || quillRoot;
+      const quill = globalThis.Quill?.find?.(container) || globalThis.Quill?.find?.(quillRoot);
+      const text = quill?.getText?.();
+      if (typeof text === 'string') {
+        return {
+          kind: 'quill-api',
+          tagName: tagName(quillRoot),
+          text: text.replace(/\n$/, ''),
+        };
+      }
+    } catch {
+      // Quill.find is optional. DOM fallback below still returns visible editor text.
+    }
+
+    return {
+      kind: 'quill-dom',
+      tagName: tagName(quillRoot),
+      text: domPlainText(quillRoot),
+    };
+  }
+
+  function readTinyMceEditor(editor) {
+    const active = globalThis.tinymce?.activeEditor;
+    if (active && active.initialized !== false) {
+      try {
+        const body = active.getBody?.();
+        if (!body || body === editor || body.contains?.(editor) || editor.contains?.(body)) {
+          const text = active.getContent?.({ format: 'text' });
+          if (typeof text === 'string') {
+            return {
+              kind: 'tinymce-api',
+              tagName: tagName(editor),
+              text,
+            };
+          }
+        }
+      } catch {
+        // TinyMCE can throw while initializing or across iframe boundaries.
+      }
+    }
+
+    return null;
+  }
+
+  function readProseMirrorEditor(editor) {
+    const proseMirror = editor.closest?.('.ProseMirror');
+    if (!proseMirror) {
+      return null;
+    }
+
+    try {
+      const view = proseMirror.pmViewDesc?.docView?.view || proseMirror.pmViewDesc?.view;
+      const doc = view?.state?.doc;
+      const size = doc?.content?.size ?? doc?.nodeSize;
+      const text = typeof doc?.textBetween === 'function'
+        ? doc.textBetween(0, size, '\n')
+        : null;
+      if (typeof text === 'string') {
+        return {
+          kind: 'prosemirror-api',
+          tagName: tagName(proseMirror),
+          text,
+        };
+      }
+    } catch {
+      // Many ProseMirror integrations do not expose the view on DOM nodes.
+    }
+
+    return {
+      kind: 'prosemirror-dom',
+      tagName: tagName(proseMirror),
+      text: domPlainText(proseMirror),
+    };
+  }
+
+  function readKnownContentEditableEditor(editor) {
+    const known = [
+      ['[data-slate-editor="true"]', 'slate-dom'],
+      ['[data-lexical-editor="true"]', 'lexical-dom'],
+      ['.public-DraftEditor-content', 'draftjs-dom'],
+      ['.codejar', 'codejar-dom'],
+    ];
+
+    for (const [selector, kind] of known) {
+      const root = editor.matches?.(selector) ? editor : editor.closest?.(selector);
+      if (root) {
+        return {
+          kind,
+          tagName: tagName(root),
+          text: domPlainText(root),
+        };
+      }
+    }
+
+    if (editor.isContentEditable || editor.getAttribute?.('role')) {
+      return {
+        kind: editor.isContentEditable ? 'contenteditable-dom' : `role-${editor.getAttribute('role')}-dom`,
+        tagName: tagName(editor),
+        text: domPlainText(editor),
+      };
     }
 
     return null;
@@ -543,7 +721,28 @@
     const editor = activeEditor();
     let response;
 
-    if (action === 'snapshot-selection') {
+    if (action === 'read-editor') {
+      const result = readEditor(editor);
+      if (result && typeof result.text === 'string') {
+        const text = normalizeText(result.text);
+        response = {
+          ok: true,
+          method: 'page-editor-api',
+          url: location.href,
+          title: document.title,
+          frameUrl: location.href,
+          text,
+          kind: result.kind,
+          tagName: result.tagName,
+          textLength: text.length,
+        };
+      } else {
+        response = {
+          ok: false,
+          error: 'focused-editor-api-unavailable',
+        };
+      }
+    } else if (action === 'snapshot-selection') {
       const snapshot = snapshotEditorSelection(editor);
       if (snapshot) {
         const snapshotId = `selection:${Date.now()}:${++selectionSnapshotSeq}`;

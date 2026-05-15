@@ -13,12 +13,18 @@ import { SettingsWindow, useSettingsStore } from './features/settings';
 import { ProfileWindow } from './features/profile';
 import {
   bumpUiPrefsRevision,
+  CMD_GET_COMPANION_SNAPSHOT,
+  COMPANION_SNAPSHOT_EVENT,
   UI_PREFS_LOCALE_KEY,
   UI_PREFS_THEME_KEY,
   readUiPreferencesFromStorage,
   writeUiPreferencesCacheToStorage,
 } from './windowing/stateSync';
-import type { RevisionSyncHandle } from './windowing/stateSync';
+import type {
+  CompanionSnapshotData,
+  RevisionSyncHandle,
+  TauriSnapshotEnvelope,
+} from './windowing/stateSync';
 import { isTauriAvailable } from './utils/tauri';
 import { i18n } from './i18n';
 import { normalizeUiLocale, normalizeUiTheme, type UiTheme } from './i18n.locales';
@@ -35,6 +41,7 @@ const { setupUpdateListener, cleanupUpdateListener } = useUpdater();
 const userThemePref = ref<UiTheme>(normalizeUiTheme(localStorage.getItem(UI_PREFS_THEME_KEY)));
 const useSystemThemePref = ref<boolean>(readUiPreferencesFromStorage().useSystemTheme);
 const systemTheme = ref<UiTheme>('dark');
+const companionDesktopBlackoutEnabled = ref(false);
 
 const settingsStore = useSettingsStore();
 
@@ -87,6 +94,9 @@ const showAuth = computed(() => mode.value.render === 'auth');
 const showApp = computed(() => mode.value.render === 'main');
 const showSettings = computed(() => mode.value.render === 'settings');
 const showProfile = computed(() => mode.value.render === 'profile');
+const showCompanionDesktopBlackout = computed(() =>
+  companionDesktopBlackoutEnabled.value && windowLabel.value === 'main'
+);
 
 // Если окно по правилам не должно показывать UI — прячем его, чтобы не оставалось "невидимого стекла".
 watch(
@@ -176,6 +186,12 @@ function stopSystemThemeSync(): void {
   systemThemeListener = null;
 }
 
+function applyCompanionSnapshot(snapshot: TauriSnapshotEnvelope<CompanionSnapshotData> | null): void {
+  companionDesktopBlackoutEnabled.value = Boolean(
+    snapshot?.data?.controls?.desktopBlackoutEnabled
+  );
+}
+
 const effectiveTheme = computed<UiTheme>(() =>
   useSystemThemePref.value ? systemTheme.value : userThemePref.value
 );
@@ -246,6 +262,7 @@ let authSyncHandle: RevisionSyncHandle | null = null;
 let authSessionSyncHandle: RevisionSyncHandle | null = null;
 let uiPrefsSyncHandle: RevisionSyncHandle | null = null;
 let unlistenRecordingWindowShown: UnlistenFn | null = null;
+let unlistenCompanionSnapshot: UnlistenFn | null = null;
 
 onMounted(async () => {
   startSystemThemeSync();
@@ -285,6 +302,20 @@ onMounted(async () => {
 
   // Создаём per-topic sync handles (только в Tauri окружении)
   if (isTauriAvailable()) {
+    companionDesktopBlackoutEnabled.value = false;
+    try {
+      unlistenCompanionSnapshot = await listen<TauriSnapshotEnvelope<CompanionSnapshotData>>(
+        COMPANION_SNAPSHOT_EVENT,
+        (event) => applyCompanionSnapshot(event.payload),
+      );
+      const currentCompanionSnapshot =
+        await invoke<TauriSnapshotEnvelope<CompanionSnapshotData>>(CMD_GET_COMPANION_SNAPSHOT);
+      applyCompanionSnapshot(currentCompanionSnapshot);
+    } catch (err) {
+      console.warn('[App] companion blackout sync failed:', err);
+      companionDesktopBlackoutEnabled.value = false;
+    }
+
     authSyncHandle = createAuthStateSync({
       listen,
       invoke,
@@ -354,6 +385,10 @@ onUnmounted(() => {
     unlistenRecordingWindowShown();
     unlistenRecordingWindowShown = null;
   }
+  if (unlistenCompanionSnapshot) {
+    unlistenCompanionSnapshot();
+    unlistenCompanionSnapshot = null;
+  }
   stopSystemThemeSync();
   cleanupUpdateListener();
 });
@@ -381,6 +416,10 @@ if (import.meta.hot) {
       if (uiPrefsSyncHandle) {
         uiPrefsSyncHandle.stop();
         uiPrefsSyncHandle = null;
+      }
+      if (unlistenCompanionSnapshot) {
+        unlistenCompanionSnapshot();
+        unlistenCompanionSnapshot = null;
       }
     } catch {}
     cleanupUpdateListener();
@@ -410,6 +449,12 @@ if (import.meta.hot) {
     <div v-else-if="showApp" class="app">
       <RecordingPopover />
     </div>
+
+    <div
+      v-if="showCompanionDesktopBlackout"
+      class="companion-desktop-blackout"
+      aria-hidden="true"
+    />
   </v-app>
 </template>
 
@@ -423,5 +468,13 @@ if (import.meta.hot) {
   background: transparent;
   position: relative;
   overflow: visible;
+}
+
+.companion-desktop-blackout {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  background: #000;
+  pointer-events: auto;
 }
 </style>

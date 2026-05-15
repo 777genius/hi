@@ -86,6 +86,7 @@ function companionSnapshot(timeline: CompanionSnapshotData['timeline'] = []): Co
       contextFloorSeq: 0,
       conversationGeneration: 0,
       companionModeEnabled: true,
+      desktopBlackoutEnabled: false,
       lastAction: null,
     },
     live: {},

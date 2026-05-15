@@ -34,6 +34,29 @@ pub struct SystemAudioCapture {
 }
 
 impl SystemAudioCapture {
+    fn normalize_device_name(raw: &str) -> Option<String> {
+        let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        }
+    }
+
+    fn device_name_matches(requested: &str, candidate: &str) -> bool {
+        if requested == candidate {
+            return true;
+        }
+
+        match (
+            Self::normalize_device_name(requested),
+            Self::normalize_device_name(candidate),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
+    }
+
     /// Create new system audio capture with default input device
     pub fn new() -> AudioResult<Self> {
         Self::with_device(None)
@@ -53,27 +76,33 @@ impl SystemAudioCapture {
         log::debug!("Available input devices: {:?}", all_devices);
 
         // Выбираем устройство: либо указанное, либо дефолтное
-        let device = if let Some(ref name) = device_name {
-            log::info!("Looking for audio input device: {}", name);
+        let device =
+            if let Some(name) = device_name.as_deref().and_then(Self::normalize_device_name) {
+                log::info!("Looking for audio input device: {}", name);
 
-            host.input_devices()
-                .map_err(|e| {
-                    AudioError::DeviceNotFound(format!("Failed to enumerate devices: {}", e))
-                })?
-                .find(|d| d.name().ok().as_ref() == Some(name))
-                .ok_or_else(|| {
-                    AudioError::DeviceNotFound(format!(
-                        "Device '{}' not found. Available devices: {:?}",
-                        name, all_devices
-                    ))
-                })?
-        } else {
-            log::info!("Using default audio input device");
+                host.input_devices()
+                    .map_err(|e| {
+                        AudioError::DeviceNotFound(format!("Failed to enumerate devices: {}", e))
+                    })?
+                    .find(|d| {
+                        d.name()
+                            .ok()
+                            .map(|candidate| Self::device_name_matches(&name, &candidate))
+                            .unwrap_or(false)
+                    })
+                    .ok_or_else(|| {
+                        AudioError::DeviceNotFound(format!(
+                            "Device '{}' not found. Available devices: {:?}",
+                            name, all_devices
+                        ))
+                    })?
+            } else {
+                log::info!("Using default audio input device");
 
-            host.default_input_device().ok_or_else(|| {
-                AudioError::DeviceNotFound("No input device available".to_string())
-            })?
-        };
+                host.default_input_device().ok_or_else(|| {
+                    AudioError::DeviceNotFound("No input device available".to_string())
+                })?
+            };
 
         let selected_device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
         log::info!("Using audio input device: {}", selected_device_name);
@@ -312,6 +341,27 @@ mod tests {
         assert_eq!(mono.len(), 2);
         assert_eq!(mono[0], i16::MAX);
         assert_eq!(mono[1], i16::MIN);
+    }
+
+    #[test]
+    fn test_normalize_device_name_trims_and_cleans_whitespace() {
+        assert_eq!(
+            SystemAudioCapture::normalize_device_name("  Наушники   AirPods  "),
+            Some("Наушники AirPods".to_string())
+        );
+        assert_eq!(SystemAudioCapture::normalize_device_name("   "), None);
+    }
+
+    #[test]
+    fn test_device_name_matches_ignores_trailing_whitespace() {
+        assert!(SystemAudioCapture::device_name_matches(
+            "Наушники ",
+            "Наушники"
+        ));
+        assert!(SystemAudioCapture::device_name_matches(
+            "  Микрофон   MacBook   Pro ",
+            "Микрофон MacBook Pro"
+        ));
     }
 
     #[tokio::test]

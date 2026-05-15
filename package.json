@@ -23,6 +23,9 @@
     "copy-helper:check": "tools/macos-focus-copy-helper/scripts/check-accessibility.sh",
     "copy-helper:logs": "tail -n 200 -f \"$HOME/Library/Logs/HackInterview/MacOSFocusCopyHelper.log\"",
     "copy-helper:browser-extension:install": "tools/browser-focus-copy-extension/install-native-host.sh",
+    "copy-helper:browser-extension:e2e": "node tools/browser-focus-copy-extension/e2e-adapters.mjs",
+    "cursor-extension:install": "node tools/cursor-focus-copy-extension/scripts/install.mjs",
+    "cursor-extension:e2e": "node tools/cursor-focus-copy-extension/e2e/run-extension-e2e.mjs",
     "copy-helper:brave:open-cdp": "tools/browser-focus-copy-extension/open-brave-silent-debugger.sh open",
     "copy-helper:brave:restart-cdp": "tools/browser-focus-copy-extension/open-brave-silent-debugger.sh restart",
     "e2e:tauri": "node e2e-tests/run-e2e.mjs"

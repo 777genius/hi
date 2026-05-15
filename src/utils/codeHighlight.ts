@@ -87,6 +87,7 @@ type Segment = TextSegment | CodeSegment;
 
 const CODE_BLOCK_RE = /```(\w+)?\n([\s\S]*?)```/g;
 const COLLAPSE_THRESHOLD = 20;
+const RAW_CODE_COLLAPSE_THRESHOLD = 5;
 
 function inferRawCodeLanguage(text: string): string {
   const source = String(text ?? '');
@@ -194,14 +195,19 @@ export async function highlightRawCodeBlock(
   });
   const lineCount = Math.max(1, content.split('\n').length);
   const compactClass = options.compact ? ' code-block-compact' : '';
-  const collapsedClass = options.collapsed === false ? '' : ' collapsed';
+  const collapsible = lineCount > RAW_CODE_COLLAPSE_THRESHOLD;
+  const collapsedClass = collapsible && options.collapsed !== false ? ' collapsed' : '';
+  const collapsibleClass = collapsible ? ' code-block-collapsible' : '';
+  const toggleBtn = collapsible
+    ? '<button class="code-block-toggle" type="button" aria-label="Показать или свернуть код"></button>'
+    : '';
 
   return [
-    `<div class="code-block code-block-collapsible${compactClass}${collapsedClass}"`,
+    `<div class="code-block${collapsibleClass}${compactClass}${collapsedClass}"`,
     ` data-lang="${escapeHtml(lang)}"`,
     ` data-lines="${lineCount}">`,
     html,
-    '<button class="code-block-toggle" type="button" aria-label="Показать или свернуть код"></button>',
+    toggleBtn,
     '</div>',
   ].join('');
 }

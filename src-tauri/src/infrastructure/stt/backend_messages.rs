@@ -27,6 +27,25 @@ pub enum ClientMessage {
         keyterms: Option<Vec<String>>,
     },
 
+    /// Аудио данные с sequence number для resume/replay.
+    ///
+    /// Binary frames остаются совместимыми на backend, но клиент использует JSON audio,
+    /// чтобы сервер мог дедуплицировать replay после разрыва WS.
+    Audio {
+        /// Base64-encoded PCM audio data.
+        data: String,
+        /// Client sequence number.
+        seq: u64,
+    },
+
+    /// Возобновление активной сессии после transport-разрыва.
+    Resume {
+        /// ID сессии, полученный в Ready.
+        session_id: String,
+        /// Последний seq, подтверждённый клиентом через Ack.
+        last_seq: u64,
+    },
+
     /// Клиент закрывает сессию
     Close,
 
@@ -112,6 +131,31 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"config""#));
         assert!(json.contains(r#""provider":"deepgram""#));
+    }
+
+    #[test]
+    fn test_serialize_audio_message() {
+        let msg = ClientMessage::Audio {
+            data: "AQID".to_string(),
+            seq: 42,
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"audio","data":"AQID","seq":42}"#);
+    }
+
+    #[test]
+    fn test_serialize_resume_message() {
+        let msg = ClientMessage::Resume {
+            session_id: "abc-123".to_string(),
+            last_seq: 7,
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"resume","session_id":"abc-123","last_seq":7}"#
+        );
     }
 
     #[test]

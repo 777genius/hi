@@ -156,6 +156,38 @@ pub async fn ensure_microphone_muted(
     success(state, app_handle, if muted { "muted" } else { "unmuted" }).await
 }
 
+pub async fn ensure_desktop_blackout(
+    state: &AppState,
+    app_handle: &AppHandle,
+    enabled: bool,
+) -> Result<CompanionActionResponse, String> {
+    let Some(_guard) = acquire_action_lock(state).await else {
+        return busy_transition(app_handle).await;
+    };
+
+    if !*state.is_authenticated.read().await {
+        return rejected_auth(app_handle).await;
+    }
+
+    let previous = state
+        .companion_desktop_blackout_enabled
+        .swap(enabled, Ordering::Relaxed);
+    if previous == enabled {
+        return noop(app_handle, "noop").await;
+    }
+
+    success(
+        state,
+        app_handle,
+        if enabled {
+            "desktop_blackout_enabled"
+        } else {
+            "desktop_blackout_disabled"
+        },
+    )
+    .await
+}
+
 pub async fn ensure_context_cleared(
     state: &AppState,
     app_handle: &AppHandle,
@@ -203,15 +235,8 @@ pub async fn ensure_history_cleared(
     let previous_context_floor = state.companion_context_floor_seq.load(Ordering::Relaxed);
     let settled_active_ai =
         crate::presentation::companion_timeline::settle_active_haiku_generation(state).await;
-    let has_live_system_text = state
-        .partial_transcription
-        .read()
-        .await
-        .clone()
-        .unwrap_or_default()
-        .trim()
-        .len()
-        > 0;
+    let has_live_system_text =
+        crate::presentation::companion_timeline::has_system_live_text(state).await;
     let has_live_microphone_text = {
         let accumulated = state
             .companion_microphone_accumulated_text
@@ -239,12 +264,9 @@ pub async fn ensure_history_cleared(
     state
         .companion_conversation_generation
         .fetch_add(1, Ordering::Relaxed);
-    *state.partial_transcription.write().await = None;
+    crate::presentation::companion_timeline::clear_system_live_buffers(state).await;
     *state.final_transcription.write().await = None;
     crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
-    state
-        .companion_live_system_started_at_ms
-        .store(0, Ordering::Relaxed);
     state
         .companion_microphone_dominant_until_ms
         .store(0, Ordering::Relaxed);

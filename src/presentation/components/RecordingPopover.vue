@@ -37,10 +37,12 @@ import {
   CMD_COMPANION_CLEAR_CONTEXT,
   CMD_COMPANION_CLEAR_HISTORY,
   CMD_COMPANION_REQUEST_AI,
+  CMD_COMPANION_SET_DESKTOP_BLACKOUT,
   CMD_COMPANION_SEND_PROMPT,
   CMD_ENABLE_COMPANION_MODE,
   CMD_GET_COMPANION_SERVER_STATUS,
   CMD_GET_COMPANION_SNAPSHOT,
+  COMPANION_SNAPSHOT_EVENT,
   STATE_SYNC_INVALIDATION_EVENT,
   TOPIC_COMPANION_UI,
   type CompanionActionResponse,
@@ -226,6 +228,7 @@ let unlistenAutoHide: UnlistenFn | null = null;
 let unlistenStartRequested: UnlistenFn | null = null;
 let unlistenWindowShown: UnlistenFn | null = null;
 let unlistenCompanionInvalidation: UnlistenFn | null = null;
+let unlistenCompanionSnapshot: UnlistenFn | null = null;
 let unlistenCodeExplainDelta: UnlistenFn | null = null;
 let unlistenCodeExplainDone: UnlistenFn | null = null;
 let unlistenCodeExplainError: UnlistenFn | null = null;
@@ -239,6 +242,8 @@ const localCommitMutationsDisabled = computed(() => chatStore.companionModeEnabl
 const companionMenuOpen = ref(false);
 const companionServerStatus = ref<CompanionServerStatus | null>(null);
 const companionServerBusy = ref(false);
+const companionDesktopBlackoutEnabled = ref(false);
+const companionDesktopBlackoutBusy = ref(false);
 const companionTransientMessage = ref('');
 const companionQrDataUrl = ref('');
 let companionTransientMessageTimeout: number | null = null;
@@ -252,6 +257,20 @@ const companionPrimaryUrl = computed(() => {
 const companionLanUrl = computed(() => companionServerStatus.value?.localNetworkUrl || '');
 const companionLoopbackUrl = computed(() => companionServerStatus.value?.localUrl || '');
 const companionReady = computed(() => companionPrimaryUrl.value.length > 0);
+const companionDesktopBlackoutTitle = computed(() => (
+  companionDesktopBlackoutEnabled.value
+    ? 'Показать окно приложения на компьютере'
+    : 'Затемнить окно приложения на компьютере'
+));
+const companionDesktopBlackoutButtonLabel = computed(() => (
+  companionDesktopBlackoutEnabled.value ? 'Показать' : 'Затемнить'
+));
+const companionDesktopBlackoutStatus = computed(() => (
+  companionDesktopBlackoutEnabled.value ? 'Окно сейчас затемнено' : 'Окно сейчас видно'
+));
+const companionDesktopBlackoutIcon = computed(() => (
+  companionDesktopBlackoutEnabled.value ? 'mdi-monitor-off' : 'mdi-monitor'
+));
 const companionStatusLine = computed(() => {
   if (companionServerBusy.value) return 'Поднимаю companion на компьютере';
   if (companionLanUrl.value) return 'Готово - открой QR с телефона в той же Wi-Fi сети';
@@ -550,6 +569,7 @@ function applyCompanionSnapshot(snapshot: TauriSnapshotEnvelope<CompanionSnapsho
 
   store.hydrateFromCompanionSnapshot(snapshot.data);
   chatStore.hydrateFromCompanionSnapshot(snapshot.data);
+  companionDesktopBlackoutEnabled.value = !!snapshot.data.controls.desktopBlackoutEnabled;
 
   companionRevision.value = snapshot.revision;
   companionHistoryFloorSeq.value = nextHistoryFloor;
@@ -690,6 +710,40 @@ async function runCompanionClear(commandName: string): Promise<void> {
   const response = await invoke<CompanionActionResponse>(commandName);
   if (response.snapshot) {
     applyCompanionSnapshot(response.snapshot);
+  }
+}
+
+async function toggleCompanionDesktopBlackout(): Promise<void> {
+  if (!isTauriAvailable() || companionDesktopBlackoutBusy.value) return;
+
+  const enabled = !companionDesktopBlackoutEnabled.value;
+  companionDesktopBlackoutBusy.value = true;
+  try {
+    const response = await invoke<CompanionActionResponse>(CMD_COMPANION_SET_DESKTOP_BLACKOUT, {
+      enabled,
+    });
+    if (response.snapshot) {
+      applyCompanionSnapshot(response.snapshot);
+    }
+
+    if (!response.ok) {
+      const message = response.actionResult === 'busy_transition'
+        ? 'Подожди - предыдущее действие ещё выполняется.'
+        : response.actionResult === 'rejected_auth'
+          ? 'Нужно заново авторизоваться на компьютере.'
+          : 'Не удалось переключить затемнение.';
+      setCompanionTransientMessage(message, 4200);
+      return;
+    }
+
+    setCompanionTransientMessage(
+      enabled ? 'Окно приложения затемнено' : 'Окно приложения снова видно',
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    setCompanionTransientMessage(`Не удалось переключить затемнение: ${message}`, 4200);
+  } finally {
+    companionDesktopBlackoutBusy.value = false;
   }
 }
 
@@ -1030,10 +1084,32 @@ onMounted(async () => {
     STATE_SYNC_INVALIDATION_EVENT,
     async (event) => {
       if (event.payload.topic !== TOPIC_COMPANION_UI) return;
+      const nextRevision = Number(event.payload.revision || '0');
+      const currentRevision = Number(companionRevision.value || '0');
+      if (
+        Number.isFinite(nextRevision)
+        && Number.isFinite(currentRevision)
+        && nextRevision <= currentRevision
+      ) {
+        if (!companionReady.value && chatStore.companionModeEnabled) {
+          await refreshCompanionServerStatus();
+        }
+        return;
+      }
       await refreshCompanionSnapshot();
       if (!companionReady.value && chatStore.companionModeEnabled) {
         await refreshCompanionServerStatus();
       }
+    }
+  );
+
+  unlistenCompanionSnapshot = await listen<TauriSnapshotEnvelope<CompanionSnapshotData>>(
+    COMPANION_SNAPSHOT_EVENT,
+    (event) => {
+      if (!event.payload.data.controls.companionModeEnabled && !chatStore.companionModeEnabled) {
+        return;
+      }
+      applyCompanionSnapshot(event.payload);
     }
   );
 
@@ -1135,6 +1211,9 @@ onUnmounted(() => {
   if (unlistenCompanionInvalidation) {
     unlistenCompanionInvalidation();
   }
+  if (unlistenCompanionSnapshot) {
+    unlistenCompanionSnapshot();
+  }
   if (unlistenCodeExplainDelta) unlistenCodeExplainDelta();
   if (unlistenCodeExplainDone) unlistenCodeExplainDone();
   if (unlistenCodeExplainError) unlistenCodeExplainError();
@@ -1146,6 +1225,7 @@ onUnmounted(() => {
   unlistenCodeExplainDone = null;
   unlistenCodeExplainError = null;
   unlistenCompanionInvalidation = null;
+  unlistenCompanionSnapshot = null;
   clearCompanionTransientMessageTimer();
   clearCompanionStatusRetryTimer();
 
@@ -1554,6 +1634,25 @@ const onChatMouseDown = (e: MouseEvent) => {
                   Ссылка появится после старта companion
                 </div>
 
+                <div class="companion-desktop-control">
+                  <div class="companion-desktop-control-copy">
+                    <div class="companion-desktop-control-title">Экран компьютера</div>
+                    <div class="companion-desktop-control-status">{{ companionDesktopBlackoutStatus }}</div>
+                  </div>
+                  <v-btn
+                    variant="tonal"
+                    size="small"
+                    :prepend-icon="companionDesktopBlackoutIcon"
+                    :title="companionDesktopBlackoutTitle"
+                    :color="companionDesktopBlackoutEnabled ? 'warning' : undefined"
+                    :loading="companionDesktopBlackoutBusy"
+                    :disabled="!companionReady"
+                    @click="toggleCompanionDesktopBlackout"
+                  >
+                    {{ companionDesktopBlackoutButtonLabel }}
+                  </v-btn>
+                </div>
+
                 <div class="companion-link-block">
                   <div class="companion-link-label">Ссылка для телефона</div>
                   <div class="companion-link-value">
@@ -1599,7 +1698,7 @@ const onChatMouseDown = (e: MouseEvent) => {
               </v-tooltip>
             </template>
 
-            <v-card class="no-drag" min-width="420" max-width="520">
+            <v-card class="system-prompt-card no-drag">
               <v-card-title>Системный промпт</v-card-title>
               <v-divider />
               <v-card-text>
@@ -1613,8 +1712,7 @@ const onChatMouseDown = (e: MouseEvent) => {
                 />
               </v-card-text>
               <v-divider />
-              <v-card-actions>
-                <v-spacer />
+              <v-card-actions class="system-prompt-actions">
                 <v-btn variant="text" @click="promptMenuOpen = false">Отмена</v-btn>
                 <v-btn color="primary" variant="flat" @click="saveSystemPrompt">Сохранить</v-btn>
               </v-card-actions>
@@ -1795,6 +1893,14 @@ const onChatMouseDown = (e: MouseEvent) => {
             @click="openProfileWithLicense"
           >
             {{ t('errors.actions.activateLicense') }}
+          </button>
+
+          <button
+            v-if="store.canOpenSettingsForDevice"
+            class="error-action-button no-drag"
+            @click="openSettings"
+          >
+            {{ t('errors.actions.openSettingsForDevice') }}
           </button>
         </div>
       </div>
@@ -2134,7 +2240,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 }
 
 .chat-area {
-  --chat-sticky-footer-bottom: 0px;
+  --chat-sticky-footer-bottom: 30px;
 
   flex: 1;
   min-width: 0;
@@ -2876,6 +2982,26 @@ const onChatMouseDown = (e: MouseEvent) => {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.system-prompt-card {
+  width: min(520px, calc(100vw - 24px));
+  min-width: min(420px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+}
+
+.system-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px 12px;
+}
+
+.system-prompt-actions :deep(.v-btn) {
+  margin-inline-start: 0;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
 .companion-menu-card {
   width: min(340px, calc(100vw - 20px));
   border-radius: 18px;
@@ -2936,6 +3062,35 @@ const onChatMouseDown = (e: MouseEvent) => {
   line-height: 1.45;
   text-align: center;
   color: var(--color-text-secondary);
+}
+
+.companion-desktop-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.companion-desktop-control-copy {
+  min-width: 0;
+}
+
+.companion-desktop-control-title {
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.companion-desktop-control-status {
+  margin-top: 2px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .companion-link-block {
@@ -3273,6 +3428,17 @@ const onChatMouseDown = (e: MouseEvent) => {
   .prompt-button {
     font-size: 20px;
     padding: 1px 4px;
+  }
+
+  .system-prompt-card {
+    width: calc(100vw - 16px);
+    min-width: 0;
+    max-width: calc(100vw - 16px);
+  }
+
+  .system-prompt-actions {
+    gap: 6px;
+    padding: 8px;
   }
 
   .controls-center,

@@ -8,6 +8,8 @@ import { toggleCodeBlockCollapseFromTarget } from '../feedCodeBlocks';
 type HighlightEntry = { sourceText: string; html: string; expanded: boolean };
 type HighlightCandidate = { id: string; text: string; forceCode: boolean; expanded: boolean };
 const SCROLL_BOTTOM_THRESHOLD_PX = 72;
+const COLLAPSIBLE_MESSAGE_MAX_VISIBLE_LINES = 5;
+const COLLAPSIBLE_MESSAGE_ESTIMATED_CHARS_PER_LINE = 64;
 
 const props = withDefaults(defineProps<{
   messages: ConversationFeedMessage[];
@@ -121,8 +123,19 @@ function isFocusCopyMessage(message: ConversationFeedMessage): boolean {
   return message.id.startsWith('focus-copy:');
 }
 
+function hasCollapsibleTextContent(text: string): boolean {
+  const normalized = String(text ?? '').trim();
+  if (!normalized) return false;
+
+  const estimatedLines = normalized.split('\n').reduce((total, line) => {
+    return total + Math.max(1, Math.ceil(line.length / COLLAPSIBLE_MESSAGE_ESTIMATED_CHARS_PER_LINE));
+  }, 0);
+
+  return estimatedLines > COLLAPSIBLE_MESSAGE_MAX_VISIBLE_LINES;
+}
+
 function isCollapsibleMessage(message: ConversationFeedMessage): boolean {
-  return isFocusCopyMessage(message) || message.kind === 'haiku';
+  return (isFocusCopyMessage(message) || message.kind === 'haiku') && hasCollapsibleTextContent(message.text);
 }
 
 function isMessageExpanded(message: ConversationFeedMessage): boolean {
@@ -150,16 +163,20 @@ function toggleMessageCollapse(message: ConversationFeedMessage): void {
   });
 }
 
-function expandCollapsedMessage(message: ConversationFeedMessage, event: MouseEvent): void {
-  if (!isMessageCollapsed(message)) return;
-
-  event.preventDefault();
-  event.stopPropagation();
+function expandMessage(message: ConversationFeedMessage): void {
   collapsedMessageIds.delete(message.id);
   expandedMessageIds.add(message.id);
   void nextTick(() => {
     scheduleScrollStateUpdate();
   });
+}
+
+function expandCollapsedMessage(message: ConversationFeedMessage, event: MouseEvent): void {
+  if (!isMessageCollapsed(message)) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  expandMessage(message);
 }
 
 function renderHaikuMarkdown(text: string): string {
@@ -218,6 +235,14 @@ function onScrollClickCapture(event: MouseEvent): void {
       event.stopPropagation();
       return;
     }
+  }
+
+  const message = messageFromTarget(event.target);
+  if (message && isFocusCopyMessage(message) && isMessageCollapsed(message)) {
+    event.preventDefault();
+    event.stopPropagation();
+    expandMessage(message);
+    return;
   }
 
   if (toggleCodeBlockCollapseFromTarget(event.target)) {
@@ -372,21 +397,24 @@ onUnmounted(() => {
               >{{ msg.text }}</span>
             </template>
             <template v-else>
-              <div
-                v-if="msg.kind === 'haiku'"
-                class="chat-collapsible-message"
-                :class="{ collapsed: isMessageCollapsed(msg) }"
-                @click="expandCollapsedMessage(msg, $event)"
-              >
-                <div class="chat-collapsible-content chat-markdown" v-html="renderHaikuMarkdown(msg.text)" />
-                <button
-                  type="button"
-                  class="chat-collapse-toggle no-drag"
-                  @click.stop="toggleMessageCollapse(msg)"
+              <template v-if="msg.kind === 'haiku'">
+                <div
+                  v-if="isCollapsibleMessage(msg)"
+                  class="chat-collapsible-message"
+                  :class="{ collapsed: isMessageCollapsed(msg) }"
+                  @click="expandCollapsedMessage(msg, $event)"
                 >
-                  {{ isMessageCollapsed(msg) ? 'More' : 'Hide' }}
-                </button>
-              </div>
+                  <div class="chat-collapsible-content chat-markdown" v-html="renderHaikuMarkdown(msg.text)" />
+                  <button
+                    type="button"
+                    class="chat-collapse-toggle no-drag"
+                    @click.stop="toggleMessageCollapse(msg)"
+                  >
+                    {{ isMessageCollapsed(msg) ? 'More' : 'Hide' }}
+                  </button>
+                </div>
+                <div v-else class="chat-markdown" v-html="renderHaikuMarkdown(msg.text)" />
+              </template>
               <div
                 v-else-if="getHighlightedHtml(msg)"
                 class="chat-text chat-text-highlighted"
@@ -427,7 +455,7 @@ onUnmounted(() => {
 
 <style scoped>
 .chat-area {
-  --chat-sticky-footer-bottom: 0px;
+  --chat-sticky-footer-bottom: 30px;
 
   min-height: 60px;
   min-width: 0;
@@ -446,12 +474,18 @@ onUnmounted(() => {
   min-width: 0;
   width: 100%;
   overflow-y: auto;
-  padding: var(--spacing-sm);
+  padding: var(--chat-scroll-padding, var(--spacing-sm));
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
   position: relative;
+}
+
+.chat-scroll::after {
+  content: '';
+  display: block;
+  flex: 0 0 var(--chat-scroll-end-space, 0px);
 }
 
 .chat-scroll.selecting {
@@ -512,7 +546,7 @@ onUnmounted(() => {
   width: 100%;
   color: var(--color-text);
   opacity: 0.85;
-  font-size: 16px;
+  font-size: var(--chat-empty-font-size, 16px);
   line-height: 1.45;
   white-space: pre-wrap;
 }
@@ -543,7 +577,8 @@ onUnmounted(() => {
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(255, 255, 255, 0.06);
   color: var(--color-text);
-  line-height: 1.45;
+  font-size: var(--chat-message-font-size, inherit);
+  line-height: var(--chat-message-line-height, 1.45);
   white-space: pre-wrap;
   word-wrap: break-word;
   overflow-wrap: anywhere;
@@ -733,6 +768,7 @@ onUnmounted(() => {
 .chat-collapse-toggle {
   position: sticky;
   bottom: var(--chat-sticky-footer-bottom);
+  left: 0;
   z-index: 2;
   display: flex;
   width: 100%;
@@ -750,9 +786,28 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
+.chat-collapsible-message:not(.collapsed) .chat-collapse-toggle {
+  width: 42px;
+  height: 42px;
+  min-height: 42px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+  font-size: 0;
+}
+
+.chat-collapsible-message:not(.collapsed) .chat-collapse-toggle::before {
+  content: 'Hide';
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .chat-collapsible-message.collapsed .chat-collapse-toggle {
   position: static;
   bottom: auto;
+  left: auto;
 }
 
 .chat-collapse-toggle:hover {
@@ -769,6 +824,11 @@ onUnmounted(() => {
 :global(.theme-light) .chat-collapse-toggle:hover {
   color: rgba(15, 23, 42, 0.88);
   background: rgba(241, 245, 249, 0.96);
+}
+
+:global(.theme-light) .chat-collapsible-message:not(.collapsed) .chat-collapse-toggle {
+  border-color: rgba(15, 23, 42, 0.14);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
 }
 
 .chat-markdown {
@@ -855,8 +915,8 @@ onUnmounted(() => {
   padding: 12px 14px;
   overflow-x: auto;
   background: transparent;
-  font-size: 12.5px;
-  line-height: 1.5;
+  font-size: var(--chat-code-font-size, 12.5px);
+  line-height: var(--chat-code-line-height, 1.5);
   box-sizing: border-box;
   overscroll-behavior-x: contain;
   -webkit-overflow-scrolling: touch;
@@ -864,8 +924,8 @@ onUnmounted(() => {
 
 .chat-markdown :deep(.code-block pre code) {
   font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Menlo, Monaco, Consolas, monospace;
-  font-size: 12.5px;
-  line-height: 1.5;
+  font-size: var(--chat-code-font-size, 12.5px);
+  line-height: var(--chat-code-line-height, 1.5);
   background: transparent;
   padding: 0;
   border-radius: 0;
@@ -931,7 +991,7 @@ onUnmounted(() => {
 
 .chat-markdown :deep(code) {
   font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Menlo, Monaco, Consolas, monospace;
-  font-size: 0.92em;
+  font-size: var(--chat-inline-code-font-size, 0.92em);
   padding: 1px 5px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.08);
@@ -958,6 +1018,10 @@ onUnmounted(() => {
   position: relative;
 }
 
+.chat-row.focus-copy .chat-text-highlighted :deep(.code-block) {
+  overflow: visible;
+}
+
 .chat-text-highlighted :deep(.code-block:last-child) {
   margin-bottom: 0;
 }
@@ -973,6 +1037,15 @@ onUnmounted(() => {
 
 .chat-text-highlighted :deep(.code-block-compact.code-block-collapsible.collapsed .shiki) {
   max-height: 100px;
+}
+
+.chat-row.focus-copy .chat-text-highlighted :deep(.code-block-collapsible:not(.collapsed)) {
+  max-height: none;
+  overflow: visible;
+}
+
+.chat-row.focus-copy .chat-text-highlighted :deep(.code-block-collapsible:not(.collapsed) .shiki) {
+  max-height: none;
 }
 
 .chat-text-highlighted :deep(.code-block-toggle) {
@@ -994,6 +1067,30 @@ onUnmounted(() => {
   z-index: 2;
 }
 
+.chat-row.focus-copy .chat-text-highlighted :deep(.code-block-collapsible:not(.collapsed) .code-block-toggle) {
+  bottom: var(--chat-sticky-footer-bottom);
+  left: 0;
+  width: 42px;
+  height: 42px;
+  min-height: 42px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.chat-row.focus-copy .chat-text-highlighted :deep(.code-block-collapsible.collapsed .code-block-toggle) {
+  position: static;
+  bottom: auto;
+  left: auto;
+}
+
+.chat-row.focus-copy .chat-text-highlighted :deep(.code-block-collapsible:not(.collapsed) .code-block-toggle::before) {
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .chat-text-highlighted :deep(.code-block-toggle:hover) {
   background: rgba(43, 48, 57, 0.96);
   color: rgba(255, 255, 255, 0.85);
@@ -1012,6 +1109,11 @@ onUnmounted(() => {
   color: rgba(15, 23, 42, 0.88);
 }
 
+:global(.theme-light) .chat-row.focus-copy .chat-text-highlighted :deep(.code-block-collapsible:not(.collapsed) .code-block-toggle) {
+  border-color: rgba(15, 23, 42, 0.14);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+}
+
 .chat-text-highlighted :deep(.collapsed .code-block-toggle::before) {
   content: 'More';
 }
@@ -1025,8 +1127,8 @@ onUnmounted(() => {
   max-width: 100%;
   padding: 12px 14px;
   border-radius: 8px 8px 0 0;
-  font-size: 12.5px;
-  line-height: 1.5;
+  font-size: var(--chat-code-font-size, 12.5px);
+  line-height: var(--chat-code-line-height, 1.5);
   overflow-x: auto;
   tab-size: 2;
   box-sizing: border-box;
@@ -1040,6 +1142,8 @@ onUnmounted(() => {
 
 .chat-text-highlighted :deep(.shiki code) {
   font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Menlo, Monaco, Consolas, monospace;
+  font-size: var(--chat-code-font-size, 12.5px);
+  line-height: var(--chat-code-line-height, 1.5);
   display: block;
   min-width: max-content;
   white-space: pre;
@@ -1069,7 +1173,7 @@ onUnmounted(() => {
   }
 
   .chat-scroll {
-    padding: 6px 4px 8px 2px;
+    padding: var(--chat-scroll-mobile-padding, 6px 4px 8px 2px);
     gap: 6px;
   }
 
@@ -1111,7 +1215,7 @@ onUnmounted(() => {
 
 @media (max-width: 420px) {
   .chat-scroll {
-    padding: 4px 2px 8px 0;
+    padding: var(--chat-scroll-narrow-padding, 4px 2px 8px 0);
   }
 
   .chat-bubble {

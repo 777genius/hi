@@ -24,6 +24,11 @@ pub struct AudioPermissionStatus {
 const DEFAULT_MICROPHONE_MUTE_HOTKEY: &str = "Alt+Z";
 const APP_MICROPHONE_MUTE_SOURCE: &str = "app-microphone-toggle";
 
+enum SttTranscriptionEvent {
+    Partial(crate::domain::Transcription),
+    Final(crate::domain::Transcription),
+}
+
 struct CompanionDeltaWriter {
     tx: tokio::sync::mpsc::UnboundedSender<String>,
     handle: tauri::async_runtime::JoinHandle<()>,
@@ -350,7 +355,6 @@ fn spawn_microphone_transcription_start(
     device_name: Option<String>,
 ) {
     let app_handle_partial = app_handle.clone();
-    let app_handle_final = app_handle.clone();
 
     tauri::async_runtime::spawn(async move {
         // Важно: если выбран "Default" (device_name=None), то при подключении/смене микрофона
@@ -371,47 +375,79 @@ fn spawn_microphone_transcription_start(
             }
         }
 
-        let app_handle_mic_partial = app_handle_partial.clone();
-        let on_partial_mic = Arc::new(move |transcription: crate::domain::Transcription| {
-            let app_handle = app_handle_mic_partial.clone();
-            tokio::spawn(async move {
-                let payload = PartialTranscriptionPayload::from_transcription(
-                    transcription,
-                    session_id,
-                    "microphone",
-                );
-                if let Some(state) = app_handle.try_state::<AppState>() {
-                    crate::presentation::companion_timeline::on_microphone_partial(
-                        state.inner(),
-                        &payload,
-                    )
-                    .await;
-                    let _ = crate::presentation::companion::publish_snapshot_sse_only(&app_handle)
-                        .await;
+        let (mic_event_tx, mut mic_event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<SttTranscriptionEvent>();
+        let app_handle_mic_events = app_handle_partial.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = mic_event_rx.recv().await {
+                let Some(state) = app_handle_mic_events.try_state::<AppState>() else {
+                    continue;
+                };
+                if state
+                    .active_transcription_session_id
+                    .load(Ordering::Relaxed)
+                    != session_id
+                {
+                    continue;
                 }
-                let _ = app_handle.emit(EVENT_TRANSCRIPTION_PARTIAL, payload);
-            });
+
+                match event {
+                    SttTranscriptionEvent::Partial(transcription) => {
+                        let payload = PartialTranscriptionPayload::from_transcription(
+                            transcription,
+                            session_id,
+                            "microphone",
+                        );
+                        crate::presentation::companion_timeline::on_microphone_partial(
+                            state.inner(),
+                            &payload,
+                        )
+                        .await;
+                        let _ = app_handle_mic_events.emit(EVENT_TRANSCRIPTION_PARTIAL, payload);
+                        let _ = crate::presentation::companion::publish_snapshot_sse_only(
+                            &app_handle_mic_events,
+                        )
+                        .await;
+                    }
+                    SttTranscriptionEvent::Final(transcription) => {
+                        let payload = FinalTranscriptionPayload::from_transcription(
+                            transcription,
+                            session_id,
+                            "microphone",
+                        );
+                        crate::presentation::companion_timeline::on_microphone_final(
+                            state.inner(),
+                            &payload,
+                        )
+                        .await;
+                        let _ = app_handle_mic_events.emit(EVENT_TRANSCRIPTION_FINAL, payload);
+                        let _ = crate::presentation::companion::publish_snapshot_sse_only(
+                            &app_handle_mic_events,
+                        )
+                        .await;
+                    }
+                }
+            }
         });
 
-        let on_final_mic = Arc::new(move |transcription: crate::domain::Transcription| {
-            let app_handle = app_handle_final.clone();
-            tokio::spawn(async move {
-                let payload = FinalTranscriptionPayload::from_transcription(
-                    transcription,
-                    session_id,
-                    "microphone",
+        let mic_partial_tx = mic_event_tx.clone();
+        let on_partial_mic = Arc::new(move |transcription: crate::domain::Transcription| {
+            if let Err(error) = mic_partial_tx.send(SttTranscriptionEvent::Partial(transcription)) {
+                log::debug!(
+                    "Failed to enqueue microphone partial transcription: {}",
+                    error
                 );
-                if let Some(state) = app_handle.try_state::<AppState>() {
-                    crate::presentation::companion_timeline::on_microphone_final(
-                        state.inner(),
-                        &payload,
-                    )
-                    .await;
-                    let _ = crate::presentation::companion::publish_snapshot_sse_only(&app_handle)
-                        .await;
-                }
-                let _ = app_handle.emit(EVENT_TRANSCRIPTION_FINAL, payload);
-            });
+            }
+        });
+
+        let mic_final_tx = mic_event_tx.clone();
+        let on_final_mic = Arc::new(move |transcription: crate::domain::Transcription| {
+            if let Err(error) = mic_final_tx.send(SttTranscriptionEvent::Final(transcription)) {
+                log::debug!(
+                    "Failed to enqueue microphone final transcription: {}",
+                    error
+                );
+            }
         });
 
         let app_handle_mic_level = app_handle_partial.clone();
@@ -489,121 +525,124 @@ pub async fn start_recording_raw(
 
     // Не коммитим seq заранее: если старт упадёт до реального запуска, не хотим "сжигать" session_id.
     let session_id = next_recording_session_id(state);
-    crate::presentation::companion::reset_session_timeline(state).await;
     state
         .active_transcription_session_id
         .store(session_id, Ordering::Relaxed);
+    crate::presentation::companion::reset_session_timeline(state).await;
     log::info!("Recording session started: session_id={}", session_id);
 
-    let app_handle_clone = app_handle.clone();
-    let state_partial = state.partial_transcription.clone();
-
-    // Callback for partial transcriptions
-    let on_partial = Arc::new(move |transcription: crate::domain::Transcription| {
-        let text = transcription.text.clone();
-        let app_handle = app_handle_clone.clone();
-        let state_partial = state_partial.clone();
-
-        tokio::spawn(async move {
-            // Update state
-            let trimmed = text.trim().to_string();
-            *state_partial.write().await = if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.clone())
+    let (system_event_tx, mut system_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<SttTranscriptionEvent>();
+    let app_handle_events = app_handle.clone();
+    let state_final_events = state.final_transcription.clone();
+    let state_history_events = state.history.clone();
+    let state_config_events = state.config.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = system_event_rx.recv().await {
+            let Some(state) = app_handle_events.try_state::<AppState>() else {
+                continue;
             };
-            if let Some(state) = app_handle.try_state::<AppState>() {
-                if trimmed.is_empty() {
-                    state
-                        .companion_live_system_started_at_ms
-                        .store(0, Ordering::Relaxed);
-                } else if state
-                    .companion_live_system_started_at_ms
-                    .load(Ordering::Relaxed)
-                    == 0
-                {
-                    state.companion_live_system_started_at_ms.store(
-                        crate::presentation::companion_timeline::now_ms().max(0) as u64,
-                        Ordering::Relaxed,
+            if state
+                .active_transcription_session_id
+                .load(Ordering::Relaxed)
+                != session_id
+            {
+                continue;
+            }
+
+            match event {
+                SttTranscriptionEvent::Partial(transcription) => {
+                    let payload = PartialTranscriptionPayload::from_transcription(
+                        transcription,
+                        session_id,
+                        "system",
                     );
+                    crate::presentation::companion_timeline::on_system_partial(
+                        state.inner(),
+                        &payload,
+                    )
+                    .await;
+
+                    // Emit event to frontend
+                    if let Err(e) = app_handle_events.emit(EVENT_TRANSCRIPTION_PARTIAL, payload) {
+                        log::error!("Failed to emit partial transcription event: {}", e);
+                    }
+                    if let Err(e) = crate::presentation::companion::publish_snapshot_sse_only(
+                        &app_handle_events,
+                    )
+                    .await
+                    {
+                        log::debug!("Failed to publish companion partial snapshot: {}", e);
+                    }
+                }
+                SttTranscriptionEvent::Final(transcription) => {
+                    let canonical_transcription =
+                        match crate::presentation::companion_timeline::finalize_system_transcription(
+                        state.inner(),
+                        session_id,
+                        &transcription,
+                    )
+                    .await
+                    {
+                        Some(canonical) => canonical,
+                        None => {
+                            continue;
+                        }
+                    };
+
+                    // Update state
+                    *state_final_events.write().await = Some(canonical_transcription.text.clone());
+
+                    // Add to history
+                    state_history_events
+                        .write()
+                        .await
+                        .push(canonical_transcription.clone());
+
+                    // Keep only last N items
+                    let max_items = state_config_events.read().await.max_history_items;
+                    let mut history = state_history_events.write().await;
+                    let len = history.len();
+                    if len > max_items {
+                        history.drain(0..len - max_items);
+                    }
+                    drop(history);
+
+                    // Emit event to frontend
+                    let payload = FinalTranscriptionPayload::from_transcription(
+                        canonical_transcription.clone(),
+                        session_id,
+                        "system",
+                    );
+                    if let Err(e) = app_handle_events.emit(EVENT_TRANSCRIPTION_FINAL, payload) {
+                        log::error!("Failed to emit final transcription event: {}", e);
+                    }
+                    if let Err(e) = crate::presentation::companion::publish_snapshot_sse_only(
+                        &app_handle_events,
+                    )
+                    .await
+                    {
+                        log::debug!("Failed to publish companion final snapshot: {}", e);
+                    }
                 }
             }
-
-            // Emit event to frontend
-            let payload = PartialTranscriptionPayload::from_transcription(
-                transcription,
-                session_id,
-                "system",
-            );
-            if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_PARTIAL, payload) {
-                log::error!("Failed to emit partial transcription event: {}", e);
-            }
-            if let Err(e) =
-                crate::presentation::companion::publish_snapshot_sse_only(&app_handle).await
-            {
-                log::debug!("Failed to publish companion partial snapshot: {}", e);
-            }
-        });
+        }
     });
 
-    let app_handle_final = app_handle.clone();
-    let state_final = state.final_transcription.clone();
-    let state_history = state.history.clone();
-    let state_config = state.config.clone();
+    let system_partial_tx = system_event_tx.clone();
+    // Callback for partial transcriptions
+    let on_partial = Arc::new(move |transcription: crate::domain::Transcription| {
+        if let Err(error) = system_partial_tx.send(SttTranscriptionEvent::Partial(transcription)) {
+            log::debug!("Failed to enqueue system partial transcription: {}", error);
+        }
+    });
+
+    let system_final_tx = system_event_tx.clone();
     // Callback for final transcription
     let on_final = Arc::new(move |transcription: crate::domain::Transcription| {
-        let text = transcription.text.clone();
-        let app_handle = app_handle_final.clone();
-        let state_final = state_final.clone();
-        let state_history = state_history.clone();
-        let state_config = state_config.clone();
-
-        tokio::spawn(async move {
-            // Update state
-            *state_final.write().await = Some(text.clone());
-            if let Some(state) = app_handle.try_state::<AppState>() {
-                state
-                    .companion_live_system_started_at_ms
-                    .store(0, Ordering::Relaxed);
-            }
-
-            // Add to history
-            state_history.write().await.push(transcription.clone());
-
-            // Keep only last N items
-            let max_items = state_config.read().await.max_history_items;
-            let mut history = state_history.write().await;
-            let len = history.len();
-            if len > max_items {
-                history.drain(0..len - max_items);
-            }
-            drop(history);
-
-            let _ = max_items;
-            if let Some(state) = app_handle.try_state::<AppState>() {
-                crate::presentation::companion_timeline::append_system_final(
-                    state.inner(),
-                    session_id,
-                    &transcription,
-                )
-                .await;
-            }
-
-            // Emit event to frontend
-            let payload = FinalTranscriptionPayload::from_transcription(
-                transcription.clone(),
-                session_id,
-                "system",
-            );
-            if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_FINAL, payload) {
-                log::error!("Failed to emit final transcription event: {}", e);
-            }
-            if let Err(e) =
-                crate::presentation::companion::publish_snapshot_sse_only(&app_handle).await
-            {
-                log::debug!("Failed to publish companion final snapshot: {}", e);
-            }
-        });
+        if let Err(error) = system_final_tx.send(SttTranscriptionEvent::Final(transcription)) {
+            log::debug!("Failed to enqueue system final transcription: {}", error);
+        }
     });
 
     let app_handle_level = app_handle.clone();
@@ -883,11 +922,8 @@ pub async fn abort_starting_recording_raw(
     state
         .active_transcription_session_id
         .store(0, Ordering::Relaxed);
-    *state.partial_transcription.write().await = None;
+    crate::presentation::companion_timeline::clear_system_live_buffers(state).await;
     *state.final_transcription.write().await = None;
-    state
-        .companion_live_system_started_at_ms
-        .store(0, Ordering::Relaxed);
     crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
 
     let _ = app_handle.emit(
@@ -1720,6 +1756,20 @@ pub async fn companion_send_prompt(
 }
 
 #[tauri::command]
+pub async fn companion_set_desktop_blackout(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    enabled: bool,
+) -> Result<crate::presentation::companion_actions::CompanionActionResponse, String> {
+    crate::presentation::companion_actions::ensure_desktop_blackout(
+        state.inner(),
+        &app_handle,
+        enabled,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn set_companion_system_prompt(
     state: State<'_, AppState>,
     prompt: String,
@@ -1871,10 +1921,11 @@ pub async fn update_app_config(
 
     let mut mic_device_changed = false;
     if let Some(device) = selected_audio_device {
-        let device_opt = if device.is_empty() {
+        let normalized = device.trim().to_string();
+        let device_opt = if normalized.is_empty() {
             None
         } else {
-            Some(device.clone())
+            Some(normalized)
         };
 
         // Проверяем изменилось ли устройство
@@ -1892,10 +1943,11 @@ pub async fn update_app_config(
 
     let mut output_device_changed = false;
     if let Some(device) = selected_output_audio_device {
-        let device_opt = if device.is_empty() {
+        let normalized = device.trim().to_string();
+        let device_opt = if normalized.is_empty() {
             None
         } else {
-            Some(device.clone())
+            Some(normalized)
         };
         if config.selected_output_audio_device != device_opt {
             log::info!(

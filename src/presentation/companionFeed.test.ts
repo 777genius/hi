@@ -20,6 +20,7 @@ function makeSnapshot(overrides: Partial<CompanionSnapshotData> = {}): Companion
       contextFloorSeq: 0,
       conversationGeneration: 1,
       companionModeEnabled: true,
+      desktopBlackoutEnabled: false,
       lastAction: null,
     },
     live: {},

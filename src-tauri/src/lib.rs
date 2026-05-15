@@ -127,6 +127,7 @@ pub fn run() {
             commands::companion_clear_history,
             commands::companion_request_ai,
             commands::companion_send_prompt,
+            commands::companion_set_desktop_blackout,
             commands::set_companion_system_prompt,
             commands::update_ui_preferences,
             commands::update_app_config,

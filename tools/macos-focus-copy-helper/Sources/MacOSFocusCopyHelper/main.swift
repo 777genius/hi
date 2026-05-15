@@ -7,6 +7,7 @@ import Foundation
 private func carbonRunApplicationEventLoop()
 
 private enum CopyMethod: String {
+    case browserEditorApi
     case browserCdp
     case browserExtensionCache
     case browserJavaScript
@@ -102,6 +103,12 @@ private struct BrowserCdpCopyResponse: Codable {
     let restored: Bool?
     let error: String?
     let url: String?
+    let title: String?
+    let frameUrl: String?
+    let text: String?
+    let kind: String?
+    let tagName: String?
+    let textLength: Int?
     let elapsedMs: Int?
     let receivedAtMs: Int64
 }
@@ -141,7 +148,7 @@ private enum FocusCopyError: Error, CustomStringConvertible {
         case .pasteboardWriteFailed:
             return "Failed to write text to pasteboard."
         case .hotkeyRegistrationFailed(let status):
-            return "Failed to register Ctrl+Shift+A hotkey. OSStatus: \(status)."
+            return "Failed to register focus-copy hotkey. OSStatus: \(status)."
         case .hotkeyHandlerInstallationFailed(let status):
             return "Failed to install Ctrl+Shift+A hotkey handler. OSStatus: \(status)."
         }
@@ -359,6 +366,34 @@ private final class FocusTextCopier {
             logCopy(attemptID, "END failure error=\(error)")
             throw error
         }
+    }
+
+    func copyFocusedEditorApiTextToPasteboard() throws -> CopyResult {
+        let attemptID = nextCopyAttemptID()
+        logCopy(attemptID, "BEGIN copyFocusedEditorApiTextToPasteboard on mainThread=\(Thread.isMainThread)")
+        logCopy(attemptID, "frontmost=\(frontmostApplicationSummary())")
+
+        do {
+            let result = try copyFocusedEditorApiTextToPasteboard(attemptID: attemptID)
+            logCopy(attemptID, "END success method=\(result.method.rawValue), chars=\(result.characterCount)")
+            return result
+        } catch {
+            logCopy(attemptID, "END failure error=\(error)")
+            throw error
+        }
+    }
+
+    private func copyFocusedEditorApiTextToPasteboard(attemptID: Int) throws -> CopyResult {
+        if let result = try copyViaBrowserEditorApiIfSupported(attemptID: attemptID) {
+            return result
+        }
+
+        if let result = try copyViaBrowserEditorApiCacheIfFresh(attemptID: attemptID) {
+            return result
+        }
+
+        logCopy(attemptID, "all focused editor API strategies failed")
+        throw FocusCopyError.unsupportedFocusedElement
     }
 
     private func copyFocusedTextToPasteboard(attemptID: Int) throws -> CopyResult {
@@ -613,15 +648,69 @@ private final class FocusTextCopier {
         return CopyResult(method: .browserCdp, text: text, sourceURL: response.url)
     }
 
+    private func copyViaBrowserEditorApiIfSupported(attemptID: Int) throws -> CopyResult? {
+        guard let app = NSWorkspace.shared.frontmostApplication else {
+            logCopy(attemptID, "browser editor API path skipped because frontmostApplication=nil")
+            return nil
+        }
+
+        guard let browser = browserAutomationTarget(for: app),
+              browser.family == .chromium else {
+            logCopy(
+                attemptID,
+                "browser editor API path skipped for bundle=\(app.bundleIdentifier ?? "nil"), name=\(app.localizedName ?? "nil")"
+            )
+            return nil
+        }
+
+        guard isBrowserCdpHostPresent(targetBundleId: app.bundleIdentifier, maxAgeSeconds: 3) else {
+            logCopy(attemptID, "browser editor API path skipped because native host is not active for bundle=\(app.bundleIdentifier ?? "nil")")
+            return nil
+        }
+
+        logCopy(
+            attemptID,
+            "browser editor API path begin appName=\(browser.applicationName), bundle=\(app.bundleIdentifier ?? "nil")"
+        )
+
+        guard let response = sendBrowserCdpCopyRequest(
+            targetBundleId: app.bundleIdentifier,
+            deadlineMs: 450,
+            attemptID: attemptID,
+            requestType: "focus-copy-editor-api-request"
+        ) else {
+            logCopy(attemptID, "browser editor API path failed because native host did not return a response")
+            return nil
+        }
+
+        guard response.ok else {
+            logCopy(attemptID, "browser editor API path failed error=\(response.error ?? "nil"), elapsedMs=\(response.elapsedMs ?? -1)")
+            return nil
+        }
+
+        guard let text = response.text else {
+            logCopy(attemptID, "browser editor API path returned no text kind=\(response.kind ?? "nil"), url=\(response.url ?? "nil")")
+            return nil
+        }
+
+        logCopy(
+            attemptID,
+            "browser editor API path succeeded kind=\(response.kind ?? "nil"), tag=\(response.tagName ?? "nil"), url=\(response.url ?? "nil"), \(textDebugSummary(text))"
+        )
+        try writePasteboard(text, attemptID: attemptID)
+        return CopyResult(method: .browserEditorApi, text: text, sourceURL: response.url)
+    }
+
     private func sendBrowserCdpCopyRequest(
         targetBundleId: String?,
         deadlineMs: Int,
-        attemptID: Int
+        attemptID: Int,
+        requestType: String = "focus-copy-cdp-request"
     ) -> BrowserCdpCopyResponse? {
         let requestId = UUID().uuidString
         let request = BrowserCdpCopyRequest(
             schemaVersion: 1,
-            type: "focus-copy-cdp-request",
+            type: requestType,
             requestId: requestId,
             targetBundleId: targetBundleId,
             deadlineMs: deadlineMs,
@@ -646,9 +735,9 @@ private final class FocusTextCopier {
                 try FileManager.default.removeItem(at: requestURL)
             }
             try FileManager.default.moveItem(at: tempURL, to: requestURL)
-            logCopy(attemptID, "browser CDP request written requestId=\(requestId), targetBundleId=\(targetBundleId ?? "nil")")
+            logCopy(attemptID, "browser request written type=\(requestType), requestId=\(requestId), targetBundleId=\(targetBundleId ?? "nil")")
         } catch {
-            logCopy(attemptID, "browser CDP request write failed requestId=\(requestId), error=\(error)")
+            logCopy(attemptID, "browser request write failed type=\(requestType), requestId=\(requestId), error=\(error)")
             return nil
         }
 
@@ -665,18 +754,95 @@ private final class FocusTextCopier {
                 try? FileManager.default.removeItem(at: responseURL)
                 logCopy(
                     attemptID,
-                    "browser CDP response read requestId=\(requestId), ok=\(response.ok), loops=\(loopCount), method=\(response.method ?? "nil"), restored=\(response.restored.map(String.init) ?? "nil")"
+                    "browser response read type=\(response.type), requestId=\(requestId), ok=\(response.ok), loops=\(loopCount), method=\(response.method ?? "nil"), restored=\(response.restored.map(String.init) ?? "nil")"
                 )
                 return response
             } catch {
-                logCopy(attemptID, "browser CDP response decode failed requestId=\(requestId), error=\(error)")
+                logCopy(attemptID, "browser response decode failed requestId=\(requestId), error=\(error)")
                 return nil
             }
         } while Date() < deadline
 
         try? FileManager.default.removeItem(at: requestURL)
-        logCopy(attemptID, "browser CDP response timeout requestId=\(requestId), loops=\(loopCount)")
+        logCopy(attemptID, "browser response timeout type=\(requestType), requestId=\(requestId), loops=\(loopCount)")
         return nil
+    }
+
+    private func copyViaBrowserEditorApiCacheIfFresh(attemptID: Int) throws -> CopyResult? {
+        guard let app = NSWorkspace.shared.frontmostApplication else {
+            logCopy(attemptID, "browser editor API cache skipped because frontmostApplication=nil")
+            return nil
+        }
+
+        guard browserAutomationTarget(for: app) != nil else {
+            logCopy(
+                attemptID,
+                "browser editor API cache skipped for non-browser bundle=\(app.bundleIdentifier ?? "nil")"
+            )
+            return nil
+        }
+
+        let cacheURL = browserFocusCacheURL()
+        guard let data = try? Data(contentsOf: cacheURL) else {
+            logCopy(attemptID, "browser editor API cache missing path=\(cacheURL.path)")
+            return nil
+        }
+
+        let payload: BrowserFocusCachePayload
+        do {
+            payload = try JSONDecoder().decode(BrowserFocusCachePayload.self, from: data)
+        } catch {
+            logCopy(attemptID, "browser editor API cache decode failed error=\(error)")
+            return nil
+        }
+
+        let ageMs = Int(Date().timeIntervalSince1970 * 1000 - payload.receivedAt * 1000)
+        guard ageMs <= 2_000 else {
+            logCopy(attemptID, "browser editor API cache stale ageMs=\(ageMs), source=\(payload.source)")
+            return nil
+        }
+
+        guard let kind = payload.kind,
+              Self.isEditorApiKind(kind) else {
+            logCopy(attemptID, "browser editor API cache skipped non-editor kind=\(payload.kind ?? "nil")")
+            return nil
+        }
+
+        guard !payload.isPassword else {
+            logCopy(attemptID, "browser editor API cache refused password field url=\(payload.url ?? "nil")")
+            return nil
+        }
+
+        guard let text = payload.text else {
+            logCopy(attemptID, "browser editor API cache has no text kind=\(payload.kind ?? "nil"), source=\(payload.source)")
+            return nil
+        }
+
+        logCopy(
+            attemptID,
+            "browser editor API cache hit ageMs=\(ageMs), source=\(payload.source), kind=\(kind), tag=\(payload.tagName ?? "nil"), url=\(payload.url ?? "nil"), \(textDebugSummary(text))"
+        )
+        try writePasteboard(text, attemptID: attemptID)
+        return CopyResult(method: .browserEditorApi, text: text, sourceURL: payload.url)
+    }
+
+    private static func isEditorApiKind(_ kind: String) -> Bool {
+        let normalized = kind.lowercased()
+        return [
+            "monaco",
+            "codemirror",
+            "ace",
+            "textarea",
+            "input",
+            "contenteditable",
+            "quill",
+            "tinymce",
+            "prosemirror",
+            "slate",
+            "lexical",
+            "draft",
+            "codejar",
+        ].contains { normalized.contains($0) }
     }
 
     private func copyViaBrowserExtensionCacheIfFresh(attemptID: Int) throws -> CopyResult? {
@@ -1870,8 +2036,23 @@ private final class FocusTextCopier {
 }
 
 private final class HotkeyRunner: @unchecked Sendable {
+    private enum HotkeyAction: UInt32 {
+        case copyAll = 1
+        case copyEditorApi = 2
+
+        var label: String {
+            switch self {
+            case .copyAll:
+                return "Ctrl+Shift+A"
+            case .copyEditorApi:
+                return "Ctrl+Shift+S"
+            }
+        }
+    }
+
     private let copier = FocusTextCopier()
-    private var hotKeyRef: EventHotKeyRef?
+    private var copyAllHotKeyRef: EventHotKeyRef?
+    private var editorApiHotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
     private var isHandlingHotkey = false
     private var lastHotkeyCompletedAt = Date.distantPast
@@ -1882,7 +2063,7 @@ private final class HotkeyRunner: @unchecked Sendable {
 
         try registerHotkey()
 
-        log("Running. Press Ctrl+Shift+A to copy all text from the focused input.")
+        log("Running. Press Ctrl+Shift+A for universal copy or Ctrl+Shift+S for focused editor API copy.")
         log("Entering Carbon application event loop for RegisterEventHotKey delivery")
         carbonRunApplicationEventLoop()
         exit(0)
@@ -1895,25 +2076,21 @@ private final class HotkeyRunner: @unchecked Sendable {
     }
 
     private func registerHotkey() throws {
-        let hotKeyID = EventHotKeyID(signature: fourCharCode("HICA"), id: 1)
         let modifiers = UInt32(controlKey | shiftKey)
-        let keyCode = UInt32(kVK_ANSI_A)
         let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
 
-        log("registerHotkey begin key=Ctrl+Shift+A keyCode=\(keyCode), modifiers=\(modifiers), signature=HICA")
-        let registerStatus = RegisterEventHotKey(
-            keyCode,
-            modifiers,
-            hotKeyID,
-            GetApplicationEventTarget(),
-            0,
-            &hotKeyRef
+        try registerSingleHotkey(
+            action: .copyAll,
+            keyCode: UInt32(kVK_ANSI_A),
+            modifiers: modifiers,
+            hotKeyRef: &copyAllHotKeyRef
         )
-        log("registerHotkey RegisterEventHotKey status=\(registerStatus), hotKeyRefIsNil=\(hotKeyRef == nil)")
-
-        guard registerStatus == noErr else {
-            throw FocusCopyError.hotkeyRegistrationFailed(registerStatus)
-        }
+        try registerSingleHotkey(
+            action: .copyEditorApi,
+            keyCode: UInt32(kVK_ANSI_S),
+            modifiers: modifiers,
+            hotKeyRef: &editorApiHotKeyRef
+        )
 
         var eventSpec = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
@@ -1936,16 +2113,40 @@ private final class HotkeyRunner: @unchecked Sendable {
         log("registerHotkey success")
     }
 
-    fileprivate func handleHotkey() {
+    private func registerSingleHotkey(
+        action: HotkeyAction,
+        keyCode: UInt32,
+        modifiers: UInt32,
+        hotKeyRef: inout EventHotKeyRef?
+    ) throws {
+        let hotKeyID = EventHotKeyID(signature: fourCharCode("HICA"), id: action.rawValue)
+        log("registerHotkey begin key=\(action.label) keyCode=\(keyCode), modifiers=\(modifiers), signature=HICA, id=\(action.rawValue)")
+        let registerStatus = RegisterEventHotKey(
+            keyCode,
+            modifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+        log("registerHotkey RegisterEventHotKey key=\(action.label), status=\(registerStatus), hotKeyRefIsNil=\(hotKeyRef == nil)")
+
+        guard registerStatus == noErr else {
+            throw FocusCopyError.hotkeyRegistrationFailed(registerStatus)
+        }
+    }
+
+    fileprivate func handleHotkey(id: UInt32) {
+        let action = HotkeyAction(rawValue: id) ?? .copyAll
         if isHandlingHotkey {
-            log("hotkey ignored because copy is already in progress")
+            log("hotkey \(action.label) ignored because copy is already in progress")
             return
         }
 
         let now = Date()
         let completedDelta = now.timeIntervalSince(lastHotkeyCompletedAt)
         if completedDelta < 0.45 {
-            log("hotkey ignored because previous copy completed \(String(format: "%.3f", completedDelta))s ago")
+            log("hotkey \(action.label) ignored because previous copy completed \(String(format: "%.3f", completedDelta))s ago")
             return
         }
 
@@ -1956,9 +2157,15 @@ private final class HotkeyRunner: @unchecked Sendable {
             lastHotkeyCompletedAt = Date()
         }
 
-        log("hotkey handler fired on mainThread=\(Thread.isMainThread)")
+        log("hotkey handler fired key=\(action.label) on mainThread=\(Thread.isMainThread)")
         do {
-            let result = try copier.copyFocusedTextToPasteboard()
+            let result: CopyResult
+            switch action {
+            case .copyAll:
+                result = try copier.copyFocusedTextToPasteboard()
+            case .copyEditorApi:
+                result = try copier.copyFocusedEditorApiTextToPasteboard()
+            }
             log("Copied \(result.characterCount) chars via \(result.method.rawValue).")
             emitFocusCopyResult(result: result, error: nil, startedAt: startedAt)
         } catch {
@@ -1993,15 +2200,34 @@ private func emitFocusCopyResult(result: CopyResult?, error: Error?, startedAt: 
     fflush(stdout)
 }
 
-nonisolated(unsafe) private let hotkeyHandler: EventHandlerUPP = { _, _, userData in
+nonisolated(unsafe) private let hotkeyHandler: EventHandlerUPP = { _, event, userData in
     guard let userData else {
         log("hotkey callback fired without userData")
         return noErr
     }
 
-    log("hotkey callback received, dispatching copy work")
+    var hotKeyID = EventHotKeyID()
+    var id: UInt32 = 1
+    if let event {
+        let status = GetEventParameter(
+            event,
+            EventParamName(kEventParamDirectObject),
+            EventParamType(typeEventHotKeyID),
+            nil,
+            MemoryLayout<EventHotKeyID>.size,
+            nil,
+            &hotKeyID
+        )
+        if status == noErr {
+            id = hotKeyID.id
+        } else {
+            log("hotkey callback failed to read hotkey id status=\(status); defaulting to Ctrl+Shift+A")
+        }
+    }
+
+    log("hotkey callback received id=\(id), dispatching copy work")
     let runner = Unmanaged<HotkeyRunner>.fromOpaque(userData).takeUnretainedValue()
-    runner.handleHotkey()
+    runner.handleHotkey(id: id)
 
     return noErr
 }
@@ -2173,7 +2399,7 @@ private func handleBrowserCacheNativeMessage(_ message: BrowserFocusCacheNativeM
         return
     }
 
-    if message.type == "focus-copy-cdp-response" {
+    if message.type == "focus-copy-cdp-response" || message.type == "focus-copy-editor-api-response" {
         try writeBrowserCdpResponse(message)
         return
     }
@@ -2279,7 +2505,7 @@ private func pumpBrowserCdpRequests(hostBundleId: String?, sentRequestIds: inout
     for file in files where file.lastPathComponent.hasPrefix("request-") && file.pathExtension == "json" {
         guard let data = try? Data(contentsOf: file),
               let request = try? JSONDecoder().decode(BrowserCdpCopyRequest.self, from: data),
-              request.type == "focus-copy-cdp-request" else {
+              request.type == "focus-copy-cdp-request" || request.type == "focus-copy-editor-api-request" else {
             try? FileManager.default.removeItem(at: file)
             continue
         }
@@ -2297,9 +2523,9 @@ private func pumpBrowserCdpRequests(hostBundleId: String?, sentRequestIds: inout
         sentRequestIds.insert(request.requestId)
         try? FileManager.default.removeItem(at: file)
 
-        log("browser CDP pump forwarding requestId=\(request.requestId), targetBundleId=\(request.targetBundleId ?? "nil"), hostBundleId=\(hostBundleId ?? "nil")")
+        log("browser request pump forwarding type=\(request.type), requestId=\(request.requestId), targetBundleId=\(request.targetBundleId ?? "nil"), hostBundleId=\(hostBundleId ?? "nil")")
         writeNativeMessagingResponse([
-            "type": "focus-copy-cdp-request",
+            "type": request.type,
             "requestId": request.requestId,
             "deadlineMs": request.deadlineMs,
             "targetBundleId": request.targetBundleId ?? NSNull(),
@@ -2320,13 +2546,19 @@ private func writeBrowserCdpResponse(_ message: BrowserFocusCacheNativeMessage) 
 
     let response = BrowserCdpCopyResponse(
         schemaVersion: 1,
-        type: "focus-copy-cdp-response",
+        type: message.type,
         requestId: requestId,
         ok: message.ok ?? false,
         method: message.method,
         restored: message.restored,
         error: message.error,
         url: message.url,
+        title: message.title,
+        frameUrl: message.frameUrl,
+        text: message.text,
+        kind: message.kind,
+        tagName: message.tagName,
+        textLength: message.textLength,
         elapsedMs: message.elapsedMs,
         receivedAtMs: currentTimeMillis()
     )

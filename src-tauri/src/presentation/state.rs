@@ -127,6 +127,10 @@ pub struct AppState {
     /// Single-writer lock для shared companion actions.
     pub companion_action_lock: Arc<tokio::sync::Mutex<()>>,
 
+    /// Тёмный overlay основного desktop окна, которым управляет companion.
+    /// Не сохраняется на диск, чтобы после перезапуска приложение всегда стартовало видимым.
+    pub companion_desktop_blackout_enabled: Arc<AtomicBool>,
+
     /// Companion timeline (session-local, backend-owned coarse snapshot).
     pub companion_timeline: Arc<RwLock<Vec<crate::presentation::companion::CompanionMessage>>>,
 
@@ -150,6 +154,15 @@ pub struct AppState {
 
     /// Shared system prompt для companion AI flows.
     pub companion_system_prompt: Arc<RwLock<String>>,
+
+    /// Accumulated system interim-final buffer before speech-final flush.
+    pub companion_system_accumulated_text: Arc<RwLock<String>>,
+
+    /// Current system utterance start marker.
+    pub companion_system_current_utterance_start: Arc<RwLock<Option<f64>>>,
+
+    /// Last finalized system chunk to avoid duplicate segment-final flushes.
+    pub companion_system_last_finalized_text: Arc<RwLock<String>>,
 
     /// Live microphone partial text for backend-owned timeline parity.
     pub companion_microphone_partial_text: Arc<RwLock<String>>,
@@ -260,6 +273,7 @@ impl AppState {
                     )),
                     companion_server_task: Arc::new(RwLock::new(None)),
                     companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
+                    companion_desktop_blackout_enabled: Arc::new(AtomicBool::new(false)),
                     companion_timeline: Arc::new(RwLock::new(Vec::new())),
                     companion_next_seq: Arc::new(AtomicU64::new(0)),
                     companion_next_stt_index: Arc::new(AtomicU64::new(0)),
@@ -268,6 +282,9 @@ impl AppState {
                     companion_conversation_generation: Arc::new(AtomicU64::new(0)),
                     companion_last_action: Arc::new(RwLock::new(None)),
                     companion_system_prompt: Arc::new(RwLock::new(String::new())),
+                    companion_system_accumulated_text: Arc::new(RwLock::new(String::new())),
+                    companion_system_current_utterance_start: Arc::new(RwLock::new(None)),
+                    companion_system_last_finalized_text: Arc::new(RwLock::new(String::new())),
                     companion_microphone_partial_text: Arc::new(RwLock::new(String::new())),
                     companion_microphone_accumulated_text: Arc::new(RwLock::new(String::new())),
                     companion_microphone_current_utterance_start: Arc::new(RwLock::new(None)),
@@ -345,6 +362,7 @@ impl AppState {
                     )),
                     companion_server_task: Arc::new(RwLock::new(None)),
                     companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
+                    companion_desktop_blackout_enabled: Arc::new(AtomicBool::new(false)),
                     companion_timeline: Arc::new(RwLock::new(Vec::new())),
                     companion_next_seq: Arc::new(AtomicU64::new(0)),
                     companion_next_stt_index: Arc::new(AtomicU64::new(0)),
@@ -353,6 +371,9 @@ impl AppState {
                     companion_conversation_generation: Arc::new(AtomicU64::new(0)),
                     companion_last_action: Arc::new(RwLock::new(None)),
                     companion_system_prompt: Arc::new(RwLock::new(String::new())),
+                    companion_system_accumulated_text: Arc::new(RwLock::new(String::new())),
+                    companion_system_current_utterance_start: Arc::new(RwLock::new(None)),
+                    companion_system_last_finalized_text: Arc::new(RwLock::new(String::new())),
                     companion_microphone_partial_text: Arc::new(RwLock::new(String::new())),
                     companion_microphone_accumulated_text: Arc::new(RwLock::new(String::new())),
                     companion_microphone_current_utterance_start: Arc::new(RwLock::new(None)),
@@ -441,6 +462,7 @@ impl AppState {
             companion_runtime: Arc::new(RwLock::new(crate::presentation::companion::new_runtime())),
             companion_server_task: Arc::new(RwLock::new(None)),
             companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
+            companion_desktop_blackout_enabled: Arc::new(AtomicBool::new(false)),
             companion_timeline: Arc::new(RwLock::new(Vec::new())),
             companion_next_seq: Arc::new(AtomicU64::new(0)),
             companion_next_stt_index: Arc::new(AtomicU64::new(0)),
@@ -449,6 +471,9 @@ impl AppState {
             companion_conversation_generation: Arc::new(AtomicU64::new(0)),
             companion_last_action: Arc::new(RwLock::new(None)),
             companion_system_prompt: Arc::new(RwLock::new(String::new())),
+            companion_system_accumulated_text: Arc::new(RwLock::new(String::new())),
+            companion_system_current_utterance_start: Arc::new(RwLock::new(None)),
+            companion_system_last_finalized_text: Arc::new(RwLock::new(String::new())),
             companion_microphone_partial_text: Arc::new(RwLock::new(String::new())),
             companion_microphone_accumulated_text: Arc::new(RwLock::new(String::new())),
             companion_microphone_current_utterance_start: Arc::new(RwLock::new(None)),

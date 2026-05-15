@@ -14,6 +14,13 @@ const MIN_LONG_EDGE = 768;
 const RESIZE_STEP = 0.82;
 const JPEG_QUALITY_STEPS = [0.92, 0.86, 0.8, 0.74, 0.68, 0.62, 0.56];
 const SUPPORTED_INPUT_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+const UNSUPPORTED_HEIC_MIME_TYPES = new Set([
+  'image/heic',
+  'image/heif',
+  'image/heic-sequence',
+  'image/heif-sequence',
+]);
+const HEIC_FILE_EXTENSION_RE = /\.(heic|heif)$/i;
 
 type PromptImageDraftOptions = {
   maxBytes?: number;
@@ -64,6 +71,25 @@ function normalizeMime(mime: string): string {
   const normalized = String(mime ?? '').trim().toLowerCase();
   if (normalized === 'image/jpg') return 'image/jpeg';
   return normalized;
+}
+
+function inferMimeFromFileName(name: string): string {
+  const normalized = String(name ?? '').trim().toLowerCase();
+  if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) return 'image/jpeg';
+  if (normalized.endsWith('.png')) return 'image/png';
+  if (normalized.endsWith('.webp')) return 'image/webp';
+  if (normalized.endsWith('.gif')) return 'image/gif';
+  if (normalized.endsWith('.heic')) return 'image/heic';
+  if (normalized.endsWith('.heif')) return 'image/heif';
+  return '';
+}
+
+function isUnsupportedHeicLikeFile(file: File, mime: string): boolean {
+  return UNSUPPORTED_HEIC_MIME_TYPES.has(mime) || HEIC_FILE_EXTENSION_RE.test(file.name);
+}
+
+function unsupportedHeicMessage(): string {
+  return 'Фото в HEIC/HEIF пока не поддерживается в веб-companion. На iPhone выбери JPEG/Most Compatible или отправь скриншот.';
 }
 
 function formatMegabytes(bytes: number): string {
@@ -271,7 +297,10 @@ export async function createPromptImageDraft(
   file: File,
   options: PromptImageDraftOptions = {},
 ): Promise<PromptImageDraft | null> {
-  const sourceMime = normalizeMime(file.type);
+  const sourceMime = normalizeMime(file.type) || inferMimeFromFileName(file.name);
+  if (isUnsupportedHeicLikeFile(file, sourceMime)) {
+    throw new Error(unsupportedHeicMessage());
+  }
   if (!sourceMime.startsWith('image/')) return null;
 
   const maxBytes = Number.isFinite(options.maxBytes) ? Number(options.maxBytes) : DEFAULT_MAX_IMAGE_BYTES;
