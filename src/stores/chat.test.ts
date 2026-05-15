@@ -317,6 +317,43 @@ describe('chat store (selection + context)', () => {
     expect(store.haikuMessages[0]?.insertAfterId).toBe(promptMsg?.id);
   });
 
+  it('manual prompt keeps prior prompt + assistant history in context', async () => {
+    transcriptionProxy.finalUtterances.push(
+      { id: 'stt:1:1:a', sessionId: 1, text: 'first setup', timestamp: 1 },
+      { id: 'stt:1:2:b', sessionId: 1, text: 'second setup', timestamp: 2 }
+    );
+    transcriptionProxy.partialText = '';
+
+    invokeMock.mockResolvedValueOnce('r101');
+    const store = useChatStore();
+
+    await store.sendPromptToLlm({ text: 'previous manual question', images: [] });
+    expect(store.haikuMessages.length).toBe(1);
+    store.haikuMessages[0] = {
+      ...store.haikuMessages[0],
+      status: 'final',
+      text: 'previous assistant answer',
+    };
+
+    invokeMock.mockResolvedValueOnce('r102');
+    await store.sendPromptToLlm({ text: 'current manual question', images: [] });
+
+    expect(invokeMock).toHaveBeenLastCalledWith(
+      'start_haiku_chat_stream',
+      expect.objectContaining({
+        contextText: [
+          'ОС: first setup',
+          'ОС: second setup',
+          'ЗАПРОС: previous manual question',
+          'ПОМОЩНИК: previous assistant answer',
+        ].join('\n'),
+        questionText: 'current manual question',
+        images: [],
+        systemPrompt: DEFAULT_PROMPT,
+      })
+    );
+  });
+
   it('includes final assistant replies in subsequent context', async () => {
     transcriptionProxy.finalUtterances.push({ id: 'stt:1:1:a', sessionId: 1, text: 'hello', timestamp: 1 });
     transcriptionProxy.partialText = '';
@@ -390,6 +427,65 @@ describe('chat store (selection + context)', () => {
     );
 
     expect(store.haikuMessages[0]?.insertAfterId).toBe('stt:1:2:b');
+  });
+
+  it('selection can answer against selected transcript + manual prompt only', async () => {
+    transcriptionProxy.finalUtterances.push(
+      { id: 'stt:1:1:a', sessionId: 1, text: 'selected transcript', timestamp: 1 },
+      { id: 'stt:1:2:b', sessionId: 1, text: 'unselected transcript', timestamp: 2 }
+    );
+    transcriptionProxy.partialText = '';
+
+    invokeMock.mockResolvedValueOnce('r210');
+    const store = useChatStore();
+    await store.sendPromptToLlm({ text: 'selected manual note', images: [] });
+
+    const promptMsg = store.messages.find((m) => m.kind === 'prompt');
+    expect(promptMsg?.id).toBeTruthy();
+
+    invokeMock.mockClear();
+    invokeMock.mockResolvedValueOnce('r211');
+    store.setSelection([promptMsg!.id, 'stt:1:1:a'], false);
+
+    await store.requestHaikuFromAnchor();
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_stream',
+      expect.objectContaining({
+        text: [
+          'ОС: selected transcript',
+          'ЗАПРОС: selected manual note',
+        ].join('\n'),
+        system_prompt: DEFAULT_PROMPT,
+        companionMeta: expect.objectContaining({
+          insertAfterId: promptMsg!.id,
+          createdAtMs: expect.any(Number),
+        }),
+      })
+    );
+  });
+
+  it('caps large transcript context without dropping the newest utterance', async () => {
+    for (let i = 0; i < 450; i++) {
+      transcriptionProxy.finalUtterances.push({
+        id: `stt:bulk:${i}`,
+        sessionId: 1,
+        text: `bulk-${String(i).padStart(3, '0')} ${'long context chunk '.repeat(4)}`,
+        timestamp: i + 1,
+      });
+    }
+    transcriptionProxy.partialText = '';
+    invokeMock.mockResolvedValue('r300');
+
+    const store = useChatStore();
+    await store.requestHaikuFromAnchor();
+
+    const payload = invokeMock.mock.calls[0]?.[1] as { text?: string } | undefined;
+    expect(payload?.text).toBeTypeOf('string');
+    expect(payload!.text!.length).toBeLessThanOrEqual(12_000);
+    expect(payload!.text).toContain('ОС: bulk-449');
+    expect(payload!.text).not.toContain('ОС: bulk-000');
+    expect(store.haikuMessages[0]?.insertAfterId).toBe('stt:bulk:449');
   });
 
   it('filters system STT utterance when it duplicates microphone utterance', async () => {
