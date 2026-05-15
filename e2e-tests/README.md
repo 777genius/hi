@@ -21,6 +21,12 @@ pnpm e2e:companion-audio
 - после прогона восстанавливает исходное app mute-состояние микрофона;
 - сохраняет диагностический JSON в `.e2e-artifacts/companion-dual-audio/`.
 
+Стресс-прогон нескольких start/stop циклов:
+
+```bash
+pnpm e2e:companion-audio -- --cycles 3 --allow-mic-miss
+```
+
 Полезный запуск против уже поднятого dev-приложения:
 
 ```bash

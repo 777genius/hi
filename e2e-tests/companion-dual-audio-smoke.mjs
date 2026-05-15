@@ -29,6 +29,7 @@ function parseArgs(argv) {
     baseUrl: process.env.COMPANION_BASE_URL || process.env.COMPANION_URL || 'http://127.0.0.1:43821',
     token: process.env.COMPANION_TOKEN || '',
     audio: [],
+    cycles: Number(process.env.COMPANION_AUDIO_CYCLES || 1),
     systemRuns: 1,
     micRuns: 1,
     gainDb: Number(process.env.COMPANION_AUDIO_GAIN_DB || 20),
@@ -56,6 +57,7 @@ function parseArgs(argv) {
     if (arg === '--base-url') options.baseUrl = next();
     else if (arg === '--token') options.token = next();
     else if (arg === '--audio') options.audio.push(next());
+    else if (arg === '--cycles') options.cycles = Number(next());
     else if (arg === '--system-runs') options.systemRuns = Number(next());
     else if (arg === '--mic-runs') options.micRuns = Number(next());
     else if (arg === '--gain-db') options.gainDb = Number(next());
@@ -77,6 +79,7 @@ function parseArgs(argv) {
   }
 
   if (options.audio.length === 0) options.audio = DEFAULT_AUDIO;
+  options.cycles = Math.max(1, Math.floor(options.cycles || 1));
   options.baseUrl = normalizeBaseUrl(options.baseUrl);
   if (!options.token) options.token = extractTokenFromUrl(process.env.COMPANION_URL || options.baseUrl) || '';
   return options;
@@ -99,6 +102,7 @@ Useful flags:
   --skip-mic                     Skip microphone phase.
   --allow-mic-miss               Keep exit code 0 when microphone speech is not detected.
   --no-restore-mic               Do not restore app microphone mute state after the run.
+  --cycles <n>                   Repeat full system/mic phase set, default 1.
   --system-runs <n>              Repeat system phase playback count.
   --mic-runs <n>                 Repeat microphone phase playback count.
   --gain-db <n>                  ffmpeg gain before afplay, default 20.
@@ -372,6 +376,7 @@ async function runRecordingPhase(options, phase, config) {
 
   return {
     phase,
+    cycle: config.cycle,
     ok: score.ok,
     timedOut: Boolean(during?.error),
     error: during?.error ? String(during.error.message || during.error) : '',
@@ -436,26 +441,30 @@ async function main() {
   const initialState = await getState(options);
 
   const results = [];
-  if (!options.skipSystem) {
-    console.log('[companion-audio] system phase: app mic muted, playing OS audio fixtures');
-    results.push(
-      await runRecordingPhase(options, 'system', {
-        audioFiles,
-        runs: options.systemRuns,
-        appMicMuted: true,
-      }),
-    );
-  }
+  for (let cycle = 1; cycle <= options.cycles; cycle += 1) {
+    if (!options.skipSystem) {
+      console.log(`[companion-audio] cycle ${cycle}/${options.cycles}: system phase, app mic muted, playing OS audio fixtures`);
+      results.push(
+        await runRecordingPhase(options, 'system', {
+          audioFiles,
+          runs: options.systemRuns,
+          appMicMuted: true,
+          cycle,
+        }),
+      );
+    }
 
-  if (!options.skipMic) {
-    console.log('[companion-audio] mic phase: app mic unmuted, playing fixtures for acoustic/loopback mic capture');
-    results.push(
-      await runRecordingPhase(options, 'mic', {
-        audioFiles,
-        runs: options.micRuns,
-        appMicMuted: false,
-      }),
-    );
+    if (!options.skipMic) {
+      console.log(`[companion-audio] cycle ${cycle}/${options.cycles}: mic phase, app mic unmuted, playing fixtures for acoustic/loopback mic capture`);
+      results.push(
+        await runRecordingPhase(options, 'mic', {
+          audioFiles,
+          runs: options.micRuns,
+          appMicMuted: false,
+          cycle,
+        }),
+      );
+    }
   }
 
   let finalState = await getState(options);
@@ -475,6 +484,7 @@ async function main() {
       baseUrl: options.baseUrl,
       audio: options.audio,
       preparedAudio: audioFiles,
+      cycles: options.cycles,
       systemRuns: options.systemRuns,
       micRuns: options.micRuns,
       gainDb: options.gainDb,
@@ -508,7 +518,7 @@ async function main() {
   for (const result of results) {
     const icon = result.ok ? '✅' : '❌';
     console.log(
-      `${icon} ${result.phase}: messages=${result.messageCount}, system=${result.systemCount}, mic=${result.micCount}, activeAfterStop=${result.recordingAfterStop?.activeSessionId}`,
+      `${icon} cycle=${result.cycle} ${result.phase}: messages=${result.messageCount}, system=${result.systemCount}, mic=${result.micCount}, activeAfterStop=${result.recordingAfterStop?.activeSessionId}`,
     );
     if (!result.ok) {
       console.log(`   reason=${result.error || 'target speech was not detected in expected channel'}`);
