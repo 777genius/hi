@@ -794,11 +794,7 @@ impl TranscriptionService {
 
         let mut config = config;
         if config.provider == SttProviderType::Backend {
-            config.keep_connection_alive = true;
-            const BACKEND_KEEPALIVE_TTL_SECS: u64 = 105;
-            if config.keep_alive_ttl_secs != BACKEND_KEEPALIVE_TTL_SECS {
-                config.keep_alive_ttl_secs = BACKEND_KEEPALIVE_TTL_SECS;
-            }
+            config.keep_connection_alive = false;
         }
 
         let config_requires_new_connection = prev_config.provider != config.provider
@@ -1061,7 +1057,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backend_config_forces_keep_alive_and_short_ttl() {
+    async fn backend_config_disables_keep_alive_for_stability() {
         let provider_aborted = Arc::new(AtomicBool::new(false));
         let service = TranscriptionService::new(
             Box::new(BurstAudioCapture::new(Arc::new(AtomicBool::new(false)), 0)),
@@ -1072,14 +1068,14 @@ mod tests {
 
         let mut config = SttConfig::default();
         config.provider = SttProviderType::Backend;
-        config.keep_connection_alive = false;
+        config.keep_connection_alive = true;
         config.keep_alive_ttl_secs = 300;
 
         service.update_config(config).await.unwrap();
 
         let stored = service.get_config().await;
-        assert!(stored.keep_connection_alive);
-        assert_eq!(stored.keep_alive_ttl_secs, 105);
+        assert!(!stored.keep_connection_alive);
+        assert_eq!(stored.keep_alive_ttl_secs, 300);
     }
 
     #[tokio::test]

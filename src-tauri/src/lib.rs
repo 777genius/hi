@@ -415,32 +415,17 @@ pub fn run() {
                     // Приоритет: пользовательские ключи (deepgram_api_key/assemblyai_api_key) → встроенные ключи
 
                     if let Some(state) = app_handle.try_state::<AppState>() {
-                        // Backend-only режим: по умолчанию держим соединение живым между сессиями записи.
-                        // TTL держим чуть ниже backend audio idle timeout, чтобы клиент закрывал idle WS
-                        // до серверного timeout и не пытался переиспользовать поток на границе закрытия.
+                        // Backend-only режим: не держим STT WebSocket живым между записями.
+                        // E2E показал, что pause/resume может принимать аудио без новых transcript events.
+                        // Для интервью надёжнее закрывать поток на stop и открывать свежий на start.
                         let mut config_migrated = false;
                         if saved_config.provider == crate::domain::SttProviderType::Backend
-                            && !saved_config.keep_connection_alive
+                            && saved_config.keep_connection_alive
                         {
-                            saved_config.keep_connection_alive = true;
+                            saved_config.keep_connection_alive = false;
                             config_migrated = true;
                             log::info!(
-                                "Enabled keep_connection_alive for backend provider by default (ttl={}s)",
-                                saved_config.keep_alive_ttl_secs
-                            );
-                        }
-
-                        // UX: keep-alive должен быть заметно полезным для частых hotkey-сессий,
-                        // но idle Deepgram streams не должны занимать concurrency slots надолго.
-                        const BACKEND_KEEPALIVE_TTL_SECS: u64 = 105;
-                        if saved_config.provider == crate::domain::SttProviderType::Backend
-                            && saved_config.keep_alive_ttl_secs != BACKEND_KEEPALIVE_TTL_SECS
-                        {
-                            saved_config.keep_alive_ttl_secs = BACKEND_KEEPALIVE_TTL_SECS;
-                            config_migrated = true;
-                            log::info!(
-                                "Migrated keep_alive_ttl_secs for backend provider to {}s",
-                                saved_config.keep_alive_ttl_secs
+                                "Disabled keep_connection_alive for backend provider for STT stability"
                             );
                         }
 

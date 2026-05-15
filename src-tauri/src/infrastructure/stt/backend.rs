@@ -1821,7 +1821,7 @@ impl SttProvider for BackendProvider {
     }
 
     fn supports_keep_alive(&self) -> bool {
-        true
+        false
     }
 
     fn is_connection_alive(&self) -> bool {
@@ -1887,6 +1887,12 @@ mod tests {
     fn test_backend_provider_supports_streaming() {
         let provider = BackendProvider::new();
         assert!(provider.supports_streaming());
+    }
+
+    #[test]
+    fn test_backend_provider_does_not_keep_alive_between_recordings() {
+        let provider = BackendProvider::new();
+        assert!(!provider.supports_keep_alive());
     }
 
     #[test]

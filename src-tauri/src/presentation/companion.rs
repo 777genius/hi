@@ -411,13 +411,6 @@ async fn persist_companion_bridge_token(token: &str) {
     }
 }
 
-pub async fn reset_session_timeline(state: &AppState) {
-    crate::presentation::companion_timeline::reset_session_state(state).await;
-    state.history.write().await.clear();
-    *state.partial_transcription.write().await = None;
-    *state.final_transcription.write().await = None;
-}
-
 pub fn current_max_seq(state: &AppState) -> u64 {
     state
         .companion_next_seq

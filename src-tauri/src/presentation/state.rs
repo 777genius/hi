@@ -569,10 +569,13 @@ impl AppState {
     /// - после загрузки auth_store на старте приложения
     /// - после любых изменений сессии (login/logout/refresh) через `set_auth_session`
     pub async fn restart_auth_refresh_task(&self, app_handle: AppHandle) {
-        // Abort previous task
-        if let Some(handle) = self.auth_refresh_task.write().await.take() {
+        let mut task_slot = self.auth_refresh_task.write().await;
+
+        // Keep the write lock until the new task is installed. Otherwise two
+        // near-simultaneous restarts can both observe an empty slot and spawn
+        // parallel refresh loops for the same rotating refresh token.
+        if let Some(handle) = task_slot.take() {
             handle.abort();
-            let _ = handle.await;
         }
 
         let store = self.auth_store.read().await.clone();
@@ -600,6 +603,7 @@ impl AppState {
         let task = tauri::async_runtime::spawn(async move {
             const REFRESH_BUFFER_MS: i64 = 2 * 60 * 1000; // 2 minutes before access expiry
             const ERROR_RETRY_DELAY_SECS: u64 = 30;
+            const RATE_LIMIT_RETRY_DELAY_SECS: u64 = 2 * 60;
 
             #[derive(serde::Serialize)]
             struct RefreshReq {
@@ -802,12 +806,23 @@ impl AppState {
                 }
 
                 if !resp.status().is_success() {
+                    let status = resp.status();
+                    let retry_delay_secs = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        resp.headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(RATE_LIMIT_RETRY_DELAY_SECS)
+                            .clamp(ERROR_RETRY_DELAY_SECS, RATE_LIMIT_RETRY_DELAY_SECS)
+                    } else {
+                        ERROR_RETRY_DELAY_SECS
+                    };
                     log::warn!(
-                        "[auth-refresh] refresh failed: status={}",
-                        resp.status().as_u16()
+                        "[auth-refresh] refresh failed: status={}, retry_in={}s",
+                        status.as_u16(),
+                        retry_delay_secs
                     );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS))
-                        .await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_secs)).await;
                     continue;
                 }
 
@@ -890,7 +905,7 @@ impl AppState {
             }
         });
 
-        *self.auth_refresh_task.write().await = Some(task);
+        *task_slot = Some(task);
     }
 
     /// Запускает обработчик VAD timeout событий (вызывается из setup)

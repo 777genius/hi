@@ -674,7 +674,8 @@ pub async fn start_recording_raw(
     state
         .active_transcription_session_id
         .store(session_id, Ordering::Relaxed);
-    crate::presentation::companion::reset_session_timeline(state).await;
+    crate::presentation::companion_timeline::clear_system_live_buffers(state).await;
+    crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
     log::info!("Recording session started: session_id={}", session_id);
 
     let (system_event_tx, mut system_event_rx) =
@@ -1580,13 +1581,9 @@ pub async fn update_stt_config(
     let _ = model;
     config.model = None;
 
-    // В backend-only режиме keep-alive полезен: это снижает latency при повторном старте записи,
-    // потому что мы переиспользуем WebSocket соединение с нашим сервером.
-    //
-    // Важно: keep-alive удерживает живые соединения в фоне. Если TTL сделать слишком большим,
-    // можно упереться в лимиты параллельных соединений (и на нашей стороне, и на стороне провайдера, например Deepgram).
-    // Поэтому по умолчанию держим включенным, но TTL оставляем коротким (см. stt_config.keep_alive_ttl_secs).
-    config.keep_connection_alive = true;
+    // Backend keep-alive deliberately stays disabled: Deepgram/Backend pause+resume is
+    // harder to make reliable than reconnecting, and transcription stability is more important.
+    config.keep_connection_alive = false;
 
     log::debug!(
         "Setting keep_connection_alive={} for provider {:?}",

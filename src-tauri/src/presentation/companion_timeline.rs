@@ -79,48 +79,6 @@ async fn prune_timeline(state: &AppState) {
     *timeline = kept;
 }
 
-pub async fn reset_session_state(state: &AppState) {
-    state.companion_next_seq.store(0, Ordering::Relaxed);
-    state.companion_next_stt_index.store(0, Ordering::Relaxed);
-    state
-        .companion_history_floor_seq
-        .store(0, Ordering::Relaxed);
-    state
-        .companion_context_floor_seq
-        .store(0, Ordering::Relaxed);
-    state
-        .companion_conversation_generation
-        .store(0, Ordering::Relaxed);
-    state
-        .companion_live_system_started_at_ms
-        .store(0, Ordering::Relaxed);
-    state
-        .companion_live_microphone_started_at_ms
-        .store(0, Ordering::Relaxed);
-    state
-        .companion_microphone_dominant_until_ms
-        .store(0, Ordering::Relaxed);
-    state
-        .companion_system_audio_level_bits
-        .store(0.0f32.to_bits(), Ordering::Relaxed);
-    state
-        .companion_microphone_audio_level_bits
-        .store(0.0f32.to_bits(), Ordering::Relaxed);
-    *state.companion_system_accumulated_text.write().await = String::new();
-    *state.companion_system_current_utterance_start.write().await = None;
-    *state.companion_system_last_finalized_text.write().await = String::new();
-    *state.companion_last_action.write().await = None;
-    *state.companion_microphone_partial_text.write().await = String::new();
-    *state.companion_microphone_accumulated_text.write().await = String::new();
-    *state
-        .companion_microphone_current_utterance_start
-        .write()
-        .await = None;
-    *state.companion_microphone_last_finalized_text.write().await = String::new();
-    state.companion_request_generations.write().await.clear();
-    state.companion_timeline.write().await.clear();
-}
-
 pub async fn clear_system_live_buffers(state: &AppState) {
     *state.partial_transcription.write().await = None;
     *state.companion_system_accumulated_text.write().await = String::new();
