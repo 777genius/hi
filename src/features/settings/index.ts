@@ -34,7 +34,6 @@ export { default as WhisperSection } from './presentation/components/sections/Wh
 export { default as ThemeSection } from './presentation/components/sections/ThemeSection.vue';
 export { default as HotkeySection } from './presentation/components/sections/HotkeySection.vue';
 export { default as SensitivitySection } from './presentation/components/sections/SensitivitySection.vue';
-export { default as AutoActionsSection } from './presentation/components/sections/AutoActionsSection.vue';
 export { default as AudioDeviceSection } from './presentation/components/sections/AudioDeviceSection.vue';
 export { default as MicTestSection } from './presentation/components/sections/MicTestSection.vue';
 export { default as UpdatesSection } from './presentation/components/sections/UpdatesSection.vue';
