@@ -618,6 +618,18 @@ export const useChatStore = defineStore('chat', () => {
     return contextClearedAtMs.value > 0 && msg.createdAtMs <= contextClearedAtMs.value;
   }
 
+  function trimContextText(text: string): string {
+    const t = String(text ?? '').trim();
+    if (t.length <= MAX_CONTEXT_CHARS) return t;
+
+    const tail = t.slice(t.length - MAX_CONTEXT_CHARS);
+    const firstLineBreak = tail.indexOf('\n');
+    if (firstLineBreak >= 0 && firstLineBreak < tail.length - 1) {
+      return tail.slice(firstLineBreak + 1).trim();
+    }
+    return tail.trim();
+  }
+
   function buildHaikuContextText(): string {
     const parts: string[] = [];
 
@@ -641,9 +653,7 @@ export const useChatStore = defineStore('chat', () => {
         if (line) parts.push(line);
       }
 
-      let text = parts.join('\n').trim();
-      if (text.length > MAX_CONTEXT_CHARS) text = text.slice(text.length - MAX_CONTEXT_CHARS);
-      return text;
+      return trimContextText(parts.join('\n'));
     }
 
     // Если ничего не выделено — отправляем весь контекст (в порядке чата).
@@ -655,9 +665,7 @@ export const useChatStore = defineStore('chat', () => {
       if (line) parts.push(line);
     }
 
-    let text = parts.join('\n').trim();
-    if (text.length > MAX_CONTEXT_CHARS) text = text.slice(text.length - MAX_CONTEXT_CHARS);
-    return text;
+    return trimContextText(parts.join('\n'));
   }
 
   function buildHaikuContextTextIgnoringSelection(): string {
@@ -681,9 +689,7 @@ export const useChatStore = defineStore('chat', () => {
       if (line) parts.push(line);
     }
 
-    let text = parts.join('\n').trim();
-    if (text.length > MAX_CONTEXT_CHARS) text = text.slice(text.length - MAX_CONTEXT_CHARS);
-    return text;
+    return trimContextText(parts.join('\n'));
   }
 
   function buildHaikuContextTextFullHistory(): string {
@@ -706,9 +712,7 @@ export const useChatStore = defineStore('chat', () => {
       if (line) parts.push(line);
     }
 
-    let text = parts.join('\n').trim();
-    if (text.length > MAX_CONTEXT_CHARS) text = text.slice(text.length - MAX_CONTEXT_CHARS);
-    return text;
+    return trimContextText(parts.join('\n'));
   }
 
   function resolveInsertAfterId(): string | undefined {

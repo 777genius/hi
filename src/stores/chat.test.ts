@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useChatStore } from './chat';
 import { reactive } from 'vue';
+import type { CompanionSnapshotData } from '@/windowing/stateSync';
 
 const DEFAULT_PROMPT = `Ты — ассистент на техническом собеседовании. Отвечай по-русски.
 
@@ -64,6 +65,31 @@ vi.mock('../utils/tauri', () => ({
 vi.mock('./transcription', () => ({
   useTranscriptionStore: () => transcriptionProxy,
 }));
+
+function companionSnapshot(timeline: CompanionSnapshotData['timeline'] = []): CompanionSnapshotData {
+  return {
+    authRequired: false,
+    recording: {
+      status: 'Idle',
+      activeSessionId: 0,
+    },
+    microphone: {
+      muted: false,
+      enabled: true,
+      supported: true,
+      source: 'combined',
+    },
+    controls: {
+      historyFloorSeq: 0,
+      contextFloorSeq: 0,
+      conversationGeneration: 0,
+      companionModeEnabled: true,
+      lastAction: null,
+    },
+    live: {},
+    timeline,
+  };
+}
 
 describe('chat store (selection + context)', () => {
   beforeEach(() => {
@@ -229,27 +255,8 @@ describe('chat store (selection + context)', () => {
     const store = useChatStore();
     store.setSelection(['stt:1:2:b'], false);
 
-    store.hydrateFromCompanionSnapshot({
-      authRequired: false,
-      recording: {
-        status: 'Idle',
-        activeSessionId: 0,
-      },
-      microphone: {
-        muted: false,
-        enabled: true,
-        supported: true,
-        source: 'combined',
-      },
-      controls: {
-        historyFloorSeq: 0,
-        contextFloorSeq: 0,
-        conversationGeneration: 0,
-        companionModeEnabled: true,
-        lastAction: null,
-      },
-      live: {},
-      timeline: [
+    store.hydrateFromCompanionSnapshot(
+      companionSnapshot([
         {
           id: 'prompt:1',
           kind: 'prompt',
@@ -260,8 +267,8 @@ describe('chat store (selection + context)', () => {
           seq: 3,
           attachments: [],
         },
-      ],
-    });
+      ])
+    );
 
     expect(store.companionModeEnabled).toBe(true);
     expect(store.selectedMessageIds).toEqual(['stt:1:2:b']);
@@ -354,6 +361,98 @@ describe('chat store (selection + context)', () => {
     );
   });
 
+  it('manual prompt context respects clearLlmContext for old transcript, mic, prompt and assistant messages', async () => {
+    transcriptionProxy.finalUtterances.push({ id: 'stt:old', sessionId: 1, text: 'old transcript', timestamp: 1 });
+
+    const store = useChatStore();
+    store.hydrateFromCompanionSnapshot(
+      companionSnapshot([
+        {
+          id: 'mic:old',
+          kind: 'mic',
+          role: 'outgoing',
+          status: 'final',
+          text: 'old mic',
+          createdAtMs: 2,
+          seq: 2,
+          attachments: [],
+        },
+        {
+          id: 'prompt:old',
+          kind: 'prompt',
+          role: 'outgoing',
+          status: 'final',
+          text: 'old prompt',
+          createdAtMs: 3,
+          seq: 3,
+          attachments: [],
+        },
+        {
+          id: 'haiku:old',
+          kind: 'haiku',
+          role: 'outgoing',
+          status: 'final',
+          text: 'old answer',
+          createdAtMs: 4,
+          seq: 4,
+          insertAfterId: 'prompt:old',
+          attachments: [],
+        },
+      ])
+    );
+
+    store.clearLlmContext();
+    transcriptionProxy.finalUtterances.push({ id: 'stt:new', sessionId: 1, text: 'new transcript', timestamp: 5 });
+    invokeMock.mockResolvedValue('r103');
+
+    await store.sendPromptToLlm({ text: 'new manual question', images: [] });
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_chat_stream',
+      expect.objectContaining({
+        contextText: 'ОС: new transcript',
+        questionText: 'new manual question',
+      })
+    );
+  });
+
+  it('manual prompt forwards image payload and stores local image attachment', async () => {
+    transcriptionProxy.finalUtterances.push({ id: 'stt:1:1:a', sessionId: 1, text: 'look at this', timestamp: 1 });
+    invokeMock.mockResolvedValue('r104');
+
+    const store = useChatStore();
+    await store.sendPromptToLlm({
+      text: 'what is on image?',
+      images: [
+        {
+          id: 'img:1',
+          mime: 'image/png',
+          dataUrl: 'data:image/png;base64,AAA=',
+          dataBase64: 'AAA=',
+        },
+      ],
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_chat_stream',
+      expect.objectContaining({
+        contextText: 'ОС: look at this',
+        questionText: 'what is on image?',
+        images: [{ mediaType: 'image/png', dataBase64: 'AAA=' }],
+      })
+    );
+
+    const promptMsg = store.messages.find((m) => m.kind === 'prompt');
+    expect(promptMsg?.attachments).toEqual([
+      {
+        id: 'img:1',
+        kind: 'image',
+        mime: 'image/png',
+        dataUrl: 'data:image/png;base64,AAA=',
+      },
+    ]);
+  });
+
   it('includes final assistant replies in subsequent context', async () => {
     transcriptionProxy.finalUtterances.push({ id: 'stt:1:1:a', sessionId: 1, text: 'hello', timestamp: 1 });
     transcriptionProxy.partialText = '';
@@ -429,6 +528,68 @@ describe('chat store (selection + context)', () => {
     expect(store.haikuMessages[0]?.insertAfterId).toBe('stt:1:2:b');
   });
 
+  it('replyToMessageWithAi sends full history even after context clear', async () => {
+    transcriptionProxy.finalUtterances.push({ id: 'stt:old', sessionId: 1, text: 'old transcript', timestamp: 1 });
+
+    const store = useChatStore();
+    store.hydrateFromCompanionSnapshot(
+      companionSnapshot([
+        {
+          id: 'mic:old',
+          kind: 'mic',
+          role: 'outgoing',
+          status: 'final',
+          text: 'old mic',
+          createdAtMs: 2,
+          seq: 2,
+          attachments: [],
+        },
+        {
+          id: 'prompt:old',
+          kind: 'prompt',
+          role: 'outgoing',
+          status: 'final',
+          text: 'old prompt',
+          createdAtMs: 3,
+          seq: 3,
+          attachments: [],
+        },
+        {
+          id: 'haiku:old',
+          kind: 'haiku',
+          role: 'outgoing',
+          status: 'final',
+          text: 'old answer',
+          createdAtMs: 4,
+          seq: 4,
+          insertAfterId: 'prompt:old',
+          attachments: [],
+        },
+      ])
+    );
+    store.clearLlmContext();
+    invokeMock.mockResolvedValue('r201');
+
+    await store.replyToMessageWithAi('prompt:old');
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_chat_stream',
+      expect.objectContaining({
+        contextText: [
+          'ОС: old transcript',
+          'МИКРОФОН: old mic',
+          'ЗАПРОС: old prompt',
+          'ПОМОЩНИК: old answer',
+        ].join('\n'),
+        questionText: 'old prompt',
+        images: [],
+        companionMeta: expect.objectContaining({
+          insertAfterId: 'prompt:old',
+        }),
+      })
+    );
+  });
+
   it('selection can answer against selected transcript + manual prompt only', async () => {
     transcriptionProxy.finalUtterances.push(
       { id: 'stt:1:1:a', sessionId: 1, text: 'selected transcript', timestamp: 1 },
@@ -465,6 +626,85 @@ describe('chat store (selection + context)', () => {
     );
   });
 
+  it('selection can explicitly use an old message after clearLlmContext', async () => {
+    transcriptionProxy.finalUtterances.push(
+      { id: 'stt:old', sessionId: 1, text: 'old selected question', timestamp: 1 },
+      { id: 'stt:new', sessionId: 1, text: 'new unselected question', timestamp: 2 }
+    );
+    invokeMock.mockResolvedValue('r212');
+
+    const store = useChatStore();
+    store.clearLlmContext();
+    store.setSelection(['stt:old'], false);
+
+    await store.requestHaikuFromAnchor();
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_stream',
+      expect.objectContaining({
+        text: 'ОС: old selected question',
+        companionMeta: expect.objectContaining({
+          insertAfterId: 'stt:old',
+        }),
+      })
+    );
+  });
+
+  it('does not include unfinished, errored or deleted assistant messages in context', async () => {
+    transcriptionProxy.finalUtterances.push({ id: 'stt:1:1:a', sessionId: 1, text: 'base question', timestamp: 1 });
+    invokeMock.mockResolvedValue('r213');
+
+    const store = useChatStore();
+    store.haikuMessages.push(
+      {
+        id: 'haiku:streaming',
+        kind: 'haiku',
+        role: 'outgoing',
+        status: 'streaming',
+        text: 'unfinished answer',
+        createdAtMs: 2,
+        seq: 2,
+      },
+      {
+        id: 'haiku:error',
+        kind: 'haiku',
+        role: 'outgoing',
+        status: 'error',
+        text: 'failed answer',
+        createdAtMs: 3,
+        seq: 3,
+      },
+      {
+        id: 'haiku:deleted',
+        kind: 'haiku',
+        role: 'outgoing',
+        status: 'final',
+        text: 'deleted answer',
+        createdAtMs: 4,
+        seq: 4,
+        deleted: true,
+      },
+      {
+        id: 'haiku:final',
+        kind: 'haiku',
+        role: 'outgoing',
+        status: 'final',
+        text: 'usable answer',
+        createdAtMs: 5,
+        seq: 5,
+      }
+    );
+
+    await store.requestHaikuFromAnchor();
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_stream',
+      expect.objectContaining({
+        text: ['ОС: base question', 'ПОМОЩНИК: usable answer'].join('\n'),
+      })
+    );
+  });
+
   it('caps large transcript context without dropping the newest utterance', async () => {
     for (let i = 0; i < 450; i++) {
       transcriptionProxy.finalUtterances.push({
@@ -483,6 +723,7 @@ describe('chat store (selection + context)', () => {
     const payload = invokeMock.mock.calls[0]?.[1] as { text?: string } | undefined;
     expect(payload?.text).toBeTypeOf('string');
     expect(payload!.text!.length).toBeLessThanOrEqual(12_000);
+    expect(payload!.text).toMatch(/^ОС: bulk-\d{3}/);
     expect(payload!.text).toContain('ОС: bulk-449');
     expect(payload!.text).not.toContain('ОС: bulk-000');
     expect(store.haikuMessages[0]?.insertAfterId).toBe('stt:bulk:449');

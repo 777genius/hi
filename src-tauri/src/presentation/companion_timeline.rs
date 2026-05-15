@@ -10,6 +10,7 @@ const CROSS_STREAM_DEDUP_WINDOW_MS: i64 = 8_000;
 const CROSS_STREAM_DEDUP_RECENT_LIMIT: usize = 6;
 const MIC_DOMINANCE_HOLD_MS: u64 = 1_200;
 const MIC_SYSTEM_LOOKBACK_MS: i64 = 20_000;
+const MAX_CONTEXT_CHARS: usize = 12_000;
 
 #[derive(Debug, Clone, Default)]
 pub struct CompanionPromptDraft {
@@ -1196,11 +1197,7 @@ pub async fn build_context_text(state: &AppState, include_full_history: bool) ->
         parts.push(format!("МИКРОФОН: {}", text));
     }
 
-    let mut text = parts.join("\n").trim().to_string();
-    if text.len() > 12_000 {
-        text = text[text.len() - 12_000..].to_string();
-    }
-    text
+    trim_context_text(&parts.join("\n"))
 }
 
 fn format_context_line(kind: &str, text: &str) -> String {
@@ -1215,6 +1212,30 @@ fn format_context_line(kind: &str, text: &str) -> String {
         "haiku" => format!("ПОМОЩНИК: {}", trimmed),
         _ => trimmed.to_string(),
     }
+}
+
+fn trim_context_text(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_CONTEXT_CHARS {
+        return trimmed.to_string();
+    }
+
+    let tail = trimmed
+        .chars()
+        .rev()
+        .take(MAX_CONTEXT_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+
+    if let Some(first_line_break) = tail.find('\n') {
+        if first_line_break < tail.len().saturating_sub(1) {
+            return tail[first_line_break + 1..].trim().to_string();
+        }
+    }
+
+    tail.trim().to_string()
 }
 
 pub async fn resolve_insert_after_id(state: &AppState) -> Option<String> {
@@ -1560,6 +1581,27 @@ mod tests {
         assert!(context.contains("ЗАПРОС: уточни"));
         assert!(context.contains("ПОМОЩНИК: ответ"));
         assert!(context.contains("ОС: live follow-up"));
+    }
+
+    #[tokio::test]
+    async fn build_context_text_trims_large_unicode_context_on_line_boundary() {
+        let state = AppState::default();
+
+        for idx in 0..500 {
+            append_system_final(
+                &state,
+                1,
+                &test_transcription(&format!("сообщение {:03} {}", idx, "ж".repeat(32)), idx),
+            )
+            .await;
+        }
+
+        let context = build_context_text(&state, false).await;
+
+        assert!(context.chars().count() <= MAX_CONTEXT_CHARS);
+        assert!(context.starts_with("ОС: сообщение"));
+        assert!(context.contains("ОС: сообщение 499"));
+        assert!(!context.contains("ОС: сообщение 000"));
     }
 
     #[tokio::test]
