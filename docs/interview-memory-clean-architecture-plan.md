@@ -11,7 +11,8 @@ Implemented baseline:
 - deterministic ingest, keyword/entity retrieval and strict context packing without embeddings or external extractors;
 - Tauri bridge for final system audio, microphone, focus-copy, manual prompts and final AI answers;
 - desktop `ActiveContext` bridge is opt-in only and falls back to local context on timeout, auth miss or backend error.
-- clear context/history rotates the desktop memory session and sends a best-effort backend delete for the previous session.
+- clear context/history rotates the desktop memory session and sends a best-effort backend delete for the previous session;
+- backend delete/status responses expose chunk/fact/job counts for canary and E2E verification.
 
 Not yet promoted to default:
 
@@ -2673,7 +2674,7 @@ Before implementation, define an OpenAPI or equivalent machine-readable contract
 
 - ingest;
 - ingest-batch;
-- build-context;
+- context build;
 - session status;
 - delete session;
 - debug artifact fetch if added.
@@ -2786,12 +2787,13 @@ Response:
 
 ```json
 {
-  "deletedChunks": 124,
-  "deletedFacts": 37,
-  "deletedEmbeddings": 102,
-  "deletedJobs": 5
+  "deleted_chunks": 124,
+  "deleted_facts": 37,
+  "deleted_jobs": 5
 }
 ```
+
+When embeddings are implemented as a separate table, add `deleted_embeddings`. V1 without embeddings must still expose chunk/fact/job counts.
 
 This is required before production enablement.
 
@@ -2807,16 +2809,14 @@ Response:
 
 ```json
 {
-  "mode": "ShadowRetrieve",
   "chunks": 142,
-  "embeddedChunks": 118,
-  "pendingEmbeddingJobs": 6,
-  "pendingExtractionJobs": 0,
-  "lastIngestAt": "2026-05-15T10:00:00Z",
-  "lastRetrievalAt": "2026-05-15T10:01:00Z",
-  "lastFallback": null
+  "facts": 15,
+  "jobs": 6,
+  "pending_jobs": 6
 }
 ```
+
+Debug-only status can later include mode, embedded chunks, last ingest/retrieval timestamps and fallback state. V1 must not invent fields that are not backed by data.
 
 This endpoint must be user/session scoped.
 
@@ -3467,7 +3467,7 @@ Tauri prompt request
 
 If prompt still happens inside Tauri for some modes:
 
-- Tauri can call backend `debug_context/build`;
+- Tauri can call backend `/api/v1/interview-memory/context`;
 - fallback to minimal local current-session context if backend unavailable.
 
 The fallback is not a replacement memory system. It should cover current request, selected messages, recent timeline and current code only.
