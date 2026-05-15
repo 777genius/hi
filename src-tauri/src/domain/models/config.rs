@@ -175,6 +175,11 @@ pub struct AppConfig {
     pub max_history_items: usize,
 }
 
+impl AppConfig {
+    pub const DEFAULT_MAX_HISTORY_ITEMS: usize = 200;
+    pub const LEGACY_MAX_HISTORY_ITEMS: usize = 20;
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -189,7 +194,7 @@ impl Default for AppConfig {
             selected_output_audio_device: None,
             companion_access_token: None,
             keep_history: true,
-            max_history_items: 20,
+            max_history_items: Self::DEFAULT_MAX_HISTORY_ITEMS,
         }
     }
 }
@@ -279,7 +284,10 @@ mod tests {
         assert_eq!(config.vad_silence_timeout_ms, 3000);
         assert_eq!(config.microphone_sensitivity, 95);
         assert!(config.keep_history);
-        assert_eq!(config.max_history_items, 20);
+        assert_eq!(
+            config.max_history_items,
+            AppConfig::DEFAULT_MAX_HISTORY_ITEMS
+        );
     }
 
     #[test]

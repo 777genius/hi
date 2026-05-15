@@ -10,7 +10,7 @@ const CROSS_STREAM_DEDUP_WINDOW_MS: i64 = 8_000;
 const CROSS_STREAM_DEDUP_RECENT_LIMIT: usize = 6;
 const MIC_DOMINANCE_HOLD_MS: u64 = 1_200;
 const MIC_SYSTEM_LOOKBACK_MS: i64 = 20_000;
-const MAX_CONTEXT_CHARS: usize = 12_000;
+const MAX_CONTEXT_CHARS: usize = 48_000;
 
 #[derive(Debug, Clone, Default)]
 pub struct CompanionPromptDraft {
@@ -1613,6 +1613,41 @@ mod tests {
         assert!(context.starts_with("ОС: сообщение"));
         assert!(context.contains("ОС: сообщение 499"));
         assert!(!context.contains("ОС: сообщение 000"));
+    }
+
+    #[tokio::test]
+    async fn build_context_text_keeps_early_code_marker_in_long_interview_context() {
+        let state = AppState::default();
+
+        append_focus_copy_system_final(
+            &state,
+            format!(
+                "CODE-JS-ORDER-MAP-001\nfunction totals(orders) {{}}\n{}",
+                "x".repeat(2_000)
+            ),
+            100,
+            Some("focus-copy:early-code".to_string()),
+        )
+        .await
+        .expect("early focus-copy message");
+
+        for idx in 0..120 {
+            append_system_final(
+                &state,
+                1,
+                &test_transcription(
+                    &format!("FOLLOW-UP-{idx:03} {}", "ж".repeat(180)),
+                    200 + idx,
+                ),
+            )
+            .await;
+        }
+
+        let context = build_context_text(&state, false).await;
+
+        assert!(context.chars().count() <= MAX_CONTEXT_CHARS);
+        assert!(context.contains("CODE-JS-ORDER-MAP-001"));
+        assert!(context.contains("FOLLOW-UP-119"));
     }
 
     #[tokio::test]

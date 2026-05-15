@@ -133,6 +133,16 @@ impl ConfigStore {
         config.auto_copy_to_clipboard = false;
         config.auto_paste_text = false;
 
+        if config.max_history_items <= AppConfig::LEGACY_MAX_HISTORY_ITEMS {
+            let previous_max_history_items = config.max_history_items;
+            config.max_history_items = AppConfig::DEFAULT_MAX_HISTORY_ITEMS;
+            log::info!(
+                "Migrated max_history_items from {} to {}",
+                previous_max_history_items,
+                config.max_history_items
+            );
+        }
+
         log::info!("App config loaded from disk");
         Ok(config)
     }
@@ -273,6 +283,25 @@ mod tests {
         assert_eq!(
             loaded.companion_access_token.as_deref(),
             Some("stable-token")
+        );
+
+        ConfigStore::delete_app_config().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_load_app_config_migrates_legacy_history_limit() {
+        let _ = ConfigStore::delete_app_config().await;
+
+        let mut config = AppConfig::default();
+        config.max_history_items = AppConfig::LEGACY_MAX_HISTORY_ITEMS;
+
+        ConfigStore::save_app_config(&config).await.unwrap();
+        let loaded = ConfigStore::load_app_config().await.unwrap();
+
+        assert_eq!(
+            loaded.max_history_items,
+            AppConfig::DEFAULT_MAX_HISTORY_ITEMS
         );
 
         ConfigStore::delete_app_config().await.unwrap();
