@@ -766,10 +766,19 @@ fn derive_stream_current_request(
     local_context: &str,
     evidence: &StructuredContextEvidence,
 ) -> String {
-    if let Some(item) =
-        evidence.recent_timeline.iter().rev().find(|item| {
-            !matches!(item.label.as_str(), "assistant") && !item.text.trim().is_empty()
-        })
+    if let Some(item) = latest_non_empty_non_assistant_evidence(&evidence.selected_messages) {
+        return trim_text_tail_to_line(&item.text, 4_000);
+    }
+
+    if let Some(item) = latest_non_empty_non_assistant_evidence(&evidence.recent_timeline) {
+        return trim_text_tail_to_line(&item.text, 4_000);
+    }
+
+    if let Some(item) = evidence
+        .current_code
+        .iter()
+        .rev()
+        .find(|item| !item.text.trim().is_empty())
     {
         return trim_text_tail_to_line(&item.text, 4_000);
     }
@@ -779,6 +788,15 @@ fn derive_stream_current_request(
     }
 
     minimal_current_session_fallback_context(local_context)
+}
+
+fn latest_non_empty_non_assistant_evidence(
+    items: &[RequestEvidenceDto],
+) -> Option<&RequestEvidenceDto> {
+    items
+        .iter()
+        .rev()
+        .find(|item| !matches!(item.label.as_str(), "assistant") && !item.text.trim().is_empty())
 }
 
 fn source_to_backend(source: MemoryTimelineSource) -> &'static str {
@@ -1160,6 +1178,48 @@ mod tests {
         assert_eq!(request.current_code.len(), 1);
         assert!(request.current_code[0].text.contains("debounceSearch"));
         assert_eq!(request.recent_timeline.len(), 1);
+    }
+
+    #[test]
+    fn stream_context_request_prefers_selected_message_as_current_request() {
+        let input = MemoryContextEvidenceInput {
+            selected_messages: vec![MemoryRequestEvidenceInput {
+                id: Some("stt:selected".to_string()),
+                label: Some("system_audio".to_string()),
+                text: "selected interview question".to_string(),
+            }],
+            current_code: vec![],
+            recent_timeline: vec![MemoryRequestEvidenceInput {
+                id: Some("stt:tail".to_string()),
+                label: Some("system_audio".to_string()),
+                text: "unselected tail question".to_string(),
+            }],
+        };
+
+        let request =
+            build_stream_context_request(Uuid::new_v4(), "ОС: fallback".to_string(), Some(&input));
+
+        assert_eq!(request.current_request.text, "selected interview question");
+        assert_eq!(request.selected_messages.len(), 1);
+    }
+
+    #[test]
+    fn stream_context_request_uses_current_code_when_no_speech_evidence_exists() {
+        let input = MemoryContextEvidenceInput {
+            selected_messages: vec![],
+            current_code: vec![MemoryRequestEvidenceInput {
+                id: Some("focus-copy:code".to_string()),
+                label: Some("current_code".to_string()),
+                text: "function onlyCodeQuestion() { return queue.shift(); }".to_string(),
+            }],
+            recent_timeline: vec![],
+        };
+
+        let request =
+            build_stream_context_request(Uuid::new_v4(), "ОС: fallback".to_string(), Some(&input));
+
+        assert!(request.current_request.text.contains("onlyCodeQuestion"));
+        assert_eq!(request.current_code.len(), 1);
     }
 
     #[test]
