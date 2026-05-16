@@ -20,6 +20,7 @@ Implemented baseline:
 - legacy local anchor fallback is shrunk for `ActiveContext`: memory requests and memory-failure chat fallback now use a compact recent/current tail instead of a second full-history anchor packer.
 - desktop bridge resolves `INTERVIEW_MEMORY_MODE` into explicit modes (`Disabled`, `ShadowIngest`, `ShadowRetrieve`, `AssistiveContext`, `ActiveContext`, `LocalOnly`) with `INTERVIEW_MEMORY_FORCE_DISABLED` as the top kill switch, `INTERVIEW_MEMORY_FORCE_LOCAL_ONLY` avoiding backend memory calls, and legacy `INTERVIEW_MEMORY_ENABLED=1` mapped to `ActiveContext`.
 - companion `/api/state` exposes a production-safe memory snapshot with resolved mode, backend/local capabilities and session id, without raw retrieved text or prompt artifacts.
+- backend application ports now include an `EmbeddingProvider` contract and infrastructure exposes `NoopEmbeddingAdapter` with adapter contract tests; V1 remains keyword/entity-only by default and does not call external embedding providers.
 
 Not yet promoted to default:
 
