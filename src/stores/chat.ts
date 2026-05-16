@@ -22,7 +22,10 @@ import {
   type PartialTranscriptionPayload,
 } from '../types';
 import { appendTranscriptText, mergeTranscriptText } from '../utils/transcriptionText';
-import { trimContextParts, type ContextRetentionPart } from '@/presentation/contextRetention';
+import {
+  selectContextParts,
+  type ContextRetentionPart,
+} from '@/presentation/contextRetention';
 import { useTranscriptionStore } from './transcription';
 
 type ChatMessageKind = 'stt' | 'haiku' | 'mic' | 'prompt';
@@ -75,6 +78,11 @@ type MemoryContextEvidencePayload = {
   selectedMessages: MemoryRequestEvidencePayload[];
   currentCode: MemoryRequestEvidencePayload[];
   recentTimeline: MemoryRequestEvidencePayload[];
+};
+
+type ChatContextRetentionPart = ContextRetentionPart & {
+  id: string;
+  kind: ChatMessageKind;
 };
 
 const MIN_HOVER_TRIGGER_MS = 800;
@@ -392,85 +400,26 @@ export const useChatStore = defineStore('chat', () => {
     return text;
   }
 
-  function parseContextPrefix(line: string): { label: string; text: string } | null {
-    const trimmed = String(line ?? '').trimStart();
-    const prefixes: Array<[string, string]> = [
-      ['ОС:', 'system_audio'],
-      ['МИКРОФОН:', 'microphone'],
-      ['ЗАПРОС:', 'manual_prompt'],
-      ['ПОМОЩНИК:', 'assistant'],
-    ];
+  function memoryLabelForMessageKind(kind: ChatMessageKind): string {
+    if (kind === 'stt') return 'system_audio';
+    if (kind === 'mic') return 'microphone';
+    if (kind === 'prompt') return 'manual_prompt';
+    if (kind === 'haiku') return 'assistant';
+    return 'recent_timeline';
+  }
 
-    for (const [prefix, label] of prefixes) {
+  function contextLineEvidenceText(line: string): string {
+    const trimmed = String(line ?? '').trim();
+    for (const prefix of ['ОС:', 'МИКРОФОН:', 'ЗАПРОС:', 'ПОМОЩНИК:']) {
       if (trimmed.startsWith(prefix)) {
-        return { label, text: trimmed.slice(prefix.length).trimStart() };
+        return trimmed.slice(prefix.length).trimStart();
       }
     }
-    return null;
+    return trimmed;
   }
 
-  function splitContextBlocks(contextText: string): Array<{ label: string; text: string }> {
-    const blocks: Array<{ label: string; text: string }> = [];
-    let currentLabel = 'recent_timeline';
-    let currentText = '';
-
-    function flush(): void {
-      const text = currentText.trim();
-      if (text) blocks.push({ label: currentLabel, text });
-      currentText = '';
-    }
-
-    for (const line of String(contextText ?? '').split('\n')) {
-      const prefixed = parseContextPrefix(line);
-      if (prefixed) {
-        flush();
-        currentLabel = prefixed.label;
-        currentText = prefixed.text;
-        continue;
-      }
-
-      currentText += currentText ? `\n${line}` : line;
-    }
-
-    flush();
-    return blocks;
-  }
-
-  function textLooksLikeCurrentCode(text: string): boolean {
-    const raw = String(text ?? '');
-    if (raw.includes('```')) return true;
-
-    const lower = String(text ?? '').toLowerCase();
-    if (lower.includes('select ') && lower.includes(' from ')) return true;
-
-    const hasCodePunctuation =
-      raw.includes('{') ||
-      raw.includes(';') ||
-      raw.includes('=>') ||
-      raw.includes('=') ||
-      raw.includes('()') ||
-      /\w+\s*\([^)]*\)\s*[:{]/.test(raw);
-    if (!hasCodePunctuation) return false;
-
-    return [
-      'function ',
-      'class ',
-      'interface ',
-      'struct ',
-      'impl ',
-      'const ',
-      'let ',
-      'var ',
-      'def ',
-      'func ',
-      'export ',
-      'import ',
-      'type ',
-    ].some((marker) => lower.includes(marker));
-  }
-
-  function buildMemoryContextEvidence(
-    contextText: string,
+  function buildMemoryContextEvidenceFromParts(
+    parts: readonly ChatContextRetentionPart[],
     options: { selectedOnly?: boolean } = {}
   ): MemoryContextEvidencePayload {
     const evidence: MemoryContextEvidencePayload = {
@@ -479,34 +428,31 @@ export const useChatStore = defineStore('chat', () => {
       recentTimeline: [],
     };
 
-    splitContextBlocks(contextText).forEach((block, index) => {
-      const text = block.text.trim();
-      if (!text) return;
+    for (const part of parts) {
+      const text = contextLineEvidenceText(part.line);
+      if (!text) continue;
 
-      if (textLooksLikeCurrentCode(text)) {
+      if (part.id.startsWith('focus-copy:')) {
         evidence.currentCode.push({
-          id: `context-code:${index + 1}`,
+          id: part.id,
           label: 'current_code',
           text,
         });
-        return;
+        continue;
       }
+
+      const item = {
+        id: part.id,
+        label: memoryLabelForMessageKind(part.kind),
+        text,
+      };
 
       if (options.selectedOnly) {
-        evidence.selectedMessages.push({
-          id: `selected-context:${index + 1}`,
-          label: block.label === 'recent_timeline' ? 'selected_message' : block.label,
-          text,
-        });
-        return;
+        evidence.selectedMessages.push(item);
+      } else {
+        evidence.recentTimeline.push(item);
       }
-
-      evidence.recentTimeline.push({
-        id: `recent-context:${index + 1}`,
-        label: block.label,
-        text,
-      });
-    });
+    }
 
     return evidence;
   }
@@ -838,59 +784,58 @@ export const useChatStore = defineStore('chat', () => {
     return contextClearedAtMs.value > 0 && msg.createdAtMs <= contextClearedAtMs.value;
   }
 
-  function buildHaikuContextText(): string {
-    const parts: ContextRetentionPart[] = [];
+  function messageToContextPart(message: ChatMessage): ChatContextRetentionPart | null {
+    const line = formatMessageForContext(message);
+    if (!line) return null;
+    return {
+      id: message.id,
+      kind: message.kind,
+      line,
+    };
+  }
 
-    if (hasSelection.value) {
+  function buildHaikuContext(options: {
+    selectionMode?: 'respect' | 'ignore';
+    includeFullHistory?: boolean;
+  } = {}): { text: string; parts: ChatContextRetentionPart[] } {
+    const parts: ChatContextRetentionPart[] = [];
+    const selectionMode = options.selectionMode ?? 'respect';
+
+    if (selectionMode === 'respect' && hasSelection.value) {
       const selected = selectedSet.value;
       for (const msg of messages.value) {
         if (!selected.has(msg.id)) continue;
         if (msg.deleted) continue;
         if (msg.kind === 'haiku' && msg.status !== 'final') continue;
-        const line = formatMessageForContext(msg);
-        if (line) parts.push({ kind: msg.kind, line });
+        const part = messageToContextPart(msg);
+        if (part) parts.push(part);
       }
 
-      return trimContextParts(parts);
+      const selectedParts = selectContextParts(parts);
+      return {
+        text: selectedParts.map((part) => part.line).join('\n'),
+        parts: selectedParts,
+      };
     }
 
     // Если ничего не выделено — отправляем весь контекст (в порядке чата).
     for (const msg of messages.value) {
       if (msg.deleted) continue;
       if (msg.kind === 'haiku' && msg.status !== 'final') continue;
-      if (isMessageOutOfContext(msg)) continue;
-      const line = formatMessageForContext(msg);
-      if (line) parts.push({ kind: msg.kind, line });
+      if (!options.includeFullHistory && isMessageOutOfContext(msg)) continue;
+      const part = messageToContextPart(msg);
+      if (part) parts.push(part);
     }
 
-    return trimContextParts(parts);
+    const selectedParts = selectContextParts(parts);
+    return {
+      text: selectedParts.map((part) => part.line).join('\n'),
+      parts: selectedParts,
+    };
   }
 
-  function buildHaikuContextTextIgnoringSelection(): string {
-    const parts: ContextRetentionPart[] = [];
-
-    for (const msg of messages.value) {
-      if (msg.deleted) continue;
-      if (msg.kind === 'haiku' && msg.status !== 'final') continue;
-      if (isMessageOutOfContext(msg)) continue;
-      const line = formatMessageForContext(msg);
-      if (line) parts.push({ kind: msg.kind, line });
-    }
-
-    return trimContextParts(parts);
-  }
-
-  function buildHaikuContextTextFullHistory(): string {
-    const parts: ContextRetentionPart[] = [];
-
-    for (const msg of messages.value) {
-      if (msg.deleted) continue;
-      if (msg.kind === 'haiku' && msg.status !== 'final') continue;
-      const line = formatMessageForContext(msg);
-      if (line) parts.push({ kind: msg.kind, line });
-    }
-
-    return trimContextParts(parts);
+  function buildHaikuContextText(): string {
+    return buildHaikuContext({ selectionMode: 'respect' }).text;
   }
 
   function resolveInsertAfterId(): string | undefined {
@@ -1086,11 +1031,12 @@ export const useChatStore = defineStore('chat', () => {
     if (now - lastHoverTriggerAtMs.value < MIN_HOVER_TRIGGER_MS) return;
     lastHoverTriggerAtMs.value = now;
 
-    const contextText = buildHaikuContextText();
+    const context = buildHaikuContext({ selectionMode: 'respect' });
+    const contextText = context.text;
     if (!contextText) return;
 
     const insertAfterId = resolveInsertAfterId();
-    const memoryContextEvidence = buildMemoryContextEvidence(contextText, {
+    const memoryContextEvidence = buildMemoryContextEvidenceFromParts(context.parts, {
       selectedOnly: hasSelection.value,
     });
 
@@ -1145,8 +1091,9 @@ export const useChatStore = defineStore('chat', () => {
     const promptMessageId = createLocalId('prompt');
     const createdAtMs = Date.now();
 
-    const contextText = buildHaikuContextTextIgnoringSelection();
-    const memoryContextEvidence = buildMemoryContextEvidence(contextText);
+    const context = buildHaikuContext({ selectionMode: 'ignore' });
+    const contextText = context.text;
+    const memoryContextEvidence = buildMemoryContextEvidenceFromParts(context.parts);
 
     promptMessages.value.push({
       id: promptMessageId,
@@ -1212,8 +1159,9 @@ export const useChatStore = defineStore('chat', () => {
     const questionText = String(msg.text ?? '').trim();
     if (!questionText) return;
 
-    const contextText = buildHaikuContextTextFullHistory();
-    const memoryContextEvidence = buildMemoryContextEvidence(contextText);
+    const context = buildHaikuContext({ selectionMode: 'ignore', includeFullHistory: true });
+    const contextText = context.text;
+    const memoryContextEvidence = buildMemoryContextEvidenceFromParts(context.parts);
     const createdAtMs = Date.now();
 
     try {

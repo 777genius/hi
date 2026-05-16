@@ -7,10 +7,10 @@ export type ContextRetentionPart = {
   line: string;
 };
 
-function normalizePart(part: ContextRetentionPart): ContextRetentionPart | null {
+function normalizePart<T extends ContextRetentionPart>(part: T): T | null {
   const line = String(part.line ?? '').trim();
   if (!line) return null;
-  return { kind: String(part.kind ?? ''), line };
+  return { ...part, kind: String(part.kind ?? '') as T['kind'], line };
 }
 
 function joinedLength(parts: readonly ContextRetentionPart[]): number {
@@ -100,18 +100,18 @@ export function trimContextText(text: string, maxChars = DEFAULT_MAX_CONTEXT_CHA
   return trimContextParts(parts, maxChars);
 }
 
-export function trimContextParts(
-  rawParts: readonly ContextRetentionPart[],
+export function selectContextParts<T extends ContextRetentionPart>(
+  rawParts: readonly T[],
   maxChars = DEFAULT_MAX_CONTEXT_CHARS,
-): string {
-  const parts = rawParts.map(normalizePart).filter((part): part is ContextRetentionPart => part !== null);
-  if (parts.length === 0) return '';
+): T[] {
+  const parts = rawParts.map(normalizePart).filter((part): part is T => part !== null);
+  if (parts.length === 0) return [];
 
   const fullLength = joinedLength(parts);
-  if (fullLength <= maxChars) return parts.map((part) => part.line).join('\n');
+  if (fullLength <= maxChars) return parts;
 
   const recentLimit = Math.min(DEFAULT_RECENT_CONTEXT_CHARS, maxChars);
-  const recent: ContextRetentionPart[] = [];
+  const recent: T[] = [];
   let recentStart = parts.length;
 
   for (let index = parts.length - 1; index >= 0; index -= 1) {
@@ -131,10 +131,10 @@ export function trimContextParts(
     .slice(0, recentStart)
     .map((part, index) => ({ index, part }))
     .filter(({ part }) => isImportantOlderPart(part));
-  const anchors: Array<{ index: number; part: ContextRetentionPart }> = [];
+  const anchors: Array<{ index: number; part: T }> = [];
   const selectedAnchorIndexes = new Set<number>();
 
-  function addAnchorCandidate(index: number, part: ContextRetentionPart): void {
+  function addAnchorCandidate(index: number, part: T): void {
     if (selectedAnchorIndexes.has(index)) return;
 
     if (canAppend(anchors.map((anchor) => anchor.part), part.line, anchorBudget)) {
@@ -167,8 +167,22 @@ export function trimContextParts(
   anchors.sort((left, right) => left.index - right.index);
   const selected = [...anchors.map((anchor) => anchor.part), ...recent];
   if (selected.length === 0) {
-    return trimLineTail(parts.map((part) => part.line).join('\n'), maxChars);
+    const fallback = trimLineTail(parts.map((part) => part.line).join('\n'), maxChars);
+    return fallback ? [{ ...parts[parts.length - 1], line: fallback }] : [];
   }
 
-  return trimLineTail(selected.map((part) => part.line).join('\n'), maxChars);
+  const selectedText = selected.map((part) => part.line).join('\n');
+  if (selectedText.length <= maxChars) return selected;
+
+  const fallback = trimLineTail(selectedText, maxChars);
+  return fallback ? [{ ...selected[selected.length - 1], line: fallback }] : [];
+}
+
+export function trimContextParts(
+  rawParts: readonly ContextRetentionPart[],
+  maxChars = DEFAULT_MAX_CONTEXT_CHARS,
+): string {
+  return selectContextParts(rawParts, maxChars)
+    .map((part) => part.line)
+    .join('\n');
 }

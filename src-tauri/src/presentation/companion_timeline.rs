@@ -1912,9 +1912,7 @@ fn memory_context_evidence_from_parts(parts: &[ContextPart]) -> MemoryContextEvi
             text: text.clone(),
         };
 
-        if part.id.starts_with("focus-copy:")
-            || crate::presentation::interview_memory_bridge::text_looks_like_current_code(&text)
-        {
+        if part.id.starts_with("focus-copy:") {
             evidence.current_code.push(MemoryRequestEvidenceInput {
                 label: Some("current_code".to_string()),
                 ..item
@@ -2493,6 +2491,25 @@ mod tests {
         assert!(evidence.recent_timeline.iter().any(|item| {
             item.label.as_deref() == Some("system_audio")
                 && item.text.contains("class component и function component")
+        }));
+    }
+
+    #[tokio::test]
+    async fn build_memory_context_evidence_does_not_use_code_heuristic_for_structured_companion() {
+        let state = AppState::default();
+
+        append_system_final(
+            &state,
+            1,
+            &test_transcription("```ts\nfunction accidentalSnippet() {}\n```", 200),
+        )
+        .await;
+
+        let evidence = build_memory_context_evidence(&state, false).await;
+
+        assert!(evidence.current_code.is_empty());
+        assert!(evidence.recent_timeline.iter().any(|item| {
+            item.label.as_deref() == Some("system_audio") && item.text.contains("accidentalSnippet")
         }));
     }
 

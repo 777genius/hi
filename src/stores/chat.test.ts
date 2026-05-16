@@ -853,10 +853,12 @@ describe('chat store (selection + context)', () => {
         memoryContextEvidence: expect.objectContaining({
           selectedMessages: [
             expect.objectContaining({
+              id: 'stt:1:1:a',
               label: 'system_audio',
               text: 'selected transcript',
             }),
             expect.objectContaining({
+              id: promptMsg!.id,
               label: 'manual_prompt',
               text: 'selected manual note',
             }),
@@ -905,6 +907,7 @@ describe('chat store (selection + context)', () => {
         memoryContextEvidence: expect.objectContaining({
           currentCode: [
             expect.objectContaining({
+              id: 'focus-copy:code',
               label: 'current_code',
               text: expect.stringContaining('processQueue'),
             }),
@@ -1078,6 +1081,18 @@ describe('chat store (selection + context)', () => {
     expect(payload!.text).toContain('CODE-JS-ORDER-MAP-001');
     expect(payload!.text).toContain('FOLLOW-UP-319');
     expect(payload!.text).not.toContain('FOLLOW-UP-000');
+
+    const evidence = (invokeMock.mock.calls[0]?.[1] as any)?.memoryContextEvidence;
+    const evidenceText = [
+      ...(evidence?.selectedMessages ?? []),
+      ...(evidence?.currentCode ?? []),
+      ...(evidence?.recentTimeline ?? []),
+    ]
+      .map((item: { text?: string }) => item.text ?? '')
+      .join('\n');
+    expect(evidenceText).toContain('CODE-JS-ORDER-MAP-001');
+    expect(evidenceText).toContain('FOLLOW-UP-319');
+    expect(evidenceText).not.toContain('FOLLOW-UP-000');
   });
 
   it('filters system STT utterance when it duplicates microphone utterance', async () => {
