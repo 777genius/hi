@@ -11,14 +11,22 @@ const DEFAULT_AUDIO = [
   '/Users/belief/Documents/2026-05-14 23.57.56.ogg',
 ];
 
-const KNOWN_EXPECTED_WORDS = [
-  'погода',
-  'благодарю',
-  'супер',
-  'улыбаются',
-  'прекрасно',
-  'говорю',
-  'слышишь',
+const DEFAULT_SYNTHETIC_SEGMENTS = [
+  {
+    label: 'queue',
+    text: 'Вопрос интервью номер один. Проект Северный мост. Почему для событий нужна очередь, а не стек?',
+    expected: ['вопрос', 'интервью', 'север', 'мост', 'очеред', 'стек'],
+  },
+  {
+    label: 'debounce',
+    text: 'Вопрос интервью номер два. Объясни debounce search. Почему нужно отменять прошлый таймер?',
+    expected: ['вопрос', 'debounce', 'search', 'таймер', 'отмен'],
+  },
+  {
+    label: 'complexity',
+    text: 'Вопрос интервью номер три. Какая сложность нужна для линейной обработки списка?',
+    expected: ['вопрос', 'сложност', 'линей', 'обработк', 'спис'],
+  },
 ];
 
 const SYSTEM_MESSAGE_KINDS = new Set(['system', 'stt']);
@@ -29,16 +37,20 @@ function parseArgs(argv) {
     baseUrl: process.env.COMPANION_BASE_URL || process.env.COMPANION_URL || 'http://127.0.0.1:43821',
     token: process.env.COMPANION_TOKEN || '',
     audio: [],
+    synthetic: true,
+    voice: process.env.COMPANION_SYNTH_VOICE || 'Milena',
     cycles: Number(process.env.COMPANION_AUDIO_CYCLES || 1),
     systemRuns: 1,
     micRuns: 1,
     gainDb: Number(process.env.COMPANION_AUDIO_GAIN_DB || 20),
     volume: Number(process.env.COMPANION_AUDIO_VOLUME || 3),
+    minExpectedHits: Number(process.env.COMPANION_AUDIO_MIN_EXPECTED_HITS || 2),
     startTimeoutMs: 20_000,
     transcriptionTimeoutMs: 65_000,
     settleMs: 4_000,
     artifactsDir: '.e2e-artifacts/companion-dual-audio',
     allowMicMiss: false,
+    requireMic: false,
     restoreMic: true,
     skipSystem: false,
     skipMic: false,
@@ -56,17 +68,28 @@ function parseArgs(argv) {
 
     if (arg === '--base-url') options.baseUrl = next();
     else if (arg === '--token') options.token = next();
-    else if (arg === '--audio') options.audio.push(next());
+    else if (arg === '--audio') {
+      options.audio.push(next());
+      options.synthetic = false;
+    }
+    else if (arg === '--synthetic') options.synthetic = true;
+    else if (arg === '--real-fixtures') {
+      options.synthetic = false;
+      if (options.audio.length === 0) options.audio = [...DEFAULT_AUDIO];
+    }
+    else if (arg === '--voice') options.voice = next();
     else if (arg === '--cycles') options.cycles = Number(next());
     else if (arg === '--system-runs') options.systemRuns = Number(next());
     else if (arg === '--mic-runs') options.micRuns = Number(next());
     else if (arg === '--gain-db') options.gainDb = Number(next());
     else if (arg === '--volume') options.volume = Number(next());
+    else if (arg === '--min-expected-hits') options.minExpectedHits = Number(next());
     else if (arg === '--start-timeout-ms') options.startTimeoutMs = Number(next());
     else if (arg === '--transcription-timeout-ms') options.transcriptionTimeoutMs = Number(next());
     else if (arg === '--settle-ms') options.settleMs = Number(next());
     else if (arg === '--artifacts-dir') options.artifactsDir = next();
     else if (arg === '--allow-mic-miss') options.allowMicMiss = true;
+    else if (arg === '--require-mic') options.requireMic = true;
     else if (arg === '--no-restore-mic') options.restoreMic = false;
     else if (arg === '--skip-system') options.skipSystem = true;
     else if (arg === '--skip-mic') options.skipMic = true;
@@ -78,8 +101,9 @@ function parseArgs(argv) {
     }
   }
 
-  if (options.audio.length === 0) options.audio = DEFAULT_AUDIO;
+  if (!options.synthetic && options.audio.length === 0) options.audio = DEFAULT_AUDIO;
   options.cycles = Math.max(1, Math.floor(options.cycles || 1));
+  options.minExpectedHits = Math.max(0, Math.floor(options.minExpectedHits || 0));
   options.baseUrl = normalizeBaseUrl(options.baseUrl);
   if (!options.token) options.token = extractTokenFromUrl(process.env.COMPANION_URL || options.baseUrl) || '';
   return options;
@@ -93,14 +117,19 @@ Usage:
 
 Defaults:
   - Reads token from COMPANION_TOKEN, COMPANION_URL, or the local companion bridge file.
-  - Uses the three saved interview voice fixtures from ~/Documents.
+  - Generates deterministic Russian interview audio with macOS say.
   - Does not clear companion history. It validates only messages created after test start.
 
 Useful flags:
   --audio <path>                 Add an audio fixture. Can be repeated.
+  --synthetic                    Use generated interview audio, default.
+  --real-fixtures                Use the three saved voice fixtures from ~/Documents.
+  --voice <name>                 macOS say voice for synthetic audio, default Milena.
+  --min-expected-hits <n>        Required expected-term hits, default 2 for synthetic.
   --skip-system                  Skip OS/system-audio phase.
   --skip-mic                     Skip microphone phase.
   --allow-mic-miss               Keep exit code 0 when microphone speech is not detected.
+  --require-mic                  Fail mic misses even when no virtual loopback input is detected.
   --no-restore-mic               Do not restore app microphone mute state after the run.
   --cycles <n>                   Repeat full system/mic phase set, default 1.
   --system-runs <n>              Repeat system phase playback count.
@@ -221,6 +250,41 @@ async function prepareAudioFixtures(paths, gainDb) {
   return prepared;
 }
 
+async function generateSyntheticAudioFixtures(options) {
+  if (!commandExists('say')) {
+    throw new Error('macOS say is required for synthetic companion audio. Use --real-fixtures to use saved files.');
+  }
+
+  const generated = [];
+  for (const segment of DEFAULT_SYNTHETIC_SEGMENTS) {
+    const target = join(
+      tmpdir(),
+      `hackinterview-companion-synth-${segment.label}-${Date.now()}-${Math.random()
+        .toString(16)
+        .slice(2)}.aiff`,
+    );
+    await run('say', ['-v', options.voice, '-o', target, segment.text]);
+    generated.push(target);
+  }
+  return generated;
+}
+
+function expectedWordsForOptions(options) {
+  if (!options.synthetic) {
+    return [
+      'погода',
+      'благодарю',
+      'супер',
+      'улыбаются',
+      'прекрасно',
+      'говорю',
+      'слышишь',
+    ];
+  }
+
+  return [...new Set(DEFAULT_SYNTHETIC_SEGMENTS.flatMap((segment) => segment.expected))];
+}
+
 async function companionFetch(options, path, init = {}) {
   const response = await fetch(`${options.baseUrl}${path}`, init);
   const contentType = response.headers.get('content-type') || '';
@@ -289,14 +353,15 @@ function normalizedText(value) {
     .toLowerCase();
 }
 
-function meaningfulSpeech(text, expectedWords) {
+function meaningfulSpeech(text, expectedWords, minExpectedHits) {
   const normalized = normalizedText(text);
   const words = normalized.match(/[a-zа-яё0-9]+/gi) || [];
   const expectedHits = expectedWords.filter((word) => normalized.includes(word)).length;
   return {
-    ok: words.length >= 3 && normalized.length >= 12,
+    ok: words.length >= 3 && normalized.length >= 12 && expectedHits >= minExpectedHits,
     words: words.length,
     expectedHits,
+    minExpectedHits,
     text: normalized,
   };
 }
@@ -339,7 +404,7 @@ async function runRecordingPhase(options, phase, config) {
     const messages = messagesAfter(state, baselineSeq);
     const { systemMessages, micMessages, systemText, micText } = phaseTexts(messages);
     const targetText = phase === 'mic' ? micText : systemText;
-    const score = meaningfulSpeech(targetText, KNOWN_EXPECTED_WORDS);
+    const score = meaningfulSpeech(targetText, config.expectedWords, config.minExpectedHits);
     return {
       ok: score.ok,
       value: {
@@ -372,7 +437,7 @@ async function runRecordingPhase(options, phase, config) {
   const messages = messagesAfter(after, baselineSeq);
   const { systemMessages, micMessages, systemText, micText } = phaseTexts(messages);
   const targetText = phase === 'mic' ? micText : systemText;
-  const score = meaningfulSpeech(targetText, KNOWN_EXPECTED_WORDS);
+  const score = meaningfulSpeech(targetText, config.expectedWords, config.minExpectedHits);
 
   return {
     phase,
@@ -436,32 +501,43 @@ async function main() {
   const routing = detectAudioRouting();
   if (!routing.hasAfplay) throw new Error('afplay is required on macOS for this smoke test.');
 
-  const audioFiles = await prepareAudioFixtures(options.audio, options.gainDb);
+  const sourceAudio = options.synthetic ? await generateSyntheticAudioFixtures(options) : options.audio;
+  const audioFiles = await prepareAudioFixtures(sourceAudio, options.gainDb);
+  const expectedWords = expectedWordsForOptions(options);
+  const minExpectedHits = options.synthetic ? options.minExpectedHits : 0;
   const health = await companionFetch(options, '/api/health');
   const initialState = await getState(options);
 
   const results = [];
   for (let cycle = 1; cycle <= options.cycles; cycle += 1) {
     if (!options.skipSystem) {
-      console.log(`[companion-audio] cycle ${cycle}/${options.cycles}: system phase, app mic muted, playing OS audio fixtures`);
+      console.log(
+        `[companion-audio] cycle ${cycle}/${options.cycles}: system phase, app mic muted, playing ${options.synthetic ? 'synthetic interview audio' : 'OS audio fixtures'}`,
+      );
       results.push(
         await runRecordingPhase(options, 'system', {
           audioFiles,
           runs: options.systemRuns,
           appMicMuted: true,
           cycle,
+          expectedWords,
+          minExpectedHits,
         }),
       );
     }
 
     if (!options.skipMic) {
-      console.log(`[companion-audio] cycle ${cycle}/${options.cycles}: mic phase, app mic unmuted, playing fixtures for acoustic/loopback mic capture`);
+      console.log(
+        `[companion-audio] cycle ${cycle}/${options.cycles}: mic phase, app mic unmuted, playing ${options.synthetic ? 'synthetic interview audio' : 'fixtures'} for acoustic/loopback mic capture`,
+      );
       results.push(
         await runRecordingPhase(options, 'mic', {
           audioFiles,
           runs: options.micRuns,
           appMicMuted: false,
           cycle,
+          expectedWords,
+          minExpectedHits,
         }),
       );
     }
@@ -482,14 +558,21 @@ async function main() {
     createdAt: new Date().toISOString(),
     options: {
       baseUrl: options.baseUrl,
+      synthetic: options.synthetic,
+      voice: options.voice,
+      sourceAudio,
       audio: options.audio,
       preparedAudio: audioFiles,
+      expectedWords,
+      minExpectedHits,
+      syntheticSegments: options.synthetic ? DEFAULT_SYNTHETIC_SEGMENTS : [],
       cycles: options.cycles,
       systemRuns: options.systemRuns,
       micRuns: options.micRuns,
       gainDb: options.gainDb,
       volume: options.volume,
       allowMicMiss: options.allowMicMiss,
+      requireMic: options.requireMic,
       restoreMic: options.restoreMic,
       skipSystem: options.skipSystem,
       skipMic: options.skipMic,
@@ -523,7 +606,9 @@ async function main() {
     if (!result.ok) {
       console.log(`   reason=${result.error || 'target speech was not detected in expected channel'}`);
       if (result.phase === 'mic' && !routing.hasLoopbackInput) {
-        console.log('   note=no virtual loopback input detected; mic phase depends on the real microphone hearing playback');
+        console.log(
+          `   note=no virtual loopback input detected; mic phase depends on the real microphone hearing playback${options.requireMic ? '' : '; not counted as fatal by default'}`,
+        );
       }
     }
   }
@@ -531,7 +616,9 @@ async function main() {
 
   const failing = results.filter((result) => {
     if (result.ok) return false;
-    return !(result.phase === 'mic' && options.allowMicMiss);
+    const micEnvironmentCannotInjectAudio =
+      result.phase === 'mic' && !options.requireMic && !routing.hasLoopbackInput;
+    return !(result.phase === 'mic' && (options.allowMicMiss || micEnvironmentCannotInjectAudio));
   });
   if (failing.length > 0) process.exit(1);
 }

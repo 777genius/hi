@@ -66,6 +66,7 @@ function parseArgs(argv) {
     memoryAuthTokenFile: process.env.INTERVIEW_MEMORY_AUTH_TOKEN_FILE || '',
     memoryDbUrl: process.env.INTERVIEW_MEMORY_DB_URL || process.env.DATABASE_URL || '',
     memorySessionId: process.env.INTERVIEW_MEMORY_SESSION_ID || '',
+    expectedMemoryStatus: process.env.COMPANION_EXPECT_MEMORY_CONTEXT_STATUS || 'ok',
     restoreMic: true,
     keepAudio: false,
     openaiResponsesWebSearch: false,
@@ -101,6 +102,7 @@ function parseArgs(argv) {
     else if (arg === '--memory-auth-token-file') options.memoryAuthTokenFile = next();
     else if (arg === '--memory-db-url') options.memoryDbUrl = next();
     else if (arg === '--memory-session-id') options.memorySessionId = next();
+    else if (arg === '--expect-memory-status') options.expectedMemoryStatus = next();
     else if (arg === '--no-restore-mic') options.restoreMic = false;
     else if (arg === '--keep-audio') options.keepAudio = true;
     else if (arg === '--web-search') options.openaiResponsesWebSearch = true;
@@ -146,6 +148,7 @@ Useful flags:
   --memory-db-url <url>          Postgres URL used to discover the latest memory session.
   --memory-session-id <uuid>     Memory session id, avoids companion state/DB discovery.
   --memory-auth-token-file <p>   File with a raw token or auth_store.json.
+  --expect-memory-status <s>     Expected companion memory status after AI, default ok.
   --keep-audio                   Keep generated TTS files.
   --production-safe-artifact     Redact raw transcript/code/prompt/AI text from the JSON artifact.
 `);
@@ -301,6 +304,54 @@ function assertMemorySnapshot(snapshot, label) {
   if (typeof memory.sessionId !== 'string' || !memory.sessionId.trim()) {
     throw new Error(`${label} state is missing memory.sessionId`);
   }
+  if (typeof memory.lastContextStatus !== 'string' || !memory.lastContextStatus.trim()) {
+    throw new Error(`${label} state is missing memory.lastContextStatus`);
+  }
+  if (typeof memory.lastIngestStatus !== 'string' || !memory.lastIngestStatus.trim()) {
+    throw new Error(`${label} state is missing memory.lastIngestStatus`);
+  }
+}
+
+function scoreMemoryDiagnostics(memory, expectedStatus = 'ok') {
+  const expectedIngestOk =
+    expectedStatus === 'fallback'
+      ? ['ok', 'failed'].includes(String(memory?.lastIngestStatus || ''))
+      : memory?.lastIngestStatus === 'ok';
+
+  const checks = [
+    {
+      label: `context status ${expectedStatus}`,
+      ok: memory?.lastContextStatus === expectedStatus,
+      value: memory?.lastContextStatus,
+    },
+    {
+      label: 'context latency recorded',
+      ok: Number.isFinite(Number(memory?.lastContextLatencyMs)) && Number(memory.lastContextLatencyMs) >= 0,
+      value: memory?.lastContextLatencyMs,
+    },
+    {
+      label: expectedStatus === 'fallback' ? 'ingest status observable' : 'ingest status ok',
+      ok: expectedIngestOk,
+      value: memory?.lastIngestStatus,
+    },
+  ];
+
+  if (expectedStatus === 'fallback') {
+    checks.push({
+      label: 'fallback reason recorded',
+      ok: typeof memory?.lastContextError === 'string' && memory.lastContextError.trim().length > 0,
+      value: memory?.lastContextError,
+    });
+    if (memory?.lastIngestStatus === 'failed') {
+      checks.push({
+        label: 'ingest failure reason recorded',
+        ok: typeof memory?.lastIngestError === 'string' && memory.lastIngestError.trim().length > 0,
+        value: memory?.lastIngestError,
+      });
+    }
+  }
+
+  return checks;
 }
 
 function buildCodeAnchor() {
@@ -508,6 +559,7 @@ async function runAiContextPhase(options) {
       value: {
         state: {
           recording: state.recording,
+          memory: state.memory,
           timelineCount: state.timeline.length,
           maxSeq: maxSeq(state),
         },
@@ -519,11 +571,13 @@ async function runAiContextPhase(options) {
 
   const answer = finalHaiku.final?.text || '';
   const checks = scoreAnswer(answer, options);
-  const ok = checks.every((check) => check.ok);
+  const diagnosticChecks = scoreMemoryDiagnostics(finalHaiku.state.memory, options.expectedMemoryStatus);
+  const ok = checks.every((check) => check.ok) && diagnosticChecks.every((check) => check.ok);
   return {
     ok,
     answer,
     checks,
+    diagnosticChecks,
     prompt: question,
     finalMessage: finalHaiku.final,
     timelineState: finalHaiku.state,
@@ -638,6 +692,7 @@ function productionSafeAiResult(result) {
   return {
     ok: result.ok,
     checks: redactChecks(result.checks),
+    diagnosticChecks: redactChecks(result.diagnosticChecks),
     answer: redactText(result.answer),
     prompt: redactText(result.prompt),
     finalMessage: redactMessage(result.finalMessage),
@@ -737,6 +792,7 @@ function buildArtifact(options, initial, initialSeq, voiceResult, aiResult, memo
       skipAi: options.skipAi,
       verifyMemory: options.verifyMemory,
       memoryApiUrl: options.memoryApiUrl,
+      expectedMemoryStatus: options.expectedMemoryStatus,
       openaiResponsesWebSearch: options.openaiResponsesWebSearch,
       productionSafeArtifact: options.productionSafeArtifact,
     },
@@ -845,7 +901,12 @@ async function main() {
     console.log('[companion-context] requesting real AI answer over full companion context');
     aiResult = await runAiContextPhase(options);
     const icon = aiResult.ok ? '✅' : '❌';
-    console.log(`${icon} AI context: ${aiResult.checks.map((check) => `${check.label}=${check.ok ? 'ok' : 'miss'}`).join(', ')}`);
+    console.log(
+      `${icon} AI context: ${[
+        ...aiResult.checks,
+        ...aiResult.diagnosticChecks,
+      ].map((check) => `${check.label}=${check.ok ? 'ok' : 'miss'}`).join(', ')}`,
+    );
   }
 
   let memoryResult = null;
