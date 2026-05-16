@@ -69,6 +69,7 @@ function parseArgs(argv) {
     restoreMic: true,
     keepAudio: false,
     openaiResponsesWebSearch: false,
+    productionSafeArtifact: process.env.COMPANION_PRODUCTION_SAFE_ARTIFACT === '1',
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -103,6 +104,7 @@ function parseArgs(argv) {
     else if (arg === '--no-restore-mic') options.restoreMic = false;
     else if (arg === '--keep-audio') options.keepAudio = true;
     else if (arg === '--web-search') options.openaiResponsesWebSearch = true;
+    else if (arg === '--production-safe-artifact') options.productionSafeArtifact = true;
     else if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
@@ -145,6 +147,7 @@ Useful flags:
   --memory-session-id <uuid>     Memory session id, avoids DB discovery.
   --memory-auth-token-file <p>   File with a raw token or auth_store.json.
   --keep-audio                   Keep generated TTS files.
+  --production-safe-artifact     Redact raw transcript/code/prompt/AI text from the JSON artifact.
 `);
 }
 
@@ -573,6 +576,94 @@ function scoreMemoryContext(contextText, options) {
   }));
 }
 
+function redactText(value) {
+  const text = String(value || '');
+  return text
+    ? {
+        redacted: true,
+        charCount: text.length,
+      }
+    : '';
+}
+
+function redactChecks(checks) {
+  return (checks || []).map((check) => ({
+    label: check.label,
+    ok: check.ok,
+    termCount: Array.isArray(check.terms) ? check.terms.length : 0,
+  }));
+}
+
+function redactMessage(message) {
+  if (!message || typeof message !== 'object') return message;
+  const copy = { ...message };
+  if ('text' in copy) copy.text = redactText(copy.text);
+  if ('markdown' in copy) copy.markdown = redactText(copy.markdown);
+  if ('content' in copy) copy.content = redactText(copy.content);
+  if (Array.isArray(copy.candidates)) {
+    copy.candidates = copy.candidates.map((candidate) => {
+      const candidateCopy = { ...candidate };
+      if ('text' in candidateCopy) candidateCopy.text = redactText(candidateCopy.text);
+      if ('error' in candidateCopy) candidateCopy.error = redactText(candidateCopy.error);
+      return candidateCopy;
+    });
+  }
+  if (Array.isArray(copy.attachments)) {
+    copy.attachments = copy.attachments.map((attachment) => {
+      const attachmentCopy = { ...attachment };
+      if ('dataUrl' in attachmentCopy) attachmentCopy.dataUrl = redactText(attachmentCopy.dataUrl);
+      if ('data_url' in attachmentCopy) attachmentCopy.data_url = redactText(attachmentCopy.data_url);
+      return attachmentCopy;
+    });
+  }
+  return copy;
+}
+
+function productionSafeVoiceResult(result) {
+  if (!result) return null;
+  return {
+    ok: result.ok,
+    timedOut: result.timedOut,
+    error: redactText(result.error),
+    baselineSeq: result.baselineSeq,
+    audioFileCount: result.audioFiles?.length ?? 0,
+    messageCount: result.messageCount,
+    hitCount: result.hits?.length ?? 0,
+    sttText: redactText(result.sttText),
+  };
+}
+
+function productionSafeAiResult(result) {
+  if (!result) return null;
+  return {
+    ok: result.ok,
+    checks: redactChecks(result.checks),
+    answer: redactText(result.answer),
+    prompt: redactText(result.prompt),
+    finalMessage: redactMessage(result.finalMessage),
+    timelineState: result.timelineState,
+  };
+}
+
+function productionSafeMemoryResult(result) {
+  if (!result) return null;
+  return {
+    ok: result.ok,
+    sessionId: result.sessionId,
+    checks: redactChecks(result.checks),
+    budgetUsed: result.budgetUsed,
+    budgetTotal: result.budgetTotal,
+    criticalBudgetPressure: result.criticalBudgetPressure,
+    includedChunks: result.includedChunks,
+    droppedChunks: result.droppedChunks,
+    latencyMs: result.latencyMs,
+  };
+}
+
+function productionSafeTimelineTail(messages) {
+  return (messages || []).map(redactMessage);
+}
+
 async function runMemoryContextPhase(options) {
   if (!options.memoryApiUrl) throw new Error('Memory verification needs --memory-api-url');
 
@@ -597,6 +688,7 @@ async function runMemoryContextPhase(options) {
     max_memory_results: 24,
   };
 
+  const startedAt = performance.now();
   const response = await fetch(`${options.memoryApiUrl}/api/v1/interview-memory/context`, {
     method: 'POST',
     headers: {
@@ -605,6 +697,7 @@ async function runMemoryContextPhase(options) {
     },
     body: JSON.stringify(body),
   });
+  const latencyMs = Math.round(performance.now() - startedAt);
   const responseText = await response.text();
   let payload;
   try {
@@ -628,10 +721,79 @@ async function runMemoryContextPhase(options) {
     criticalBudgetPressure: payload.data?.artifact?.critical_budget_pressure,
     includedChunks: payload.data?.artifact?.included_chunks?.length ?? 0,
     droppedChunks: payload.data?.artifact?.dropped_chunks?.length ?? 0,
+    latencyMs,
   };
 }
 
+function buildArtifact(options, initial, initialSeq, voiceResult, aiResult, memoryResult, final) {
+  const artifact = {
+    createdAt: new Date().toISOString(),
+    productionSafe: options.productionSafeArtifact,
+    options: {
+      baseUrl: options.baseUrl,
+      voice: options.voice,
+      fillerChars: options.fillerChars,
+      skipVoice: options.skipVoice,
+      skipAi: options.skipAi,
+      verifyMemory: options.verifyMemory,
+      memoryApiUrl: options.memoryApiUrl,
+      openaiResponsesWebSearch: options.openaiResponsesWebSearch,
+      productionSafeArtifact: options.productionSafeArtifact,
+    },
+    initial: {
+      timelineCount: initial.timeline.length,
+      maxSeq: initialSeq,
+      recording: initial.recording,
+      microphone: initial.microphone,
+      memory: initial.memory,
+    },
+    voiceResult,
+    aiResult,
+    memoryResult,
+    final: {
+      timelineCount: final.timeline.length,
+      maxSeq: maxSeq(final),
+      recording: final.recording,
+      microphone: final.microphone,
+      memory: final.memory,
+      tail: final.timeline.slice(-12),
+    },
+  };
+
+  if (!options.productionSafeArtifact) return artifact;
+
+  return {
+    ...artifact,
+    voiceResult: productionSafeVoiceResult(voiceResult),
+    aiResult: productionSafeAiResult(aiResult),
+    memoryResult: productionSafeMemoryResult(memoryResult),
+    final: {
+      ...artifact.final,
+      tail: productionSafeTimelineTail(artifact.final.tail),
+    },
+  };
+}
+
+function assertProductionSafeArtifact(artifact) {
+  if (!artifact?.productionSafe) return;
+
+  const serialized = JSON.stringify(artifact).toLowerCase();
+  const forbiddenFragments = [
+    CODE_MARKER.toLowerCase(),
+    LATE_MARKER.toLowerCase(),
+    'debouncesearch',
+    'северный мост',
+    'очередь событий',
+    'последний аргумент',
+  ];
+  const leaked = forbiddenFragments.filter((fragment) => serialized.includes(fragment));
+  if (leaked.length > 0) {
+    throw new Error(`Production-safe artifact leaked raw E2E fragments: ${leaked.join(', ')}`);
+  }
+}
+
 async function writeArtifact(options, data) {
+  assertProductionSafeArtifact(data);
   await mkdir(options.artifactsDir, { recursive: true });
   const artifactPath = join(
     options.artifactsDir,
@@ -696,37 +858,10 @@ async function main() {
 
   const final = await getState(options);
   assertMemorySnapshot(final, 'final companion');
-  const artifactPath = await writeArtifact(options, {
-    createdAt: new Date().toISOString(),
-    options: {
-      baseUrl: options.baseUrl,
-      voice: options.voice,
-      fillerChars: options.fillerChars,
-      skipVoice: options.skipVoice,
-      skipAi: options.skipAi,
-      verifyMemory: options.verifyMemory,
-      memoryApiUrl: options.memoryApiUrl,
-      openaiResponsesWebSearch: options.openaiResponsesWebSearch,
-    },
-    initial: {
-      timelineCount: initial.timeline.length,
-      maxSeq: initialSeq,
-      recording: initial.recording,
-      microphone: initial.microphone,
-      memory: initial.memory,
-    },
-    voiceResult,
-    aiResult,
-    memoryResult,
-    final: {
-      timelineCount: final.timeline.length,
-      maxSeq: maxSeq(final),
-      recording: final.recording,
-      microphone: final.microphone,
-      memory: final.memory,
-      tail: final.timeline.slice(-12),
-    },
-  });
+  const artifactPath = await writeArtifact(
+    options,
+    buildArtifact(options, initial, initialSeq, voiceResult, aiResult, memoryResult, final),
+  );
 
   console.log(`[companion-context] artifact: ${artifactPath}`);
 

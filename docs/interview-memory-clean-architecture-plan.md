@@ -1,6 +1,6 @@
 # Interview Memory Clean Architecture Plan
 
-Статус: implementation baseline in progress, backend V1 core merged, desktop bridge added behind opt-in flags.
+Статус: V1 implementation complete behind opt-in flags; production default is gated by canary.
 
 Last audit: 2026-05-16.
 
@@ -21,10 +21,11 @@ Implemented baseline:
 - desktop bridge resolves `INTERVIEW_MEMORY_MODE` into explicit modes (`Disabled`, `ShadowIngest`, `ShadowRetrieve`, `AssistiveContext`, `ActiveContext`, `LocalOnly`) with `INTERVIEW_MEMORY_FORCE_DISABLED` as the top kill switch, `INTERVIEW_MEMORY_FORCE_LOCAL_ONLY` avoiding backend memory calls, and legacy `INTERVIEW_MEMORY_ENABLED=1` mapped to `ActiveContext`.
 - companion `/api/state` exposes a production-safe memory snapshot with resolved mode, backend/local capabilities and session id, without raw retrieved text or prompt artifacts.
 - backend application ports now include an `EmbeddingProvider` contract and infrastructure exposes `NoopEmbeddingAdapter` with adapter contract tests; V1 remains keyword/entity-only by default and does not call external embedding providers.
+- companion synthetic context E2E supports `--production-safe-artifact`/`COMPANION_PRODUCTION_SAFE_ARTIFACT=1`, redacting raw transcript/code/prompt/AI text, nested candidate text and attachment payloads while keeping release-review counts, checks, budgets and latency.
 
 Not yet promoted to default:
 
-- production/staging canary with prompt artifact review;
+- production/staging canary with production-safe artifact review;
 
 Цель: сделать долговременную память для интервью так, чтобы AI стабильно отвечал по длинной истории голосовых вопросов, кода, selected messages и уточнений, но без раздувания prompt, vendor lock-in и неконтролируемой "магии памяти".
 
@@ -4448,6 +4449,11 @@ Current local evidence log:
 2026-05-16T09:52:00Z:
   companion snapshot now includes production-safe memory mode/capability/session metadata
   checks: e2e artifacts capture initial/final `memory` snapshot so desktop/web companion parity can assert mode without exposing prompt text; `pnpm e2e:companion-context` fails early if the memory snapshot is missing or malformed
+
+2026-05-16T09:53:00Z:
+  companion synthetic context E2E gained production-safe artifact mode for staging/canary review
+  checks: `node --check e2e-tests/companion-synthetic-context.mjs`; `pnpm e2e:companion-context -- --help`
+  note: full-text dev artifacts remain available by default; canary artifacts should use `--production-safe-artifact`
 ```
 
 This evidence is enough to treat the V1 local `ActiveContext` path as stabilized behind flags. It is still not enough to promote memory as default because the production/staging canary and production prompt artifact review are not done.

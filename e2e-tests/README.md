@@ -122,6 +122,7 @@ pnpm e2e:companion-context -- --filler-chars 80000
 pnpm e2e:companion-context -- --skip-voice
 pnpm e2e:companion-context -- --skip-ai
 pnpm e2e:companion-context -- --allow-ai-miss
+pnpm e2e:companion-context -- --production-safe-artifact
 ```
 
 `--skip-voice` intentionally narrows AI/memory expectations to deterministic focus-copy and prompt facts only. It does not require voice-only facts like "таймер" or "последний аргумент", because those facts are introduced by the synthetic voice phase.
@@ -129,6 +130,8 @@ pnpm e2e:companion-context -- --allow-ai-miss
 When `INTERVIEW_MEMORY_ENABLED=1` and the memory API is intentionally unavailable, the desktop bridge now falls back to a compact current-session tail. That fallback should prove the chat still answers and the question flow does not break; it is not expected to preserve old long-interview recall without the backend memory context.
 
 The companion `/api/state` snapshot includes a production-safe `memory` block with the resolved mode, backend/local capabilities and memory session id. It intentionally does not include raw retrieved text or prompt artifacts. `pnpm e2e:companion-context` fails early if that block is missing.
+
+For staging/canary evidence, pass `--production-safe-artifact` or set `COMPANION_PRODUCTION_SAFE_ARTIFACT=1`. This keeps the artifact useful for release review while redacting raw transcript/code/prompt/AI text and nested candidate/attachment text payloads.
 
 Проверка, что backend memory не только получил ingest, но и реально достаёт нужный контекст после длинной истории:
 
