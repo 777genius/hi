@@ -81,6 +81,9 @@ class TauriSettingsService {
     ) {
       args.selectedOutputAudioDevice = config.selected_output_audio_device;
     }
+    if (typeof config.interview_memory_enabled === 'boolean') {
+      args.interviewMemoryEnabled = config.interview_memory_enabled;
+    }
 
     await invokeUpdateAppConfig(args);
   }

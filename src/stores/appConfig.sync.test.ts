@@ -23,6 +23,7 @@ describe('useAppConfigStore sync', () => {
       microphone_sensitivity: 95,
       selected_audio_device: null,
       selected_output_audio_device: null,
+      interview_memory_enabled: true,
       ...overrides,
     };
   }
@@ -46,6 +47,7 @@ describe('useAppConfigStore sync', () => {
         microphone_sensitivity: 120,
         selected_audio_device: 'Mic A',
         selected_output_audio_device: 'Speakers A',
+        interview_memory_enabled: false,
       }),
     });
 
@@ -63,6 +65,7 @@ describe('useAppConfigStore sync', () => {
     expect(store.microphoneSensitivity).toBe(120);
     expect(store.selectedAudioDevice).toBe('Mic A');
     expect(store.selectedOutputAudioDevice).toBe('Speakers A');
+    expect(store.interviewMemoryEnabled).toBe(false);
   });
 
   it('applySnapshot обновляет значения из SnapshotEnvelope', () => {
@@ -76,6 +79,7 @@ describe('useAppConfigStore sync', () => {
         microphone_sensitivity: 50,
         selected_audio_device: 'Mic B',
         selected_output_audio_device: 'Speakers B',
+        interview_memory_enabled: false,
       },
       '42',
     );
@@ -87,6 +91,7 @@ describe('useAppConfigStore sync', () => {
     expect(store.microphoneSensitivity).toBe(50);
     expect(store.selectedAudioDevice).toBe('Mic B');
     expect(store.selectedOutputAudioDevice).toBe('Speakers B');
+    expect(store.interviewMemoryEnabled).toBe(false);
     expect(store.isLoaded).toBe(true);
   });
 

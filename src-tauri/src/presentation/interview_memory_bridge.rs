@@ -138,21 +138,25 @@ impl InterviewMemoryMode {
     pub fn minimal_local_prompt_context_enabled(self) -> bool {
         matches!(
             self,
-            Self::AssistiveContext | Self::ActiveContext | Self::LocalOnly
+            Self::Disabled | Self::AssistiveContext | Self::ActiveContext | Self::LocalOnly
         )
     }
 }
 
-pub fn is_enabled() -> bool {
-    resolved_mode().backend_ingest_enabled()
+fn apply_app_config_mode_override(
+    mode: InterviewMemoryMode,
+    interview_memory_enabled: bool,
+) -> InterviewMemoryMode {
+    if interview_memory_enabled {
+        mode
+    } else {
+        InterviewMemoryMode::Disabled
+    }
 }
 
-pub fn is_prompt_context_enabled() -> bool {
-    resolved_mode().backend_prompt_context_enabled()
-}
-
-pub fn is_minimal_local_prompt_context_enabled() -> bool {
-    resolved_mode().minimal_local_prompt_context_enabled()
+pub async fn resolved_mode_for_state(state: &AppState) -> InterviewMemoryMode {
+    let interview_memory_enabled = state.config.read().await.interview_memory_enabled;
+    apply_app_config_mode_override(resolved_mode(), interview_memory_enabled)
 }
 
 pub fn resolved_mode() -> InterviewMemoryMode {
@@ -167,7 +171,10 @@ pub async fn reset_session(state: &AppState) {
         previous_session_id
     };
 
-    if !is_enabled() {
+    if !resolved_mode_for_state(state)
+        .await
+        .backend_ingest_enabled()
+    {
         return;
     }
 
@@ -183,7 +190,10 @@ pub async fn reset_session(state: &AppState) {
 }
 
 pub async fn spawn_ingest_timeline_event(state: &AppState, event: MemoryTimelineEvent) {
-    if !resolved_mode().backend_ingest_enabled() {
+    if !resolved_mode_for_state(state)
+        .await
+        .backend_ingest_enabled()
+    {
         return;
     }
 
@@ -217,8 +227,13 @@ pub async fn spawn_ingest_timeline_event(state: &AppState, event: MemoryTimeline
 }
 
 pub async fn assemble_stream_context_or_fallback(state: &AppState, local_context: &str) -> String {
-    if !is_prompt_context_enabled() {
-        return local_context.to_string();
+    let mode = resolved_mode_for_state(state).await;
+    if !mode.backend_prompt_context_enabled() {
+        return if mode.minimal_local_prompt_context_enabled() {
+            minimal_current_session_fallback_context(local_context)
+        } else {
+            local_context.to_string()
+        };
     }
 
     let fallback_context = minimal_current_session_fallback_context(local_context);
@@ -237,7 +252,10 @@ pub async fn assemble_chat_context_or_fallback(
     local_context: &str,
     question: &str,
 ) -> Option<String> {
-    if !is_prompt_context_enabled() {
+    if !resolved_mode_for_state(state)
+        .await
+        .backend_prompt_context_enabled()
+    {
         return None;
     }
 
@@ -843,6 +861,28 @@ mod tests {
                 ("INTERVIEW_MEMORY_ENABLED", "1"),
             ]),
             InterviewMemoryMode::Disabled
+        );
+    }
+
+    #[test]
+    fn memory_mode_disabled_uses_minimal_local_context_only() {
+        let mode = resolve_mode(&[("INTERVIEW_MEMORY_MODE", "disabled")]);
+
+        assert_eq!(mode, InterviewMemoryMode::Disabled);
+        assert!(!mode.backend_ingest_enabled());
+        assert!(!mode.backend_prompt_context_enabled());
+        assert!(mode.minimal_local_prompt_context_enabled());
+    }
+
+    #[test]
+    fn app_config_can_disable_default_active_context() {
+        assert_eq!(
+            apply_app_config_mode_override(InterviewMemoryMode::ActiveContext, false),
+            InterviewMemoryMode::Disabled
+        );
+        assert_eq!(
+            apply_app_config_mode_override(InterviewMemoryMode::ActiveContext, true),
+            InterviewMemoryMode::ActiveContext
         );
     }
 

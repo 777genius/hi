@@ -163,6 +163,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub selected_output_audio_device: Option<String>,
 
+    /// Enable backend interview memory for the current desktop app profile.
+    #[serde(default = "default_interview_memory_enabled")]
+    pub interview_memory_enabled: bool,
+
     /// Stable token for companion phone link.
     /// Keeps `/c/<token>` persistent across restarts and re-enabling companion mode.
     #[serde(default)]
@@ -173,6 +177,10 @@ pub struct AppConfig {
 
     /// Maximum number of history items
     pub max_history_items: usize,
+}
+
+fn default_interview_memory_enabled() -> bool {
+    true
 }
 
 impl AppConfig {
@@ -192,6 +200,7 @@ impl Default for AppConfig {
             microphone_sensitivity: 95, // Очень высокая чувствительность по умолчанию (порог ~1638)
             selected_audio_device: None, // По умолчанию используем системное устройство
             selected_output_audio_device: None,
+            interview_memory_enabled: default_interview_memory_enabled(),
             companion_access_token: None,
             keep_history: true,
             max_history_items: Self::DEFAULT_MAX_HISTORY_ITEMS,
@@ -283,6 +292,7 @@ mod tests {
         assert!(!config.auto_close_window);
         assert_eq!(config.vad_silence_timeout_ms, 3000);
         assert_eq!(config.microphone_sensitivity, 95);
+        assert!(config.interview_memory_enabled);
         assert!(config.keep_history);
         assert_eq!(
             config.max_history_items,

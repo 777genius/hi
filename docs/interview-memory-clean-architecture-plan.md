@@ -11,7 +11,8 @@ Implemented baseline:
 - deterministic ingest, keyword/entity retrieval and strict context packing without embeddings or external extractors;
 - deterministic backend long-context tests cover early code questions and early negative constraints under large filler;
 - Tauri bridge for final system audio, microphone, focus-copy, manual prompts and final AI answers;
-- desktop bridge resolves to `ActiveContext` by default and falls back to local context on timeout, auth miss or backend error.
+- desktop bridge resolves to `ActiveContext` by default and falls back to compact current-session local context on timeout, auth miss or backend error.
+- desktop app config now has a runtime user-facing `interview_memory_enabled` switch; when it is off, the resolved mode is `Disabled` without backend ingest/retrieval.
 - clear context/history rotates the desktop memory session and sends a best-effort backend delete for the previous session;
 - backend delete/status responses expose chunk/fact/job counts for canary and E2E verification;
 - backend HTTP E2E now covers real `/api/v1/interview-memory/*` routes, JWT auth, Postgres storage, long filler, prompt artifacts, duplicate final-event ingest, same-user session isolation, cross-user isolation and session delete/status counts.
@@ -27,7 +28,7 @@ Implemented baseline:
 Promoted to desktop default:
 
 - unset desktop memory mode now resolves to `ActiveContext`;
-- rollback remains explicit through `INTERVIEW_MEMORY_FORCE_DISABLED=true`, `INTERVIEW_MEMORY_MODE=disabled`, `INTERVIEW_MEMORY_ENABLED=false` or `INTERVIEW_MEMORY_ACTIVE_CONTEXT=false`.
+- rollback remains explicit through the Settings memory switch, `INTERVIEW_MEMORY_FORCE_DISABLED=true`, `INTERVIEW_MEMORY_MODE=disabled`, `INTERVIEW_MEMORY_ENABLED=false` or `INTERVIEW_MEMORY_ACTIVE_CONTEXT=false`.
 
 Цель: сделать долговременную память для интервью так, чтобы AI стабильно отвечал по длинной истории голосовых вопросов, кода, selected messages и уточнений, но без раздувания prompt, vendor lock-in и неконтролируемой "магии памяти".
 
@@ -3541,6 +3542,7 @@ INTERVIEW_MEMORY_DEBUG_ARTIFACTS=false
 INTERVIEW_MEMORY_EMBEDDING_PROVIDER=none
 INTERVIEW_MEMORY_EXTRACTOR_PROVIDER=none
 INTERVIEW_MEMORY_SUMMARY_PROVIDER=none
+AppConfig.interview_memory_enabled=true
 ```
 
 Suggested rollout order:
@@ -3549,7 +3551,7 @@ Suggested rollout order:
 ShadowIngest -> ShadowRetrieve -> short AssistiveContext canary -> ActiveContext default -> legacy fallback cleanup
 ```
 
-Each mode must be independently reversible. The emergency rollback is `INTERVIEW_MEMORY_FORCE_DISABLED=true` or `INTERVIEW_MEMORY_MODE=disabled`; `INTERVIEW_MEMORY_ENABLED=false` and `INTERVIEW_MEMORY_ACTIVE_CONTEXT=false` remain supported legacy rollback flags.
+Each mode must be independently reversible. Runtime rollback is available through Settings `interview_memory_enabled=false`, which resolves the desktop bridge to `Disabled`. Emergency rollback is `INTERVIEW_MEMORY_FORCE_DISABLED=true` or `INTERVIEW_MEMORY_MODE=disabled`; `INTERVIEW_MEMORY_ENABLED=false` and `INTERVIEW_MEMORY_ACTIVE_CONTEXT=false` remain supported legacy rollback flags.
 
 ### Mode truth table
 
@@ -3584,6 +3586,12 @@ emergency env kill switch
   > app config
   > default config
 ```
+
+Current V1 desktop implementation has the app-config layer as `AppConfig.interview_memory_enabled`. It is intentionally a coarse user-facing runtime switch:
+
+- `true`: keep the env-resolved mode, defaulting to `ActiveContext`;
+- `false`: force desktop mode to `Disabled`;
+- `Disabled`: no backend ingest, no backend retrieval, compact current-session fallback only.
 
 Emergency environment variables:
 
@@ -3890,6 +3898,8 @@ Minimal V1 UI can be simpler:
 Interview memory: off / local only / cloud memory
 Clear this interview memory
 ```
+
+Current V1 desktop UI ships the smallest safe version: a Settings switch for memory enabled/disabled. This covers runtime rollback without requiring a restart. Local-only, retention and clear-current-session can remain follow-up controls because backend delete/status and env-level local-only already exist.
 
 But the backend must already support the underlying controls.
 
@@ -4518,9 +4528,24 @@ Current local evidence log:
   counts: includedChunks=15, droppedChunks=9
   latency: memory retrieval latencyMs=842
   privacy: production-safe artifact, raw code/transcript/prompt/AI text redacted
+
+2026-05-16T07:41:16Z:
+  desktop runtime memory toggle added through `AppConfig.interview_memory_enabled` and Settings UI
+  resolved-mode rule: app-config false forces `Disabled`, app-config true preserves env/default mode
+  disabled behavior: no backend ingest/retrieval, compact current-session fallback only
+  checks: Rust unit tests cover disabled minimal fallback and app-config override; frontend state-sync/settings tests cover snapshot/update propagation; full Rust lib tests, full Vitest, typecheck, production build, diff whitespace check and e2e script syntax checks passed
+
+2026-05-16T07:44:20Z:
+  production companion default-on smoke passed after runtime toggle implementation
+  artifact: `.e2e-artifacts/companion-synthetic-context/2026-05-16T07-44-20-312Z.json`
+  launch mode: `VITE_API_URL=https://api.voicetext.site`, `VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site`, no desktop memory enable env
+  companion snapshot: `mode=active_context`, backend ingest/retrieval enabled, local fallback enabled
+  AI checks: project context, queue-not-stack and linear complexity all passed
+  memory checks: early code marker, late marker, project context, queue-not-stack and linear complexity all passed
+  privacy: production-safe artifact, raw code/transcript/prompt/AI text redacted
 ```
 
-This evidence is enough to treat the V1 `ActiveContext` path as the default desktop bridge mode. Backend production canary, production companion real AI smoke, production companion backend memory retrieval verification and one full voice + AI + memory release smoke have passed. Backend production still owns the server-side gate through `INTERVIEW_MEMORY__ENABLED=true`, and rollback remains a one-env switch through `INTERVIEW_MEMORY_FORCE_DISABLED=true` or `INTERVIEW_MEMORY_MODE=disabled`.
+This evidence is enough to treat the V1 `ActiveContext` path as the default desktop bridge mode. Backend production canary, production companion real AI smoke, production companion backend memory retrieval verification and one full voice + AI + memory release smoke have passed. Backend production still owns the server-side gate through `INTERVIEW_MEMORY__ENABLED=true`, and rollback remains available through Settings, `INTERVIEW_MEMORY_FORCE_DISABLED=true` or `INTERVIEW_MEMORY_MODE=disabled`.
 
 Backend must have memory routes enabled:
 

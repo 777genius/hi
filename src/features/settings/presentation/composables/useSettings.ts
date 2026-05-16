@@ -84,6 +84,11 @@ export function useSettings() {
     set: (value: boolean) => store.setAutoPasteText(value),
   });
 
+  const interviewMemoryEnabled = computed({
+    get: () => store.interviewMemoryEnabled,
+    set: (value: boolean) => store.setInterviewMemoryEnabled(value),
+  });
+
   const deepgramKeyterms = computed({
     get: () => store.deepgramKeyterms,
     set: (value: string) => store.setDeepgramKeyterms(value),
@@ -120,6 +125,7 @@ export function useSettings() {
           store.setAutoPasteText(false);
           store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
           store.setSelectedOutputAudioDevice(appConfigStoreInstance.selectedOutputAudioDevice);
+          store.setInterviewMemoryEnabled(appConfigStoreInstance.interviewMemoryEnabled);
         } else {
           store.setMicrophoneSensitivity(95, { persist: false });
           store.setRecordingHotkey('CmdOrCtrl+Shift+X');
@@ -127,6 +133,7 @@ export function useSettings() {
           store.setAutoPasteText(false);
           store.setSelectedAudioDevice('');
           store.setSelectedOutputAudioDevice('');
+          store.setInterviewMemoryEnabled(true);
         }
 
         // В web режиме аудио-устройства/permission недоступны
@@ -185,6 +192,7 @@ export function useSettings() {
         store.setAutoPasteText(false);
         store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
         store.setSelectedOutputAudioDevice(appConfigStoreInstance.selectedOutputAudioDevice);
+        store.setInterviewMemoryEnabled(appConfigStoreInstance.interviewMemoryEnabled);
       } else {
         try {
           const appConfig = await tauriSettingsService.getAppConfig();
@@ -194,8 +202,10 @@ export function useSettings() {
           store.setAutoPasteText(false);
           store.setSelectedAudioDevice(appConfig.selected_audio_device ?? '');
           store.setSelectedOutputAudioDevice(appConfig.selected_output_audio_device ?? '');
+          store.setInterviewMemoryEnabled(appConfig.interview_memory_enabled ?? true);
         } catch (err) {
           console.log('App config не загружен, используем значения по умолчанию');
+          store.setInterviewMemoryEnabled(true);
         }
       }
 
@@ -296,21 +306,29 @@ export function useSettings() {
         recording_hotkey: store.recordingHotkey,
         selected_audio_device: store.selectedAudioDevice,
         selected_output_audio_device: store.selectedOutputAudioDevice,
+        interview_memory_enabled: store.interviewMemoryEnabled,
       });
 
       // Жёсткая проверка: иногда UI может думать что сохранили, но по факту snapshot остался старым.
       // Такое лучше ловить сразу, иначе пользователь видит "сохранилось", а при следующем открытии снова 95.
       try {
         const snap1 = await tauriSettingsService.getAppConfig();
-        if (snap1.microphone_sensitivity !== store.microphoneSensitivity) {
-          // Повторяем только sensitivity — минимальный безопасный ретрай.
+        if (
+          snap1.microphone_sensitivity !== store.microphoneSensitivity ||
+          snap1.interview_memory_enabled !== store.interviewMemoryEnabled
+        ) {
+          // Повторяем только критичные app-config поля — минимальный безопасный ретрай.
           await tauriSettingsService.updateAppConfig({
             microphone_sensitivity: store.microphoneSensitivity,
+            interview_memory_enabled: store.interviewMemoryEnabled,
           });
           const snap2 = await tauriSettingsService.getAppConfig();
-          if (snap2.microphone_sensitivity !== store.microphoneSensitivity) {
+          if (
+            snap2.microphone_sensitivity !== store.microphoneSensitivity ||
+            snap2.interview_memory_enabled !== store.interviewMemoryEnabled
+          ) {
             throw new Error(
-              `Чувствительность не сохранилась: ожидали ${store.microphoneSensitivity}, получили ${snap2.microphone_sensitivity}`,
+              `Настройки не сохранились: sensitivity ${store.microphoneSensitivity}/${snap2.microphone_sensitivity}, interviewMemory ${store.interviewMemoryEnabled}/${snap2.interview_memory_enabled}`,
             );
           }
         }
@@ -429,6 +447,7 @@ export function useSettings() {
     selectedOutputAudioDevice,
     autoCopyToClipboard,
     autoPasteText,
+    interviewMemoryEnabled,
     deepgramKeyterms,
 
     // Store state (через computed для корректной реактивности)

@@ -42,6 +42,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const selectedOutputAudioDevice = ref('');
   const autoCopyToClipboard = ref(false);
   const autoPasteText = ref(false);
+  const interviewMemoryEnabled = ref(true);
   const deepgramKeyterms = ref('');
 
   // Debounce для автосохранения чувствительности (иначе будем спамить invoke при перетаскивании слайдера)
@@ -94,6 +95,7 @@ export const useSettingsStore = defineStore('settings', () => {
     selectedOutputAudioDevice: selectedOutputAudioDevice.value,
     autoCopyToClipboard: autoCopyToClipboard.value,
     autoPasteText: autoPasteText.value,
+    interviewMemoryEnabled: interviewMemoryEnabled.value,
     deepgramKeyterms: deepgramKeyterms.value,
   }));
 
@@ -305,6 +307,10 @@ export const useSettingsStore = defineStore('settings', () => {
     autoPasteText.value = false;
   }
 
+  function setInterviewMemoryEnabled(value: boolean) {
+    interviewMemoryEnabled.value = Boolean(value);
+  }
+
   function setAvailableAudioDevices(devices: string[]) {
     availableAudioDevices.value = devices;
   }
@@ -360,6 +366,8 @@ export const useSettingsStore = defineStore('settings', () => {
       selectedOutputAudioDevice.value = state.selectedOutputAudioDevice;
     if (state.deepgramKeyterms !== undefined)
       setDeepgramKeyterms(state.deepgramKeyterms);
+    if (state.interviewMemoryEnabled !== undefined)
+      setInterviewMemoryEnabled(state.interviewMemoryEnabled);
     // auto-copy/auto-paste принудительно выключены
     autoCopyToClipboard.value = false;
     autoPasteText.value = false;
@@ -380,6 +388,7 @@ export const useSettingsStore = defineStore('settings', () => {
     selectedOutputAudioDevice,
     autoCopyToClipboard,
     autoPasteText,
+    interviewMemoryEnabled,
     deepgramKeyterms,
     availableAudioDevices,
     availableOutputAudioDevices,
@@ -411,6 +420,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setSelectedOutputAudioDevice,
     setAutoCopyToClipboard,
     setAutoPasteText,
+    setInterviewMemoryEnabled,
     setAvailableAudioDevices,
     setAvailableOutputAudioDevices,
     setAccessibilityPermission,

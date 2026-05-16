@@ -45,6 +45,8 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
       auto_paste_text: false,
       microphone_sensitivity: 95,
       selected_audio_device: null,
+      selected_output_audio_device: null,
+      interview_memory_enabled: true,
     };
 
     invokeMock.mockImplementation(async (commandName: string, args?: any) => {
@@ -56,6 +58,9 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
         // "Rust" applies change and emits invalidation
         if (typeof args?.autoCopyToClipboard === 'boolean') {
           currentData = { ...currentData, auto_copy_to_clipboard: args.autoCopyToClipboard };
+        }
+        if (typeof args?.interviewMemoryEnabled === 'boolean') {
+          currentData = { ...currentData, interview_memory_enabled: args.interviewMemoryEnabled };
         }
         currentRevision = String(BigInt(currentRevision) + BigInt(1));
 
@@ -81,12 +86,19 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
 
     await appConfigMain.startSync();
     expect(appConfigMain.autoCopyToClipboard).toBe(false);
+    expect(appConfigMain.interviewMemoryEnabled).toBe(true);
 
     // "Settings window" triggers a stale auto-copy update; app store keeps auto actions disabled.
     await invokeMock(CMD_UPDATE_APP_CONFIG, { autoCopyToClipboard: true });
 
     await vi.waitFor(() => {
       expect(appConfigMain.autoCopyToClipboard).toBe(false);
+    });
+
+    await invokeMock(CMD_UPDATE_APP_CONFIG, { interviewMemoryEnabled: false });
+
+    await vi.waitFor(() => {
+      expect(appConfigMain.interviewMemoryEnabled).toBe(false);
     });
   });
 });

@@ -650,7 +650,8 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
         .companion_conversation_generation
         .load(std::sync::atomic::Ordering::Relaxed);
     let last_action = state.companion_last_action.read().await.clone();
-    let memory_mode = crate::presentation::interview_memory_bridge::resolved_mode();
+    let memory_mode =
+        crate::presentation::interview_memory_bridge::resolved_mode_for_state(state).await;
     let memory_session_id =
         crate::presentation::interview_memory_bridge::memory_session_id_string(state).await;
     let timeline = state

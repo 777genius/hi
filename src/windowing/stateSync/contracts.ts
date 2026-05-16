@@ -21,6 +21,7 @@ export type AppConfigSnapshotData = {
   auto_paste_text: boolean;
   selected_audio_device: string | null;
   selected_output_audio_device: string | null;
+  interview_memory_enabled: boolean;
 };
 
 /**

@@ -49,6 +49,7 @@ export interface AppConfigData {
   auto_paste_text: boolean;
   selected_audio_device: string | null;
   selected_output_audio_device: string | null;
+  interview_memory_enabled: boolean;
 }
 
 // Полная конфигурация настроек для UI
@@ -81,6 +82,9 @@ export interface SettingsState {
   // Автоматические действия
   autoCopyToClipboard: boolean;
   autoPasteText: boolean;
+
+  // Interview memory
+  interviewMemoryEnabled: boolean;
 
   // Deepgram keyterms
   deepgramKeyterms: string;

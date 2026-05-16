@@ -90,6 +90,12 @@ const messages = {
         hintPasteBody: 'Automatically inserts text into the last active window during recognition.',
         hintMacPermission: 'Requires Accessibility permission on macOS.',
       },
+      memory: {
+        label: 'Interview memory',
+        enabled: 'Use interview memory',
+        disabled: 'Memory disabled',
+        hint: 'Stores this interview context for better long-session AI answers. Turn off to keep only the compact current-session fallback.',
+      },
       device: {
         label: 'Recording device',
         default: 'System default device',
@@ -434,6 +440,12 @@ const messages = {
         hintPasteTitle: 'Автовставка:',
         hintPasteBody: 'По мере распознавания текста автоматически вставляет его в последнее активное окно.',
         hintMacPermission: 'Требует разрешения Accessibility на macOS.',
+      },
+      memory: {
+        label: 'Память интервью',
+        enabled: 'Использовать память интервью',
+        disabled: 'Память выключена',
+        hint: 'Сохраняет контекст этого интервью, чтобы AI лучше отвечал в длинной сессии. При выключении остаётся только компактный текущий контекст.',
       },
       device: {
         label: 'Устройство записи',
@@ -780,6 +792,12 @@ const messages = {
         hintPasteBody: 'Inserta texto automáticamente en la última ventana activa.',
         hintMacPermission: 'Requiere permiso de Accesibilidad en macOS.',
       },
+      memory: {
+        label: 'Memoria de entrevista',
+        enabled: 'Usar memoria de entrevista',
+        disabled: 'Memoria desactivada',
+        hint: 'Guarda el contexto de esta entrevista para mejorar respuestas largas de AI. Al desactivarla queda solo el contexto actual compacto.',
+      },
       device: {
         label: 'Dispositivo de grabación',
         default: 'Dispositivo predeterminado del sistema',
@@ -1111,6 +1129,12 @@ const messages = {
         hintPasteTitle: 'Collage auto :',
         hintPasteBody: 'Insère automatiquement le texte dans la dernière fenêtre active.',
         hintMacPermission: 'Nécessite la permission Accessibilité sur macOS.',
+      },
+      memory: {
+        label: 'Mémoire d’entretien',
+        enabled: 'Utiliser la mémoire d’entretien',
+        disabled: 'Mémoire désactivée',
+        hint: 'Conserve le contexte de cet entretien pour de meilleures réponses AI longues. Désactivée, seul le contexte actuel compact reste utilisé.',
       },
       device: {
         label: 'Périphérique d’enregistrement',
@@ -1444,6 +1468,12 @@ const messages = {
         hintPasteBody: 'Fügt Text automatisch ins zuletzt aktive Fenster ein.',
         hintMacPermission: 'Erfordert Bedienungshilfe‑Berechtigung auf macOS.',
       },
+      memory: {
+        label: 'Interview-Speicher',
+        enabled: 'Interview-Speicher verwenden',
+        disabled: 'Speicher deaktiviert',
+        hint: 'Speichert den Kontext dieses Interviews für bessere lange AI-Antworten. Ausgeschaltet bleibt nur der kompakte aktuelle Kontext.',
+      },
       device: {
         label: 'Aufnahmegerät',
         default: 'Standardgerät des Systems',
@@ -1775,6 +1805,12 @@ const messages = {
         hintPasteTitle: 'Автовставка:',
         hintPasteBody: 'Автоматично вставляє текст у останнє активне вікно.',
         hintMacPermission: 'Потребує дозволу Accessibility на macOS.',
+      },
+      memory: {
+        label: 'Памʼять інтервʼю',
+        enabled: 'Використовувати памʼять інтервʼю',
+        disabled: 'Памʼять вимкнена',
+        hint: 'Зберігає контекст цього інтервʼю, щоб AI краще відповідав у довгій сесії. Якщо вимкнути, лишається тільки компактний поточний контекст.',
       },
       device: {
         label: 'Пристрій запису',

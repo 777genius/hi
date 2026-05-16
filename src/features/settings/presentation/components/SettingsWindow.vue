@@ -23,6 +23,7 @@ import AudioDeviceSection from './sections/AudioDeviceSection.vue';
 import MicTestSection from './sections/MicTestSection.vue';
 import UpdatesSection from './sections/UpdatesSection.vue';
 import KeytermsSection from './sections/KeytermsSection.vue';
+import MemorySection from './sections/MemorySection.vue';
 
 const { t, locale } = useI18n();
 const { loadConfig, saveConfig, isSaving, isLoading, errorMessage, clearError } =
@@ -60,6 +61,7 @@ function snapshotSettingsState(): SettingsState {
     selectedOutputAudioDevice: settingsStore.selectedOutputAudioDevice,
     autoCopyToClipboard: settingsStore.autoCopyToClipboard,
     autoPasteText: settingsStore.autoPasteText,
+    interviewMemoryEnabled: settingsStore.interviewMemoryEnabled,
     deepgramKeyterms: settingsStore.deepgramKeyterms,
   };
 }
@@ -211,6 +213,7 @@ watch(
           <ThemeSection />
         </div>
         <KeytermsSection />
+        <MemorySection />
         <HotkeySection />
 
         <SystemAudioDeviceSection />

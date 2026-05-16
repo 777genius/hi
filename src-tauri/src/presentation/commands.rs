@@ -1261,6 +1261,7 @@ mod snapshot_contract_tests {
                 auto_paste_text: false,
                 selected_audio_device: None,
                 selected_output_audio_device: None,
+                interview_memory_enabled: true,
             },
         };
 
@@ -1681,6 +1682,7 @@ pub struct AppConfigSnapshotData {
     pub auto_paste_text: bool,
     pub selected_audio_device: Option<String>,
     pub selected_output_audio_device: Option<String>,
+    pub interview_memory_enabled: bool,
 }
 
 /// Get current application configuration + revision (for cross-window sync)
@@ -1697,6 +1699,7 @@ pub async fn get_app_config_snapshot(
         auto_paste_text: false,
         selected_audio_device: config.selected_audio_device,
         selected_output_audio_device: config.selected_output_audio_device,
+        interview_memory_enabled: config.interview_memory_enabled,
     };
     let revision = state.app_config_revision.read().await.to_string();
     Ok(SnapshotEnvelope { revision, data })
@@ -2002,9 +2005,10 @@ pub async fn update_app_config(
     auto_paste_text: Option<bool>,
     selected_audio_device: Option<String>,
     selected_output_audio_device: Option<String>,
+    interview_memory_enabled: Option<bool>,
 ) -> Result<(), String> {
-    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, device: {:?}",
-        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, selected_audio_device);
+    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, device: {:?}, memory_enabled: {:?}",
+        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, selected_audio_device, interview_memory_enabled);
 
     // Защита от "тихих" провалов: если фронт случайно отправил snake_case ключи,
     // Tauri не сматчит аргументы, и сюда придут одни None.
@@ -2015,8 +2019,9 @@ pub async fn update_app_config(
         && auto_paste_text.is_none()
         && selected_audio_device.is_none()
         && selected_output_audio_device.is_none()
+        && interview_memory_enabled.is_none()
     {
-        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, selectedAudioDevice).".to_string());
+        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, selectedAudioDevice, interviewMemoryEnabled).".to_string());
     }
 
     let mut config = state.config.write().await;
@@ -2116,6 +2121,20 @@ pub async fn update_app_config(
         }
     }
 
+    let mut interview_memory_changed = false;
+    if let Some(enabled) = interview_memory_enabled {
+        if config.interview_memory_enabled != enabled {
+            log::info!(
+                "Updating interview_memory_enabled: {} -> {}",
+                config.interview_memory_enabled,
+                enabled
+            );
+            config.interview_memory_enabled = enabled;
+            interview_memory_changed = true;
+            any_changed = true;
+        }
+    }
+
     // Если ничего не менялось — выходим без лишнего I/O и invalidation
     if !any_changed {
         drop(config);
@@ -2197,6 +2216,15 @@ pub async fn update_app_config(
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         },
     );
+
+    if interview_memory_changed {
+        if let Err(err) = crate::presentation::companion::publish_snapshot(&app_handle).await {
+            log::debug!(
+                "Failed to publish companion snapshot after memory config change: {}",
+                err
+            );
+        }
+    }
 
     log::info!("App configuration updated and saved successfully");
     Ok(())
@@ -3935,14 +3963,15 @@ pub async fn start_haiku_chat_stream(
         .await;
     }
 
-    let mut llm_context =
-        if crate::presentation::interview_memory_bridge::is_minimal_local_prompt_context_enabled() {
-            crate::presentation::interview_memory_bridge::minimal_current_session_fallback_context(
-                &context,
-            )
-        } else {
-            context.clone()
-        };
+    let memory_mode =
+        crate::presentation::interview_memory_bridge::resolved_mode_for_state(state.inner()).await;
+    let mut llm_context = if memory_mode.minimal_local_prompt_context_enabled() {
+        crate::presentation::interview_memory_bridge::minimal_current_session_fallback_context(
+            &context,
+        )
+    } else {
+        context.clone()
+    };
     let mut llm_question = question.clone();
     if let Some(memory_context) =
         crate::presentation::interview_memory_bridge::assemble_chat_context_or_fallback(
