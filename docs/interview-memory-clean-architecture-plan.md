@@ -1,6 +1,6 @@
 # Interview Memory Clean Architecture Plan
 
-Статус: V1 ActiveContext stabilized behind opt-in flags; production backend canary and companion ActiveContext smoke passed.
+Статус: V1 ActiveContext promoted to the default desktop bridge mode after production backend canary and companion ActiveContext smoke passed.
 
 Last audit: 2026-05-16.
 
@@ -11,22 +11,23 @@ Implemented baseline:
 - deterministic ingest, keyword/entity retrieval and strict context packing without embeddings or external extractors;
 - deterministic backend long-context tests cover early code questions and early negative constraints under large filler;
 - Tauri bridge for final system audio, microphone, focus-copy, manual prompts and final AI answers;
-- desktop `ActiveContext` bridge is opt-in only and falls back to local context on timeout, auth miss or backend error.
+- desktop bridge resolves to `ActiveContext` by default and falls back to local context on timeout, auth miss or backend error.
 - clear context/history rotates the desktop memory session and sends a best-effort backend delete for the previous session;
 - backend delete/status responses expose chunk/fact/job counts for canary and E2E verification;
 - backend HTTP E2E now covers real `/api/v1/interview-memory/*` routes, JWT auth, Postgres storage, long filler, prompt artifacts, duplicate final-event ingest, same-user session isolation, cross-user isolation and session delete/status counts.
 - desktop memory bridge splits large timeline/focus-copy events into stable part events before ingest so backend `MAX_INGEST_TEXT_CHARS` cannot silently drop long code/context blocks.
 - local `ActiveContext` companion gates have passed repeated synthetic voice + real STT + real AI + backend retrieved-memory checks on a clean local auth profile, including backend-retrieval fallback when the memory API is unavailable.
 - legacy local anchor fallback is shrunk for `ActiveContext`: memory requests and memory-failure chat fallback now use a compact recent/current tail instead of a second full-history anchor packer.
-- desktop bridge resolves `INTERVIEW_MEMORY_MODE` into explicit modes (`Disabled`, `ShadowIngest`, `ShadowRetrieve`, `AssistiveContext`, `ActiveContext`, `LocalOnly`) with `INTERVIEW_MEMORY_FORCE_DISABLED` as the top kill switch, `INTERVIEW_MEMORY_FORCE_LOCAL_ONLY` avoiding backend memory calls, and legacy `INTERVIEW_MEMORY_ENABLED=1` mapped to `ActiveContext`.
+- desktop bridge resolves `INTERVIEW_MEMORY_MODE` into explicit modes (`Disabled`, `ShadowIngest`, `ShadowRetrieve`, `AssistiveContext`, `ActiveContext`, `LocalOnly`) with unset mode defaulting to `ActiveContext`, `INTERVIEW_MEMORY_FORCE_DISABLED` as the top kill switch, `INTERVIEW_MEMORY_FORCE_LOCAL_ONLY` avoiding backend memory calls, legacy `INTERVIEW_MEMORY_ENABLED=1` mapped to `ActiveContext`, and legacy false flags disabling the default.
 - companion `/api/state` exposes a production-safe memory snapshot with resolved mode, backend/local capabilities and session id, without raw retrieved text or prompt artifacts.
 - backend application ports now include an `EmbeddingProvider` contract and infrastructure exposes `NoopEmbeddingAdapter` with adapter contract tests; V1 remains keyword/entity-only by default and does not call external embedding providers.
 - companion synthetic context E2E supports `--production-safe-artifact`/`COMPANION_PRODUCTION_SAFE_ARTIFACT=1`, redacting raw transcript/code/prompt/AI text, nested candidate text and attachment payloads while keeping release-review counts, checks, budgets and latency.
 - reusable backend production/staging canary `pnpm e2e:memory-canary` checks real `/api/v1/interview-memory/*` ingest/context/duplicate/delete/status with a JWT and writes a production-safe artifact without raw transcript/code/prompt text.
 
-Not yet promoted to product-wide default:
+Promoted to desktop default:
 
-- product decision to enable desktop `ActiveContext` by default for all users.
+- unset desktop memory mode now resolves to `ActiveContext`;
+- rollback remains explicit through `INTERVIEW_MEMORY_FORCE_DISABLED=true`, `INTERVIEW_MEMORY_MODE=disabled`, `INTERVIEW_MEMORY_ENABLED=false` or `INTERVIEW_MEMORY_ACTIVE_CONTEXT=false`.
 
 Цель: сделать долговременную память для интервью так, чтобы AI стабильно отвечал по длинной истории голосовых вопросов, кода, selected messages и уточнений, но без раздувания prompt, vendor lock-in и неконтролируемой "магии памяти".
 
@@ -3530,12 +3531,12 @@ V1 can choose no offline queue. If so, document it clearly and rely on minimal c
 
 ### Feature flag defaults
 
-Default values before production rollout:
+Default values after production rollout:
 
 ```text
-INTERVIEW_MEMORY_ENABLED=false
-INTERVIEW_MEMORY_INGEST_ENABLED=false
-INTERVIEW_MEMORY_RETRIEVAL_ENABLED=false
+INTERVIEW_MEMORY_MODE=<unset> -> ActiveContext
+INTERVIEW_MEMORY_FORCE_DISABLED=false
+INTERVIEW_MEMORY_FORCE_LOCAL_ONLY=false
 INTERVIEW_MEMORY_DEBUG_ARTIFACTS=false
 INTERVIEW_MEMORY_EMBEDDING_PROVIDER=none
 INTERVIEW_MEMORY_EXTRACTOR_PROVIDER=none
@@ -3548,7 +3549,7 @@ Suggested rollout order:
 ShadowIngest -> ShadowRetrieve -> short AssistiveContext canary -> ActiveContext default -> legacy fallback cleanup
 ```
 
-Each flag must be independently reversible.
+Each mode must be independently reversible. The emergency rollback is `INTERVIEW_MEMORY_FORCE_DISABLED=true` or `INTERVIEW_MEMORY_MODE=disabled`; `INTERVIEW_MEMORY_ENABLED=false` and `INTERVIEW_MEMORY_ACTIVE_CONTEXT=false` remain supported legacy rollback flags.
 
 ### Mode truth table
 
@@ -3559,8 +3560,8 @@ Avoid ad hoc boolean combinations. Resolve booleans into one `InterviewMemoryMod
 | `Disabled` | no | no | no | no | yes |
 | `ShadowIngest` | yes | no | no | no by default | yes |
 | `ShadowRetrieve` | yes | yes | no | no by default | yes |
-| `AssistiveContext` | yes | yes | yes, low priority | opt-in only | yes |
-| `ActiveContext` | yes | yes | yes, authoritative | opt-in only | yes |
+| `AssistiveContext` | yes | yes | yes, low priority | explicit canary mode | yes |
+| `ActiveContext` | yes | yes | yes, authoritative | default desktop mode | yes |
 | `LocalOnly` | yes | keyword/local only | yes | no | yes |
 
 Invalid combinations:
@@ -3874,7 +3875,7 @@ Controls:
 
 ### User-facing controls
 
-Before production default-on, product should expose at least:
+After desktop default-on, product should keep at least these controls or equivalent config switches:
 
 - memory enabled/disabled;
 - external embeddings enabled/disabled;
@@ -4399,13 +4400,13 @@ Run the desktop app for the full memory path with:
 
 ```bash
 pnpm copy-helper:brave:restart-cdp
-VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
 ```
 
 For local memory backend canary while keeping STT on the production websocket:
 
 ```bash
-INTERVIEW_MEMORY_AUTH_TOKEN="<local-user-jwt>" INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080 VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+INTERVIEW_MEMORY_AUTH_TOKEN="<local-user-jwt>" INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080 VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
 ```
 
 `INTERVIEW_MEMORY_AUTH_TOKEN` is an explicit memory-bridge override for local E2E only. It must not change normal app auth semantics when unset.
@@ -4449,7 +4450,7 @@ Current local evidence log:
 
 2026-05-16T09:44:00Z:
   desktop bridge boolean flags were replaced with resolved `InterviewMemoryMode`
-  checks: unit tests cover default disabled mode, legacy active flag compatibility, force-disabled precedence, force-local-only backend avoidance, shadow retrieve without prompt impact, active context with prompt impact and invalid-mode safe fallback
+  checks: unit tests covered the then-current pre-rollout disabled baseline, legacy active flag compatibility, force-disabled precedence, force-local-only backend avoidance, shadow retrieve without prompt impact, active context with prompt impact and invalid-mode safe fallback
 
 2026-05-16T09:52:00Z:
   companion snapshot now includes production-safe memory mode/capability/session metadata
@@ -4500,9 +4501,26 @@ Current local evidence log:
   counts: includedChunks=17, droppedChunks=7, timelineCount=11
   latency: memory retrieval latencyMs=389, budget=21574 / 22000 chars, criticalBudgetPressure=false
   privacy: production-safe artifact, raw code/transcript/prompt/AI text redacted
+
+2026-05-16T07:29:30Z:
+  desktop bridge default was promoted from disabled to `ActiveContext`
+  checks: unit tests now cover default `ActiveContext`, explicit disabled mode, legacy true flags, legacy false rollback flags, force-disabled precedence, force-local-only backend avoidance, shadow retrieve without prompt impact, active context with prompt impact and invalid-mode safe fallback
+  rollback: `INTERVIEW_MEMORY_FORCE_DISABLED=true`, `INTERVIEW_MEMORY_MODE=disabled`, `INTERVIEW_MEMORY_ENABLED=false` or `INTERVIEW_MEMORY_ACTIVE_CONTEXT=false`
+  note: backend routes still require backend config `INTERVIEW_MEMORY__ENABLED=true`; desktop default-on does not bypass backend config, auth or memory API fallback rules
+
+2026-05-16T07:32:29Z:
+  production companion default-on smoke passed without `INTERVIEW_MEMORY_ENABLED`
+  artifact: `.e2e-artifacts/companion-synthetic-context/2026-05-16T07-32-29-353Z.json`
+  launch mode: `VITE_API_URL=https://api.voicetext.site`, `VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site`, no desktop memory enable env
+  companion snapshot: `mode=active_context`, backend ingest/retrieval enabled, local fallback enabled
+  AI checks: project context, queue-not-stack and linear complexity all passed
+  memory checks: early code marker, late marker, project context, queue-not-stack and linear complexity all passed
+  counts: includedChunks=15, droppedChunks=9
+  latency: memory retrieval latencyMs=842
+  privacy: production-safe artifact, raw code/transcript/prompt/AI text redacted
 ```
 
-This evidence is enough to treat the V1 `ActiveContext` path as stabilized behind opt-in flags. Backend production canary, production companion real AI smoke, production companion backend memory retrieval verification and one full voice + AI + memory release smoke have passed. It is still not a product-wide default switch: the remaining default rollout decision is a product/release switch, not a missing architecture or implementation step.
+This evidence is enough to treat the V1 `ActiveContext` path as the default desktop bridge mode. Backend production canary, production companion real AI smoke, production companion backend memory retrieval verification and one full voice + AI + memory release smoke have passed. Backend production still owns the server-side gate through `INTERVIEW_MEMORY__ENABLED=true`, and rollback remains a one-env switch through `INTERVIEW_MEMORY_FORCE_DISABLED=true` or `INTERVIEW_MEMORY_MODE=disabled`.
 
 Backend must have memory routes enabled:
 
@@ -4565,7 +4583,7 @@ Hard stop conditions:
 - production-safe artifact contains raw transcript/code text;
 - wrong speaker attribution removes critical evidence.
 
-No promotion to default `ActiveContext` until this E2E passes repeatedly on a clean profile and once against the production backend staging/prod-equivalent config.
+Default `ActiveContext` promotion is allowed only while this E2E remains green on a clean profile and at least once against the production backend staging/prod-equivalent config. If this gate regresses, roll back with `INTERVIEW_MEMORY_FORCE_DISABLED=true` or `INTERVIEW_MEMORY_MODE=disabled` before shipping unrelated memory changes.
 
 ### Golden prompt snapshots
 
@@ -4885,13 +4903,13 @@ Quality gate:
 
 ## Production Readiness Checklist
 
-Do not enable by default until:
+Keep desktop `ActiveContext` enabled by default only while:
 
 - deterministic keyword/entity `ActiveContext` path passes long E2E;
 - migrations are reversible;
-- memory feature flag works;
-- retrieval feature flag works;
-- extractor feature flag works;
+- memory kill switch works;
+- retrieval path can fall back safely;
+- extractor feature flag works before any extractor adapter is enabled;
 - deletion by session/user exists;
 - prompt artifacts work in e2e;
 - no production full-text logs;

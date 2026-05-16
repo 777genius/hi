@@ -55,19 +55,19 @@ pnpm e2e:companion-audio -- --allow-mic-miss
 pnpm e2e:companion-context
 ```
 
-Для полной проверки новой interview memory path запускай desktop app с production backend и включённым memory bridge:
+Для полной проверки новой interview memory path запускай desktop app с production backend. Desktop bridge по умолчанию работает в `ActiveContext`:
 
 ```bash
 pnpm copy-helper:brave:restart-cdp
-VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
 ```
 
-`INTERVIEW_MEMORY_MODE=active_context` is the explicit equivalent of `INTERVIEW_MEMORY_ENABLED=1`. Lower modes are available for canaries: `shadow_ingest` stores chunks without prompt impact, `shadow_retrieve` enables retrieval checks without prompt impact, and `INTERVIEW_MEMORY_FORCE_DISABLED=true` is the emergency kill switch. `INTERVIEW_MEMORY_FORCE_LOCAL_ONLY=true` avoids backend memory calls and keeps only the minimal local prompt fallback.
+`INTERVIEW_MEMORY_MODE=active_context` and `INTERVIEW_MEMORY_ENABLED=1` are explicit equivalents of the default. Lower modes are available for canaries: `shadow_ingest` stores chunks without prompt impact, `shadow_retrieve` enables retrieval checks without prompt impact, and `INTERVIEW_MEMORY_FORCE_DISABLED=true` is the emergency kill switch. `INTERVIEW_MEMORY_MODE=disabled`, `INTERVIEW_MEMORY_ENABLED=false` or `INTERVIEW_MEMORY_ACTIVE_CONTEXT=false` disable the default. `INTERVIEW_MEMORY_FORCE_LOCAL_ONLY=true` avoids backend memory calls and keeps only the minimal local prompt fallback.
 
 Для local memory backend canary, когда STT остаётся на production websocket, а `/api/v1/interview-memory/*` идёт в локальный backend:
 
 ```bash
-INTERVIEW_MEMORY_AUTH_TOKEN="<local-user-jwt>" INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080 VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+INTERVIEW_MEMORY_AUTH_TOKEN="<local-user-jwt>" INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080 VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
 ```
 
 `INTERVIEW_MEMORY_AUTH_TOKEN` намеренно имеет приоритет только для memory bridge. Это позволяет гонять local backend memory E2E без замены основного app auth/provider flow.
@@ -81,7 +81,7 @@ AUTH__EMAIL__PROVIDER=console INTERVIEW_MEMORY__ENABLED=true APP_ENV=local AUTH_
 
 cd /Users/belief/dev/projects/HackInterview
 pnpm e2e:prepare-local-memory-auth -- --api-url http://127.0.0.1:8080
-VITE_API_URL=http://127.0.0.1:8080 VOICE_TO_TEXT_API_URL=http://127.0.0.1:8080 VOICE_TO_TEXT_BACKEND_URL=ws://127.0.0.1:8080 INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080 INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+VITE_API_URL=http://127.0.0.1:8080 VOICE_TO_TEXT_API_URL=http://127.0.0.1:8080 VOICE_TO_TEXT_BACKEND_URL=ws://127.0.0.1:8080 INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
 ```
 
 `e2e:prepare-local-memory-auth` логинится в local backend через `/api/v1/auth/login`, пишет Tauri-native `auth_store.json` с `*_expires_at_ms` и кладёт raw access token в `/tmp/hackinterview-memory-e2e-token.txt` для `--verify-memory`.
@@ -135,7 +135,7 @@ pnpm e2e:companion-context -- --production-safe-artifact
 
 `--skip-voice` intentionally narrows AI/memory expectations to deterministic focus-copy and prompt facts only. It does not require voice-only facts like "таймер" or "последний аргумент", because those facts are introduced by the synthetic voice phase.
 
-When `INTERVIEW_MEMORY_ENABLED=1` and the memory API is intentionally unavailable, the desktop bridge now falls back to a compact current-session tail. That fallback should prove the chat still answers and the question flow does not break; it is not expected to preserve old long-interview recall without the backend memory context.
+When the desktop bridge is in `ActiveContext` and the memory API is intentionally unavailable, it falls back to a compact current-session tail. That fallback should prove the chat still answers and the question flow does not break; it is not expected to preserve old long-interview recall without the backend memory context.
 
 The companion `/api/state` snapshot includes a production-safe `memory` block with the resolved mode, backend/local capabilities and memory session id. It intentionally does not include raw retrieved text or prompt artifacts. `pnpm e2e:companion-context` fails early if that block is missing.
 

@@ -609,6 +609,13 @@ fn env_value_is_true(value: Option<String>) -> bool {
     )
 }
 
+fn env_value_is_false(value: Option<String>) -> bool {
+    matches!(
+        value.map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off")
+    )
+}
+
 fn resolve_mode_from_env(get_env: impl Fn(&str) -> Option<String>) -> InterviewMemoryMode {
     if env_value_is_true(get_env("INTERVIEW_MEMORY_FORCE_DISABLED")) {
         return InterviewMemoryMode::Disabled;
@@ -645,7 +652,14 @@ fn resolve_mode_from_env(get_env: impl Fn(&str) -> Option<String>) -> InterviewM
         return InterviewMemoryMode::ActiveContext;
     }
 
-    InterviewMemoryMode::Disabled
+    if env_value_is_false(get_env("INTERVIEW_MEMORY_ENABLED"))
+        || env_value_is_false(get_env("HACKINTERVIEW_INTERVIEW_MEMORY_ENABLED"))
+        || env_value_is_false(get_env("INTERVIEW_MEMORY_ACTIVE_CONTEXT"))
+    {
+        return InterviewMemoryMode::Disabled;
+    }
+
+    InterviewMemoryMode::ActiveContext
 }
 
 #[cfg(test)]
@@ -804,8 +818,8 @@ mod tests {
     }
 
     #[test]
-    fn memory_mode_defaults_to_disabled() {
-        assert_eq!(resolve_mode(&[]), InterviewMemoryMode::Disabled);
+    fn memory_mode_defaults_to_active_context() {
+        assert_eq!(resolve_mode(&[]), InterviewMemoryMode::ActiveContext);
     }
 
     #[test]
@@ -828,6 +842,18 @@ mod tests {
                 ("INTERVIEW_MEMORY_MODE", "active_context"),
                 ("INTERVIEW_MEMORY_ENABLED", "1"),
             ]),
+            InterviewMemoryMode::Disabled
+        );
+    }
+
+    #[test]
+    fn memory_mode_legacy_false_disables_default_active_context() {
+        assert_eq!(
+            resolve_mode(&[("INTERVIEW_MEMORY_ENABLED", "false")]),
+            InterviewMemoryMode::Disabled
+        );
+        assert_eq!(
+            resolve_mode(&[("INTERVIEW_MEMORY_ACTIVE_CONTEXT", "0")]),
             InterviewMemoryMode::Disabled
         );
     }
