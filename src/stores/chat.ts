@@ -65,6 +65,18 @@ export interface ChatMessage {
   activeCandidateId?: string;
 }
 
+type MemoryRequestEvidencePayload = {
+  id: string;
+  label: string;
+  text: string;
+};
+
+type MemoryContextEvidencePayload = {
+  selectedMessages: MemoryRequestEvidencePayload[];
+  currentCode: MemoryRequestEvidencePayload[];
+  recentTimeline: MemoryRequestEvidencePayload[];
+};
+
 const MIN_HOVER_TRIGGER_MS = 800;
 const MIC_DOMINANCE_HOLD_MS = 1200;
 const LIVE_STT_MESSAGE_ID = 'stt:live';
@@ -364,6 +376,126 @@ export const useChatStore = defineStore('chat', () => {
     if (activeText) return activeText;
     const primaryText = String(primaryCandidate(message)?.text ?? '').trim();
     return primaryText || String(message.text ?? '').trim();
+  }
+
+  function textForContext(message: ChatMessage): string {
+    return message.kind === 'haiku' ? assistantTextForContext(message) : String(message.text ?? '').trim();
+  }
+
+  function formatMessageForContext(message: ChatMessage): string {
+    const text = textForContext(message);
+    if (!text) return '';
+    if (message.kind === 'mic') return `МИКРОФОН: ${text}`;
+    if (message.kind === 'prompt') return `ЗАПРОС: ${text}`;
+    if (message.kind === 'stt') return `ОС: ${text}`;
+    if (message.kind === 'haiku') return `ПОМОЩНИК: ${text}`;
+    return text;
+  }
+
+  function parseContextPrefix(line: string): { label: string; text: string } | null {
+    const trimmed = String(line ?? '').trimStart();
+    const prefixes: Array<[string, string]> = [
+      ['ОС:', 'system_audio'],
+      ['МИКРОФОН:', 'microphone'],
+      ['ЗАПРОС:', 'manual_prompt'],
+      ['ПОМОЩНИК:', 'assistant'],
+    ];
+
+    for (const [prefix, label] of prefixes) {
+      if (trimmed.startsWith(prefix)) {
+        return { label, text: trimmed.slice(prefix.length).trimStart() };
+      }
+    }
+    return null;
+  }
+
+  function splitContextBlocks(contextText: string): Array<{ label: string; text: string }> {
+    const blocks: Array<{ label: string; text: string }> = [];
+    let currentLabel = 'recent_timeline';
+    let currentText = '';
+
+    function flush(): void {
+      const text = currentText.trim();
+      if (text) blocks.push({ label: currentLabel, text });
+      currentText = '';
+    }
+
+    for (const line of String(contextText ?? '').split('\n')) {
+      const prefixed = parseContextPrefix(line);
+      if (prefixed) {
+        flush();
+        currentLabel = prefixed.label;
+        currentText = prefixed.text;
+        continue;
+      }
+
+      currentText += currentText ? `\n${line}` : line;
+    }
+
+    flush();
+    return blocks;
+  }
+
+  function textLooksLikeCurrentCode(text: string): boolean {
+    const lower = String(text ?? '').toLowerCase();
+    return (
+      lower.includes('```') ||
+      lower.includes('function ') ||
+      lower.includes('class ') ||
+      lower.includes('interface ') ||
+      lower.includes('struct ') ||
+      lower.includes('impl ') ||
+      lower.includes('const ') ||
+      lower.includes('let ') ||
+      lower.includes('var ') ||
+      lower.includes('def ') ||
+      lower.includes('func ') ||
+      lower.includes('=>') ||
+      lower.includes('select ') ||
+      lower.includes(' from ')
+    );
+  }
+
+  function buildMemoryContextEvidence(
+    contextText: string,
+    options: { selectedOnly?: boolean } = {}
+  ): MemoryContextEvidencePayload {
+    const evidence: MemoryContextEvidencePayload = {
+      selectedMessages: [],
+      currentCode: [],
+      recentTimeline: [],
+    };
+
+    splitContextBlocks(contextText).forEach((block, index) => {
+      const text = block.text.trim();
+      if (!text) return;
+
+      if (textLooksLikeCurrentCode(text)) {
+        evidence.currentCode.push({
+          id: `context-code:${index + 1}`,
+          label: 'current_code',
+          text,
+        });
+        return;
+      }
+
+      if (options.selectedOnly) {
+        evidence.selectedMessages.push({
+          id: `selected-context:${index + 1}`,
+          label: block.label === 'recent_timeline' ? 'selected_message' : block.label,
+          text,
+        });
+        return;
+      }
+
+      evidence.recentTimeline.push({
+        id: `recent-context:${index + 1}`,
+        label: block.label,
+        text,
+      });
+    });
+
+    return evidence;
   }
 
   function normalizeForDedup(v: string): string {
@@ -696,23 +828,13 @@ export const useChatStore = defineStore('chat', () => {
   function buildHaikuContextText(): string {
     const parts: ContextRetentionPart[] = [];
 
-    function formatLine(msg: ChatMessage): string {
-      const t = msg.kind === 'haiku' ? assistantTextForContext(msg) : String(msg.text ?? '').trim();
-      if (!t) return '';
-      if (msg.kind === 'mic') return `МИКРОФОН: ${t}`;
-      if (msg.kind === 'prompt') return `ЗАПРОС: ${t}`;
-      if (msg.kind === 'stt') return `ОС: ${t}`;
-      if (msg.kind === 'haiku') return `ПОМОЩНИК: ${t}`;
-      return t;
-    }
-
     if (hasSelection.value) {
       const selected = selectedSet.value;
       for (const msg of messages.value) {
         if (!selected.has(msg.id)) continue;
         if (msg.deleted) continue;
         if (msg.kind === 'haiku' && msg.status !== 'final') continue;
-        const line = formatLine(msg);
+        const line = formatMessageForContext(msg);
         if (line) parts.push({ kind: msg.kind, line });
       }
 
@@ -724,7 +846,7 @@ export const useChatStore = defineStore('chat', () => {
       if (msg.deleted) continue;
       if (msg.kind === 'haiku' && msg.status !== 'final') continue;
       if (isMessageOutOfContext(msg)) continue;
-      const line = formatLine(msg);
+      const line = formatMessageForContext(msg);
       if (line) parts.push({ kind: msg.kind, line });
     }
 
@@ -734,21 +856,11 @@ export const useChatStore = defineStore('chat', () => {
   function buildHaikuContextTextIgnoringSelection(): string {
     const parts: ContextRetentionPart[] = [];
 
-    function formatLine(msg: ChatMessage): string {
-      const t = msg.kind === 'haiku' ? assistantTextForContext(msg) : String(msg.text ?? '').trim();
-      if (!t) return '';
-      if (msg.kind === 'mic') return `МИКРОФОН: ${t}`;
-      if (msg.kind === 'prompt') return `ЗАПРОС: ${t}`;
-      if (msg.kind === 'stt') return `ОС: ${t}`;
-      if (msg.kind === 'haiku') return `ПОМОЩНИК: ${t}`;
-      return t;
-    }
-
     for (const msg of messages.value) {
       if (msg.deleted) continue;
       if (msg.kind === 'haiku' && msg.status !== 'final') continue;
       if (isMessageOutOfContext(msg)) continue;
-      const line = formatLine(msg);
+      const line = formatMessageForContext(msg);
       if (line) parts.push({ kind: msg.kind, line });
     }
 
@@ -758,20 +870,10 @@ export const useChatStore = defineStore('chat', () => {
   function buildHaikuContextTextFullHistory(): string {
     const parts: ContextRetentionPart[] = [];
 
-    function formatLine(msg: ChatMessage): string {
-      const t = msg.kind === 'haiku' ? assistantTextForContext(msg) : String(msg.text ?? '').trim();
-      if (!t) return '';
-      if (msg.kind === 'mic') return `МИКРОФОН: ${t}`;
-      if (msg.kind === 'prompt') return `ЗАПРОС: ${t}`;
-      if (msg.kind === 'stt') return `ОС: ${t}`;
-      if (msg.kind === 'haiku') return `ПОМОЩНИК: ${t}`;
-      return t;
-    }
-
     for (const msg of messages.value) {
       if (msg.deleted) continue;
       if (msg.kind === 'haiku' && msg.status !== 'final') continue;
-      const line = formatLine(msg);
+      const line = formatMessageForContext(msg);
       if (line) parts.push({ kind: msg.kind, line });
     }
 
@@ -975,11 +1077,15 @@ export const useChatStore = defineStore('chat', () => {
     if (!contextText) return;
 
     const insertAfterId = resolveInsertAfterId();
+    const memoryContextEvidence = buildMemoryContextEvidence(contextText, {
+      selectedOnly: hasSelection.value,
+    });
 
     const requestId = await invoke<string>('start_haiku_stream', {
       text: contextText,
       system_prompt: sanitizeSystemPrompt(systemPrompt.value),
       openaiResponsesWebSearch: openaiResponsesWebSearchEnabled.value,
+      memoryContextEvidence,
       companionMeta: {
         insertAfterId,
         createdAtMs: now,
@@ -1027,6 +1133,7 @@ export const useChatStore = defineStore('chat', () => {
     const createdAtMs = Date.now();
 
     const contextText = buildHaikuContextTextIgnoringSelection();
+    const memoryContextEvidence = buildMemoryContextEvidence(contextText);
 
     promptMessages.value.push({
       id: promptMessageId,
@@ -1054,6 +1161,7 @@ export const useChatStore = defineStore('chat', () => {
         })),
         systemPrompt: sanitizeSystemPrompt(systemPrompt.value),
         openaiResponsesWebSearch: openaiResponsesWebSearchEnabled.value,
+        memoryContextEvidence,
         companionMeta: {
           promptMessageId,
           promptCreatedAtMs: createdAtMs,
@@ -1092,6 +1200,7 @@ export const useChatStore = defineStore('chat', () => {
     if (!questionText) return;
 
     const contextText = buildHaikuContextTextFullHistory();
+    const memoryContextEvidence = buildMemoryContextEvidence(contextText);
     const createdAtMs = Date.now();
 
     try {
@@ -1101,6 +1210,7 @@ export const useChatStore = defineStore('chat', () => {
         images: [],
         systemPrompt: sanitizeSystemPrompt(systemPrompt.value),
         openaiResponsesWebSearch: openaiResponsesWebSearchEnabled.value,
+        memoryContextEvidence,
         companionMeta: {
           insertAfterId: messageId,
           createdAtMs,

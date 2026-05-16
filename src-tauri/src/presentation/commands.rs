@@ -2962,6 +2962,9 @@ pub async fn start_haiku_stream(
     system_prompt: Option<String>,
     companion_meta: Option<CompanionAiRequestMeta>,
     openai_responses_web_search: Option<bool>,
+    memory_context_evidence: Option<
+        crate::presentation::interview_memory_bridge::MemoryContextEvidenceInput,
+    >,
 ) -> Result<String, String> {
     let prompt = text.trim();
     if prompt.is_empty() {
@@ -3142,6 +3145,7 @@ pub async fn start_haiku_stream(
         crate::presentation::interview_memory_bridge::assemble_stream_context_or_fallback(
             state.inner(),
             prompt,
+            memory_context_evidence.as_ref(),
         )
         .await;
     *state.companion_system_prompt.write().await = system_prompt.clone();
@@ -3751,6 +3755,9 @@ pub async fn start_haiku_chat_stream(
     system_prompt: Option<String>,
     companion_meta: Option<CompanionAiRequestMeta>,
     openai_responses_web_search: Option<bool>,
+    memory_context_evidence: Option<
+        crate::presentation::interview_memory_bridge::MemoryContextEvidenceInput,
+    >,
 ) -> Result<String, String> {
     let context = context_text.trim().to_string();
     let question = question_text.trim().to_string();
@@ -3978,6 +3985,7 @@ pub async fn start_haiku_chat_stream(
             state.inner(),
             &context,
             &question,
+            memory_context_evidence.as_ref(),
         )
         .await
     {

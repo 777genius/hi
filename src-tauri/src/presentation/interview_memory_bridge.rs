@@ -56,6 +56,40 @@ struct RequestEvidenceDto {
     text: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryContextEvidenceInput {
+    #[serde(default)]
+    pub selected_messages: Vec<MemoryRequestEvidenceInput>,
+    #[serde(default)]
+    pub current_code: Vec<MemoryRequestEvidenceInput>,
+    #[serde(default)]
+    pub recent_timeline: Vec<MemoryRequestEvidenceInput>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryRequestEvidenceInput {
+    pub id: Option<String>,
+    pub label: Option<String>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StructuredContextEvidence {
+    selected_messages: Vec<RequestEvidenceDto>,
+    current_code: Vec<RequestEvidenceDto>,
+    recent_timeline: Vec<RequestEvidenceDto>,
+}
+
+impl StructuredContextEvidence {
+    fn has_any(&self) -> bool {
+        !self.selected_messages.is_empty()
+            || !self.current_code.is_empty()
+            || !self.recent_timeline.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct AssembleContextRequest {
     session_id: String,
@@ -226,7 +260,11 @@ pub async fn spawn_ingest_timeline_event(state: &AppState, event: MemoryTimeline
     });
 }
 
-pub async fn assemble_stream_context_or_fallback(state: &AppState, local_context: &str) -> String {
+pub async fn assemble_stream_context_or_fallback(
+    state: &AppState,
+    local_context: &str,
+    memory_context_evidence: Option<&MemoryContextEvidenceInput>,
+) -> String {
     let mode = resolved_mode_for_state(state).await;
     if !mode.backend_prompt_context_enabled() {
         return if mode.minimal_local_prompt_context_enabled() {
@@ -237,7 +275,7 @@ pub async fn assemble_stream_context_or_fallback(state: &AppState, local_context
     }
 
     let fallback_context = minimal_current_session_fallback_context(local_context);
-    match assemble_stream_context(state, local_context).await {
+    match assemble_stream_context(state, local_context, memory_context_evidence).await {
         Ok(Some(text)) => text,
         Ok(None) => fallback_context,
         Err(err) => {
@@ -251,6 +289,7 @@ pub async fn assemble_chat_context_or_fallback(
     state: &AppState,
     local_context: &str,
     question: &str,
+    memory_context_evidence: Option<&MemoryContextEvidenceInput>,
 ) -> Option<String> {
     if !resolved_mode_for_state(state)
         .await
@@ -259,7 +298,7 @@ pub async fn assemble_chat_context_or_fallback(
         return None;
     }
 
-    match assemble_chat_context(state, local_context, question).await {
+    match assemble_chat_context(state, local_context, question, memory_context_evidence).await {
         Ok(text) => text,
         Err(err) => {
             log::warn!("Interview memory chat context fallback: {}", err);
@@ -275,6 +314,7 @@ pub fn minimal_current_session_fallback_context(local_context: &str) -> String {
 async fn assemble_stream_context(
     state: &AppState,
     local_context: &str,
+    memory_context_evidence: Option<&MemoryContextEvidenceInput>,
 ) -> Result<Option<String>, String> {
     let fallback_context = minimal_current_session_fallback_context(local_context);
     let trimmed = fallback_context.trim();
@@ -286,7 +326,8 @@ async fn assemble_stream_context(
     };
 
     let session_id = memory_session_id(state).await;
-    let request = build_stream_context_request(session_id, trimmed.to_string());
+    let request =
+        build_stream_context_request(session_id, trimmed.to_string(), memory_context_evidence);
     let response = post_json::<_, AssembleContextResponse>(
         "/api/v1/interview-memory/context",
         &auth_token,
@@ -302,6 +343,7 @@ async fn assemble_chat_context(
     state: &AppState,
     local_context: &str,
     question: &str,
+    memory_context_evidence: Option<&MemoryContextEvidenceInput>,
 ) -> Result<Option<String>, String> {
     let context = local_context.trim();
     let question = question.trim();
@@ -317,6 +359,7 @@ async fn assemble_chat_context(
         session_id,
         minimal_current_session_fallback_context(context),
         question.to_string(),
+        memory_context_evidence,
     );
     let response = post_json::<_, AssembleContextResponse>(
         "/api/v1/interview-memory/context",
@@ -465,18 +508,24 @@ fn build_ingest_request(session_id: Uuid, event: MemoryTimelineEvent) -> IngestM
     }
 }
 
-fn build_stream_context_request(session_id: Uuid, local_context: String) -> AssembleContextRequest {
+fn build_stream_context_request(
+    session_id: Uuid,
+    local_context: String,
+    memory_context_evidence: Option<&MemoryContextEvidenceInput>,
+) -> AssembleContextRequest {
+    let evidence = build_structured_context_evidence(&local_context, memory_context_evidence);
+    let current_request = derive_stream_current_request(&local_context, &evidence);
     AssembleContextRequest {
         session_id: session_id.to_string(),
         context_snapshot_id: Some(format!("desktop-stream-{}", Uuid::new_v4())),
         current_request: RequestEvidenceDto {
             id: "current-context".to_string(),
             label: "current_request".to_string(),
-            text: local_context,
+            text: current_request,
         },
-        selected_messages: Vec::new(),
-        current_code: Vec::new(),
-        recent_timeline: Vec::new(),
+        selected_messages: evidence.selected_messages,
+        current_code: evidence.current_code,
+        recent_timeline: evidence.recent_timeline,
         budget_max_chars: Some(DEFAULT_CONTEXT_BUDGET_CHARS),
         max_memory_candidates: Some(DEFAULT_MAX_MEMORY_CANDIDATES),
         max_memory_results: Some(DEFAULT_MAX_MEMORY_RESULTS),
@@ -487,7 +536,9 @@ fn build_chat_context_request(
     session_id: Uuid,
     local_context: String,
     question: String,
+    memory_context_evidence: Option<&MemoryContextEvidenceInput>,
 ) -> AssembleContextRequest {
+    let evidence = build_structured_context_evidence(&local_context, memory_context_evidence);
     AssembleContextRequest {
         session_id: session_id.to_string(),
         context_snapshot_id: Some(format!("desktop-chat-{}", Uuid::new_v4())),
@@ -500,20 +551,210 @@ fn build_chat_context_request(
                 question
             },
         },
-        selected_messages: Vec::new(),
-        current_code: Vec::new(),
-        recent_timeline: (!local_context.trim().is_empty())
-            .then(|| RequestEvidenceDto {
-                id: "local-context".to_string(),
-                label: "recent_timeline".to_string(),
-                text: local_context,
-            })
-            .into_iter()
-            .collect(),
+        selected_messages: evidence.selected_messages,
+        current_code: evidence.current_code,
+        recent_timeline: evidence.recent_timeline,
         budget_max_chars: Some(DEFAULT_CONTEXT_BUDGET_CHARS),
         max_memory_candidates: Some(DEFAULT_MAX_MEMORY_CANDIDATES),
         max_memory_results: Some(DEFAULT_MAX_MEMORY_RESULTS),
     }
+}
+
+fn build_structured_context_evidence(
+    local_context: &str,
+    memory_context_evidence: Option<&MemoryContextEvidenceInput>,
+) -> StructuredContextEvidence {
+    if let Some(input) = memory_context_evidence {
+        let evidence = structured_context_from_input(input);
+        if evidence.has_any() {
+            return evidence;
+        }
+    }
+
+    parse_local_context_evidence(local_context)
+}
+
+fn structured_context_from_input(input: &MemoryContextEvidenceInput) -> StructuredContextEvidence {
+    StructuredContextEvidence {
+        selected_messages: evidence_from_input(&input.selected_messages, "selected_message"),
+        current_code: evidence_from_input(&input.current_code, "current_code"),
+        recent_timeline: evidence_from_input(&input.recent_timeline, "recent_timeline"),
+    }
+}
+
+fn evidence_from_input(
+    items: &[MemoryRequestEvidenceInput],
+    default_label: &str,
+) -> Vec<RequestEvidenceDto> {
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let text = item.text.trim();
+            if text.is_empty() {
+                return None;
+            }
+
+            let label = item
+                .label
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(default_label);
+            let id = item
+                .id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("{}:{}", default_label, index + 1));
+
+            Some(RequestEvidenceDto {
+                id,
+                label: label.to_string(),
+                text: text.to_string(),
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedContextKind {
+    SystemAudio,
+    Microphone,
+    ManualPrompt,
+    Assistant,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedContextBlock {
+    kind: ParsedContextKind,
+    text: String,
+}
+
+fn parse_local_context_evidence(local_context: &str) -> StructuredContextEvidence {
+    let mut evidence = StructuredContextEvidence::default();
+
+    for (index, block) in split_context_blocks(local_context).into_iter().enumerate() {
+        let text = block.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+
+        if text_looks_like_current_code(text) {
+            evidence.current_code.push(RequestEvidenceDto {
+                id: format!("local-code:{}", index + 1),
+                label: "current_code".to_string(),
+                text: text.to_string(),
+            });
+            continue;
+        }
+
+        let label = match block.kind {
+            ParsedContextKind::SystemAudio => "system_audio",
+            ParsedContextKind::Microphone => "microphone",
+            ParsedContextKind::ManualPrompt => "manual_prompt",
+            ParsedContextKind::Assistant => "assistant",
+            ParsedContextKind::Unknown => "recent_timeline",
+        };
+
+        evidence.recent_timeline.push(RequestEvidenceDto {
+            id: format!("local-context:{}", index + 1),
+            label: label.to_string(),
+            text: text.to_string(),
+        });
+    }
+
+    evidence
+}
+
+fn split_context_blocks(local_context: &str) -> Vec<ParsedContextBlock> {
+    let mut blocks = Vec::new();
+    let mut current_kind = ParsedContextKind::Unknown;
+    let mut current_text = String::new();
+
+    for line in local_context.lines() {
+        if let Some((kind, text)) = parse_context_prefix(line) {
+            push_context_block(&mut blocks, current_kind, &mut current_text);
+            current_kind = kind;
+            current_text.push_str(text);
+            continue;
+        }
+
+        if !current_text.is_empty() {
+            current_text.push('\n');
+        }
+        current_text.push_str(line);
+    }
+
+    push_context_block(&mut blocks, current_kind, &mut current_text);
+    blocks
+}
+
+fn parse_context_prefix(line: &str) -> Option<(ParsedContextKind, &str)> {
+    let trimmed = line.trim_start();
+    for (prefix, kind) in [
+        ("ОС:", ParsedContextKind::SystemAudio),
+        ("МИКРОФОН:", ParsedContextKind::Microphone),
+        ("ЗАПРОС:", ParsedContextKind::ManualPrompt),
+        ("ПОМОЩНИК:", ParsedContextKind::Assistant),
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some((kind, rest.trim_start()));
+        }
+    }
+    None
+}
+
+fn push_context_block(
+    blocks: &mut Vec<ParsedContextBlock>,
+    kind: ParsedContextKind,
+    text: &mut String,
+) {
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        blocks.push(ParsedContextBlock {
+            kind,
+            text: trimmed.to_string(),
+        });
+    }
+    text.clear();
+}
+
+fn text_looks_like_current_code(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    text.contains("```")
+        || lower.contains("function ")
+        || lower.contains("class ")
+        || lower.contains("interface ")
+        || lower.contains("struct ")
+        || lower.contains("impl ")
+        || lower.contains("const ")
+        || lower.contains("let ")
+        || lower.contains("var ")
+        || lower.contains("def ")
+        || lower.contains("func ")
+        || lower.contains("=>")
+        || lower.contains("select ")
+        || lower.contains(" from ")
+}
+
+fn derive_stream_current_request(
+    local_context: &str,
+    evidence: &StructuredContextEvidence,
+) -> String {
+    if let Some(item) = evidence.recent_timeline.iter().rev().find(|item| {
+        !matches!(item.label.as_str(), "assistant") && !item.text.trim().is_empty()
+    }) {
+        return trim_text_tail_to_line(&item.text, 4_000);
+    }
+
+    if evidence.has_any() {
+        return "Ответь по текущему интервью-контексту.".to_string();
+    }
+
+    minimal_current_session_fallback_context(local_context)
 }
 
 fn source_to_backend(source: MemoryTimelineSource) -> &'static str {
@@ -786,11 +1027,13 @@ mod tests {
             Uuid::new_v4(),
             "ОС: previous question".to_string(),
             "current question".to_string(),
+            None,
         );
 
         assert_eq!(request.current_request.text, "current question");
         assert_eq!(request.recent_timeline.len(), 1);
-        assert_eq!(request.recent_timeline[0].text, "ОС: previous question");
+        assert_eq!(request.recent_timeline[0].text, "previous question");
+        assert_eq!(request.recent_timeline[0].label, "system_audio");
         assert_eq!(request.budget_max_chars, Some(DEFAULT_CONTEXT_BUDGET_CHARS));
     }
 
@@ -819,20 +1062,96 @@ mod tests {
             Uuid::new_v4(),
             minimal_current_session_fallback_context(&old_context),
             "current question".to_string(),
+            None,
         );
 
         assert_eq!(request.current_request.text, "current question");
-        assert_eq!(request.recent_timeline.len(), 1);
-        assert!(
-            request.recent_timeline[0].text.chars().count()
-                <= DEFAULT_MINIMAL_FALLBACK_CONTEXT_CHARS
+        let recent_text = request
+            .recent_timeline
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(recent_text.chars().count() <= DEFAULT_MINIMAL_FALLBACK_CONTEXT_CHARS);
+        assert!(!recent_text.contains("OLD_MEMORY_SHOULD_COME_FROM_BACKEND"));
+        assert!(recent_text.contains("CURRENT_TAIL_FACT"));
+    }
+
+    #[test]
+    fn chat_context_request_splits_code_and_recent_timeline_sections() {
+        let local_context = [
+            "ОС: CODE_CTX function processQueue() { return queue.shift(); }",
+            "ОС: почему нужна очередь а не стек?",
+            "МИКРОФОН: отвечаю про FIFO",
+        ]
+        .join("\n");
+
+        let request = build_chat_context_request(
+            Uuid::new_v4(),
+            local_context,
+            "сформулируй ответ".to_string(),
+            None,
         );
-        assert!(!request.recent_timeline[0]
-            .text
-            .contains("OLD_MEMORY_SHOULD_COME_FROM_BACKEND"));
+
+        assert_eq!(request.current_request.text, "сформулируй ответ");
+        assert_eq!(request.current_code.len(), 1);
+        assert!(request.current_code[0].text.contains("processQueue"));
+        assert_eq!(request.recent_timeline.len(), 2);
         assert!(request.recent_timeline[0]
             .text
-            .contains("CURRENT_TAIL_FACT"));
+            .contains("почему нужна очередь"));
+        assert_eq!(request.recent_timeline[1].label, "microphone");
+    }
+
+    #[test]
+    fn stream_context_request_derives_current_request_from_latest_speech() {
+        let local_context = [
+            "ОС: ```ts",
+            "function debounceSearch() {}",
+            "```",
+            "ОС: как объяснить отмену прошлого таймера?",
+        ]
+        .join("\n");
+
+        let request = build_stream_context_request(Uuid::new_v4(), local_context, None);
+
+        assert_eq!(
+            request.current_request.text,
+            "как объяснить отмену прошлого таймера?"
+        );
+        assert_eq!(request.current_code.len(), 1);
+        assert!(request.current_code[0].text.contains("debounceSearch"));
+        assert_eq!(request.recent_timeline.len(), 1);
+    }
+
+    #[test]
+    fn explicit_memory_context_evidence_preserves_selected_messages() {
+        let input = MemoryContextEvidenceInput {
+            selected_messages: vec![MemoryRequestEvidenceInput {
+                id: Some("stt:selected".to_string()),
+                label: Some("selected_message".to_string()),
+                text: "selected transcript requirement".to_string(),
+            }],
+            current_code: vec![MemoryRequestEvidenceInput {
+                id: Some("focus-copy:code".to_string()),
+                label: Some("current_code".to_string()),
+                text: "function solve() {}".to_string(),
+            }],
+            recent_timeline: Vec::new(),
+        };
+
+        let request = build_chat_context_request(
+            Uuid::new_v4(),
+            "ОС: ignored fallback".to_string(),
+            "answer selected".to_string(),
+            Some(&input),
+        );
+
+        assert_eq!(request.selected_messages.len(), 1);
+        assert_eq!(request.selected_messages[0].id, "stt:selected");
+        assert_eq!(request.current_code.len(), 1);
+        assert_eq!(request.current_code[0].id, "focus-copy:code");
+        assert!(request.recent_timeline.is_empty());
     }
 
     #[test]

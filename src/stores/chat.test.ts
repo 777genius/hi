@@ -850,10 +850,71 @@ describe('chat store (selection + context)', () => {
           'ОС: selected transcript',
           'ЗАПРОС: selected manual note',
         ].join('\n'),
+        memoryContextEvidence: expect.objectContaining({
+          selectedMessages: [
+            expect.objectContaining({
+              label: 'system_audio',
+              text: 'selected transcript',
+            }),
+            expect.objectContaining({
+              label: 'manual_prompt',
+              text: 'selected manual note',
+            }),
+          ],
+          currentCode: [],
+        }),
         system_prompt: DEFAULT_PROMPT,
         companionMeta: expect.objectContaining({
           insertAfterId: promptMsg!.id,
           createdAtMs: expect.any(Number),
+        }),
+      })
+    );
+  });
+
+  it('passes focus-copy code as currentCode memory evidence', async () => {
+    transcriptionProxy.finalUtterances.push(
+      {
+        id: 'focus-copy:code',
+        sessionId: 1,
+        text: [
+          'CODE_CTX_ALPHA',
+          '```ts',
+          'function processQueue(items: string[]) {',
+          '  return items.shift();',
+          '}',
+          '```',
+        ].join('\n'),
+        timestamp: 1,
+      },
+      {
+        id: 'stt:question',
+        sessionId: 1,
+        text: 'почему тут очередь, а не стек?',
+        timestamp: 2,
+      }
+    );
+    invokeMock.mockResolvedValue('r-code');
+    const store = useChatStore();
+
+    await store.sendPromptToLlm({ text: 'ответь как на интервью', images: [] });
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_chat_stream',
+      expect.objectContaining({
+        memoryContextEvidence: expect.objectContaining({
+          currentCode: [
+            expect.objectContaining({
+              label: 'current_code',
+              text: expect.stringContaining('processQueue'),
+            }),
+          ],
+          recentTimeline: [
+            expect.objectContaining({
+              label: 'system_audio',
+              text: 'почему тут очередь, а не стек?',
+            }),
+          ],
         }),
       })
     );

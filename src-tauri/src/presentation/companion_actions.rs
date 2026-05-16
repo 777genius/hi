@@ -358,6 +358,7 @@ pub async fn request_ai(
                 prompt_created_at_ms: None,
             }),
             openai_responses_web_search,
+            None,
         )
         .await?;
     } else {
@@ -378,6 +379,7 @@ pub async fn request_ai(
                 prompt_created_at_ms: Some(created_at_ms),
             }),
             openai_responses_web_search,
+            None,
         )
         .await?;
     }
@@ -441,6 +443,7 @@ pub async fn send_prompt(
             prompt_created_at_ms: Some(created_at_ms),
         }),
         openai_responses_web_search,
+        None,
     )
     .await?;
 
