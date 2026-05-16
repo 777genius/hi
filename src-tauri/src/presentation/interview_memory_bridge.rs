@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::presentation::AppState;
@@ -9,6 +10,34 @@ const DEFAULT_MINIMAL_FALLBACK_CONTEXT_CHARS: usize = 12_000;
 const DEFAULT_MAX_MEMORY_CANDIDATES: u64 = 2_000;
 const DEFAULT_MAX_MEMORY_RESULTS: usize = 32;
 const MAX_INGEST_EVENT_TEXT_CHARS: usize = 25_000;
+const CONTEXT_HTTP_TIMEOUT: Duration = Duration::from_millis(2_000);
+const CONTEXT_RETRY_DELAY: Duration = Duration::from_millis(150);
+const INGEST_HTTP_TIMEOUT: Duration = Duration::from_millis(4_000);
+const INGEST_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryBridgeDiagnostics {
+    pub last_context_status: String,
+    pub last_context_error: Option<String>,
+    pub last_context_latency_ms: Option<u64>,
+    pub last_ingest_status: String,
+    pub last_ingest_error: Option<String>,
+    pub last_updated_at_ms: Option<i64>,
+}
+
+impl Default for MemoryBridgeDiagnostics {
+    fn default() -> Self {
+        Self {
+            last_context_status: "disabled".to_string(),
+            last_context_error: None,
+            last_context_latency_ms: None,
+            last_ingest_status: "skipped".to_string(),
+            last_ingest_error: None,
+            last_updated_at_ms: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct MemoryMetadataRequest {
@@ -223,30 +252,71 @@ pub async fn reset_session(state: &AppState) {
     });
 }
 
+pub async fn memory_diagnostics(state: &AppState) -> MemoryBridgeDiagnostics {
+    state.companion_memory_diagnostics.read().await.clone()
+}
+
+async fn record_context_diagnostics(
+    state: &AppState,
+    status: &str,
+    error: Option<String>,
+    latency_ms: Option<u64>,
+) {
+    let mut diagnostics = state.companion_memory_diagnostics.write().await;
+    diagnostics.last_context_status = status.to_string();
+    diagnostics.last_context_error = error.map(|value| sanitize_memory_error(&value));
+    diagnostics.last_context_latency_ms = latency_ms;
+    diagnostics.last_updated_at_ms = Some(now_ms());
+}
+
+async fn record_ingest_diagnostics(
+    diagnostics: &tokio::sync::RwLock<MemoryBridgeDiagnostics>,
+    status: &str,
+    error: Option<String>,
+) {
+    let mut diagnostics = diagnostics.write().await;
+    diagnostics.last_ingest_status = status.to_string();
+    diagnostics.last_ingest_error = error.map(|value| sanitize_memory_error(&value));
+    diagnostics.last_updated_at_ms = Some(now_ms());
+}
+
 pub async fn spawn_ingest_timeline_event(state: &AppState, event: MemoryTimelineEvent) {
     if !resolved_mode_for_state(state)
         .await
         .backend_ingest_enabled()
     {
+        record_ingest_diagnostics(&state.companion_memory_diagnostics, "skipped", None).await;
         return;
     }
 
     let Some(auth_token) = auth_token(state).await else {
+        record_ingest_diagnostics(
+            &state.companion_memory_diagnostics,
+            "skipped",
+            Some("auth_missing".to_string()),
+        )
+        .await;
         return;
     };
     let text = event.text.trim().to_string();
     if text.is_empty() {
+        record_ingest_diagnostics(&state.companion_memory_diagnostics, "skipped", None).await;
         return;
     }
     let session_id = memory_session_id(state).await;
     let requests = build_ingest_requests(session_id, MemoryTimelineEvent { text, ..event });
+    let diagnostics = state.companion_memory_diagnostics.clone();
 
     tauri::async_runtime::spawn(async move {
+        let mut last_error: Option<String> = None;
         for request in requests {
-            if let Err(err) = post_json::<_, serde_json::Value>(
+            if let Err(err) = post_json_with_retry::<_, serde_json::Value>(
                 "/api/v1/interview-memory/ingest",
                 &auth_token,
                 &request,
+                3,
+                INGEST_HTTP_TIMEOUT,
+                INGEST_RETRY_DELAY,
             )
             .await
             {
@@ -255,7 +325,14 @@ pub async fn spawn_ingest_timeline_event(state: &AppState, event: MemoryTimeline
                     request.event_id,
                     err
                 );
+                last_error = Some(err.to_string());
             }
+        }
+
+        if let Some(err) = last_error {
+            record_ingest_diagnostics(&diagnostics, "failed", Some(err)).await;
+        } else {
+            record_ingest_diagnostics(&diagnostics, "ok", None).await;
         }
     });
 }
@@ -267,6 +344,7 @@ pub async fn assemble_stream_context_or_fallback(
 ) -> String {
     let mode = resolved_mode_for_state(state).await;
     if !mode.backend_prompt_context_enabled() {
+        record_context_diagnostics(state, "disabled", None, None).await;
         return if mode.minimal_local_prompt_context_enabled() {
             minimal_current_session_fallback_context(local_context)
         } else {
@@ -295,6 +373,7 @@ pub async fn assemble_chat_context_or_fallback(
         .await
         .backend_prompt_context_enabled()
     {
+        record_context_diagnostics(state, "disabled", None, None).await;
         return None;
     }
 
@@ -319,23 +398,63 @@ async fn assemble_stream_context(
     let fallback_context = minimal_current_session_fallback_context(local_context);
     let trimmed = fallback_context.trim();
     if trimmed.is_empty() {
+        record_context_diagnostics(
+            state,
+            "fallback",
+            Some("empty_local_context".to_string()),
+            None,
+        )
+        .await;
         return Ok(None);
     }
     let Some(auth_token) = auth_token(state).await else {
+        record_context_diagnostics(
+            state,
+            "auth_missing",
+            Some("auth_missing".to_string()),
+            None,
+        )
+        .await;
         return Ok(None);
     };
 
     let session_id = memory_session_id(state).await;
     let request =
         build_stream_context_request(session_id, trimmed.to_string(), memory_context_evidence);
-    let response = post_json::<_, AssembleContextResponse>(
+    let started_at = std::time::Instant::now();
+    let response = match post_json_with_retry::<_, AssembleContextResponse>(
         "/api/v1/interview-memory/context",
         &auth_token,
         &request,
+        2,
+        CONTEXT_HTTP_TIMEOUT,
+        CONTEXT_RETRY_DELAY,
     )
-    .await?;
+    .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            let message = err.to_string();
+            record_context_diagnostics(state, "fallback", Some(message.clone()), Some(latency_ms))
+                .await;
+            return Err(message);
+        }
+    };
 
     let text = response.text.trim().to_string();
+    let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    if text.is_empty() {
+        record_context_diagnostics(
+            state,
+            "fallback",
+            Some("empty_backend_context".to_string()),
+            Some(latency_ms),
+        )
+        .await;
+    } else {
+        record_context_diagnostics(state, "ok", None, Some(latency_ms)).await;
+    }
     Ok((!text.is_empty()).then_some(text))
 }
 
@@ -348,9 +467,23 @@ async fn assemble_chat_context(
     let context = local_context.trim();
     let question = question.trim();
     if context.is_empty() && question.is_empty() {
+        record_context_diagnostics(
+            state,
+            "fallback",
+            Some("empty_chat_context".to_string()),
+            None,
+        )
+        .await;
         return Ok(None);
     }
     let Some(auth_token) = auth_token(state).await else {
+        record_context_diagnostics(
+            state,
+            "auth_missing",
+            Some("auth_missing".to_string()),
+            None,
+        )
+        .await;
         return Ok(None);
     };
 
@@ -361,22 +494,102 @@ async fn assemble_chat_context(
         question.to_string(),
         memory_context_evidence,
     );
-    let response = post_json::<_, AssembleContextResponse>(
+    let started_at = std::time::Instant::now();
+    let response = match post_json_with_retry::<_, AssembleContextResponse>(
         "/api/v1/interview-memory/context",
         &auth_token,
         &request,
+        2,
+        CONTEXT_HTTP_TIMEOUT,
+        CONTEXT_RETRY_DELAY,
     )
-    .await?;
+    .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            let message = err.to_string();
+            record_context_diagnostics(state, "fallback", Some(message.clone()), Some(latency_ms))
+                .await;
+            return Err(message);
+        }
+    };
 
     let text = response.text.trim().to_string();
+    let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    if text.is_empty() {
+        record_context_diagnostics(
+            state,
+            "fallback",
+            Some("empty_backend_context".to_string()),
+            Some(latency_ms),
+        )
+        .await;
+    } else {
+        record_context_diagnostics(state, "ok", None, Some(latency_ms)).await;
+    }
     Ok((!text.is_empty()).then_some(text))
 }
 
-async fn post_json<TRequest, TResponse>(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryHttpError {
+    message: String,
+    transient: bool,
+}
+
+impl MemoryHttpError {
+    fn new(message: impl Into<String>, transient: bool) -> Self {
+        Self {
+            message: message.into(),
+            transient,
+        }
+    }
+}
+
+impl std::fmt::Display for MemoryHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+async fn post_json_with_retry<TRequest, TResponse>(
     path: &str,
     auth_token: &str,
     body: &TRequest,
-) -> Result<TResponse, String>
+    attempts: usize,
+    timeout: Duration,
+    retry_delay: Duration,
+) -> Result<TResponse, MemoryHttpError>
+where
+    TRequest: Serialize + ?Sized,
+    TResponse: for<'de> Deserialize<'de>,
+{
+    let attempts = attempts.max(1);
+    for attempt in 0..attempts {
+        match post_json_once::<_, TResponse>(path, auth_token, body, timeout).await {
+            Ok(response) => return Ok(response),
+            Err(err) if !err.transient || attempt + 1 >= attempts => return Err(err),
+            Err(err) => {
+                log::debug!(
+                    "Interview memory transient request failure attempt {}/{}: {}",
+                    attempt + 1,
+                    attempts,
+                    err
+                );
+                tokio::time::sleep(retry_delay).await;
+            }
+        }
+    }
+
+    unreachable!("attempts is clamped to at least one")
+}
+
+async fn post_json_once<TRequest, TResponse>(
+    path: &str,
+    auth_token: &str,
+    body: &TRequest,
+    timeout: Duration,
+) -> Result<TResponse, MemoryHttpError>
 where
     TRequest: Serialize + ?Sized,
     TResponse: for<'de> Deserialize<'de>,
@@ -386,22 +599,25 @@ where
         .post(url)
         .bearer_auth(auth_token)
         .json(body)
-        .timeout(std::time::Duration::from_secs(4))
+        .timeout(timeout)
         .send()
         .await
-        .map_err(|err| format!("request failed: {err}"))?;
+        .map_err(|err| MemoryHttpError::new(format!("request failed: {err}"), true))?;
 
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("status={status} body={body}"));
+        return Err(MemoryHttpError::new(
+            format!("status={status} body={body}"),
+            is_transient_status(status),
+        ));
     }
 
     response
         .json::<ApiSuccess<TResponse>>()
         .await
         .map(|envelope| envelope.data)
-        .map_err(|err| format!("invalid response: {err}"))
+        .map_err(|err| MemoryHttpError::new(format!("invalid response: {err}"), false))
 }
 
 async fn delete_session(session_id: Uuid, auth_token: &str) -> Result<(), String> {
@@ -476,6 +692,30 @@ fn build_ingest_requests(session_id: Uuid, event: MemoryTimelineEvent) -> Vec<In
             build_ingest_request(session_id, part_event)
         })
         .collect()
+}
+
+fn is_transient_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn sanitize_memory_error(error: &str) -> String {
+    let compact = error
+        .replace('\r', " ")
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let redacted = compact
+        .replace("Bearer ", "Bearer [redacted] ")
+        .replace("access_token", "access_token[redacted]");
+    redacted.chars().take(220).collect()
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 fn build_ingest_request(session_id: Uuid, event: MemoryTimelineEvent) -> IngestMemoryRequest {
@@ -1157,6 +1397,40 @@ mod tests {
         assert!(request.current_code.is_empty());
         assert_eq!(request.recent_timeline.len(), 1);
         assert!(request.recent_timeline[0].text.contains("class component"));
+    }
+
+    #[test]
+    fn context_parser_detects_sql_select_from_as_code_only_for_local_fallback() {
+        let request = build_chat_context_request(
+            Uuid::new_v4(),
+            "ОС: select id, name from users where active = true".to_string(),
+            "ответь".to_string(),
+            None,
+        );
+
+        assert_eq!(request.current_code.len(), 1);
+        assert!(request.current_code[0].text.contains("select id"));
+    }
+
+    #[test]
+    fn memory_http_status_retry_policy_is_bounded_to_transient_failures() {
+        assert!(is_transient_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_transient_status(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(!is_transient_status(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!is_transient_status(reqwest::StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn memory_error_sanitizer_is_short_single_line_and_redacts_token_markers() {
+        let sanitized = sanitize_memory_error(&format!(
+            "status=500\nbody=Bearer secret access_token {}",
+            "x".repeat(500)
+        ));
+
+        assert!(!sanitized.contains('\n'));
+        assert!(!sanitized.contains("Bearer secret"));
+        assert!(sanitized.contains("Bearer [redacted]"));
+        assert!(sanitized.chars().count() <= 220);
     }
 
     #[test]

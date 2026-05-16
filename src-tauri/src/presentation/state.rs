@@ -152,6 +152,10 @@ pub struct AppState {
     /// Backend interview memory session. Reset on context/history clear so cleared context does not return.
     pub companion_memory_session_id: Arc<RwLock<uuid::Uuid>>,
 
+    /// Last interview memory bridge diagnostics for companion/E2E observability.
+    pub companion_memory_diagnostics:
+        Arc<RwLock<crate::presentation::interview_memory_bridge::MemoryBridgeDiagnostics>>,
+
     /// Последний shared companion action для desktop catch-up.
     pub companion_last_action: Arc<RwLock<Option<String>>>,
 
@@ -284,6 +288,9 @@ impl AppState {
                     companion_context_floor_seq: Arc::new(AtomicU64::new(0)),
                     companion_conversation_generation: Arc::new(AtomicU64::new(0)),
                     companion_memory_session_id: Arc::new(RwLock::new(uuid::Uuid::new_v4())),
+                    companion_memory_diagnostics: Arc::new(RwLock::new(
+                        crate::presentation::interview_memory_bridge::MemoryBridgeDiagnostics::default(),
+                    )),
                     companion_last_action: Arc::new(RwLock::new(None)),
                     companion_system_prompt: Arc::new(RwLock::new(String::new())),
                     companion_system_accumulated_text: Arc::new(RwLock::new(String::new())),
@@ -374,6 +381,9 @@ impl AppState {
                     companion_context_floor_seq: Arc::new(AtomicU64::new(0)),
                     companion_conversation_generation: Arc::new(AtomicU64::new(0)),
                     companion_memory_session_id: Arc::new(RwLock::new(uuid::Uuid::new_v4())),
+                    companion_memory_diagnostics: Arc::new(RwLock::new(
+                        crate::presentation::interview_memory_bridge::MemoryBridgeDiagnostics::default(),
+                    )),
                     companion_last_action: Arc::new(RwLock::new(None)),
                     companion_system_prompt: Arc::new(RwLock::new(String::new())),
                     companion_system_accumulated_text: Arc::new(RwLock::new(String::new())),
@@ -475,6 +485,9 @@ impl AppState {
             companion_context_floor_seq: Arc::new(AtomicU64::new(0)),
             companion_conversation_generation: Arc::new(AtomicU64::new(0)),
             companion_memory_session_id: Arc::new(RwLock::new(uuid::Uuid::new_v4())),
+            companion_memory_diagnostics: Arc::new(RwLock::new(
+                crate::presentation::interview_memory_bridge::MemoryBridgeDiagnostics::default(),
+            )),
             companion_last_action: Arc::new(RwLock::new(None)),
             companion_system_prompt: Arc::new(RwLock::new(String::new())),
             companion_system_accumulated_text: Arc::new(RwLock::new(String::new())),

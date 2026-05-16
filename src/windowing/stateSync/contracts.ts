@@ -141,6 +141,19 @@ export type CompanionSnapshotData = {
     appMuted: boolean;
     appEnabled: boolean;
   };
+  memory?: {
+    mode: string;
+    backendIngestEnabled: boolean;
+    backendPromptContextEnabled: boolean;
+    minimalLocalPromptContextEnabled: boolean;
+    sessionId: string;
+    lastContextStatus: 'ok' | 'fallback' | 'disabled' | 'auth_missing' | string;
+    lastContextError?: string | null;
+    lastContextLatencyMs?: number | null;
+    lastIngestStatus: 'ok' | 'skipped' | 'failed' | string;
+    lastIngestError?: string | null;
+    lastUpdatedAtMs?: number | null;
+  };
   controls: {
     historyFloorSeq: number;
     contextFloorSeq: number;

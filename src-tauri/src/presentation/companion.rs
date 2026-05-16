@@ -104,6 +104,16 @@ pub struct CompanionMemoryState {
     pub backend_prompt_context_enabled: bool,
     pub minimal_local_prompt_context_enabled: bool,
     pub session_id: String,
+    pub last_context_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_context_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_context_latency_ms: Option<u64>,
+    pub last_ingest_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_ingest_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_updated_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, Default)]
@@ -654,6 +664,8 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
         crate::presentation::interview_memory_bridge::resolved_mode_for_state(state).await;
     let memory_session_id =
         crate::presentation::interview_memory_bridge::memory_session_id_string(state).await;
+    let memory_diagnostics =
+        crate::presentation::interview_memory_bridge::memory_diagnostics(state).await;
     let timeline = state
         .companion_timeline
         .read()
@@ -687,6 +699,12 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
             minimal_local_prompt_context_enabled: memory_mode
                 .minimal_local_prompt_context_enabled(),
             session_id: memory_session_id,
+            last_context_status: memory_diagnostics.last_context_status,
+            last_context_error: memory_diagnostics.last_context_error,
+            last_context_latency_ms: memory_diagnostics.last_context_latency_ms,
+            last_ingest_status: memory_diagnostics.last_ingest_status,
+            last_ingest_error: memory_diagnostics.last_ingest_error,
+            last_updated_at_ms: memory_diagnostics.last_updated_at_ms,
         },
         controls: CompanionControlState {
             history_floor_seq,
