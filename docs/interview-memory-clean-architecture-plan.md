@@ -1,6 +1,6 @@
 # Interview Memory Clean Architecture Plan
 
-Статус: V1 implementation complete behind opt-in flags; production default is gated by canary.
+Статус: V1 ActiveContext stabilized behind opt-in flags; production backend canary and companion ActiveContext smoke passed.
 
 Last audit: 2026-05-16.
 
@@ -24,9 +24,10 @@ Implemented baseline:
 - companion synthetic context E2E supports `--production-safe-artifact`/`COMPANION_PRODUCTION_SAFE_ARTIFACT=1`, redacting raw transcript/code/prompt/AI text, nested candidate text and attachment payloads while keeping release-review counts, checks, budgets and latency.
 - reusable backend production/staging canary `pnpm e2e:memory-canary` checks real `/api/v1/interview-memory/*` ingest/context/duplicate/delete/status with a JWT and writes a production-safe artifact without raw transcript/code/prompt text.
 
-Not yet promoted to default:
+Not yet promoted to product-wide default:
 
-- production/staging canary with production-safe artifact review;
+- product decision to enable desktop `ActiveContext` by default for all users;
+- optional full voice + AI + memory production release smoke in one run before flipping the default for all users.
 
 Цель: сделать долговременную память для интервью так, чтобы AI стабильно отвечал по длинной истории голосовых вопросов, кода, selected messages и уточнений, но без раздувания prompt, vendor lock-in и неконтролируемой "магии памяти".
 
@@ -4464,9 +4465,34 @@ Current local evidence log:
   backend memory API gained reusable production/staging canary script
   checks: `node --check e2e-tests/interview-memory-canary.mjs`; `pnpm e2e:memory-canary -- --help`
   note: canary creates an isolated session, verifies ingest/context/duplicate/delete/status and self-checks that the artifact does not leak raw E2E fragments
+
+2026-05-16T07:09:18Z:
+  production backend canary passed on `https://api.voicetext.site`
+  backend commit: `735fb4432cdfab978a54dfad98633dfb42510c55`
+  Render deploys: `dep-d841alh9rddc73braua0` migrated schema and went live; `dep-d841dmp9rddc7398b990` enabled `INTERVIEW_MEMORY__ENABLED=true` and went live
+  health: `/health` returned 200 with db/redis/provider ok
+  artifact: `.e2e-artifacts/interview-memory-canary/2026-05-16T07-09-18-881Z.json`
+  checks: all production canary context checks passed, artifact is production-safe/redacted
+  counts: storedChunks=11, duplicateChunks=1, includedChunks=11, droppedChunks=0, deletedChunks=11, statusAfterDelete chunks/facts/jobs/pendingJobs all 0
+  latency: contextLatencyMs=284, budget=9295 / 18000 chars, criticalBudgetPressure=false
+
+2026-05-16T07:20:55Z:
+  production companion real AI smoke passed in `ActiveContext` mode on `http://127.0.0.1:43821` against `https://api.voicetext.site`
+  launch mode: `INTERVIEW_MEMORY_ENABLED=1`, `VITE_API_URL=https://api.voicetext.site`, `VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site`
+  checks: AI answer covered project context, queue-not-stack requirement and linear-complexity requirement
+  note: this run validated real companion chat and paid AI behavior before the backend memory retrieval verification on the same companion session
+
+2026-05-16T07:21:16Z:
+  production companion backend memory retrieval verification passed on the same `ActiveContext` session
+  artifact: `.e2e-artifacts/companion-synthetic-context/2026-05-16T07-21-16-113Z.json`
+  checks: backend memory retrieval found early code marker, late marker, project context, queue-not-stack constraint and linear-complexity requirement
+  counts: includedChunks=16, droppedChunks=8, timelineCount=8
+  latency: memory retrieval latencyMs=401, budget=21919 / 22000 chars, criticalBudgetPressure=false
+  privacy: production-safe artifact, raw code/transcript/prompt/AI text redacted
+  note: synthetic voice + real STT + real AI had already passed earlier with local fallback; this final production run intentionally skipped voice to avoid spending time on audio while validating backend memory retrieval
 ```
 
-This evidence is enough to treat the V1 local `ActiveContext` path as stabilized behind flags. It is still not enough to promote memory as default because the production/staging canary and production prompt artifact review are not done.
+This evidence is enough to treat the V1 `ActiveContext` path as stabilized behind opt-in flags. Backend production canary, production companion real AI smoke and production companion backend memory retrieval verification have passed. It is still not a product-wide default switch: the default rollout should be a deliberate product/release decision, with one final full voice + AI + memory smoke immediately before flipping the default for all users.
 
 Backend must have memory routes enabled:
 
