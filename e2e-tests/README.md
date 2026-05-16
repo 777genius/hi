@@ -73,7 +73,21 @@ INTERVIEW_MEMORY_AUTH_TOKEN="<local-user-jwt>" INTERVIEW_MEMORY_API_URL=http://1
 Для полного local canary, где auth, STT websocket и memory routes идут в локальный backend, сначала залогинь desktop app в local backend или положи валидную native-сессию в `~/Library/Application Support/HackInterview/auth_store.json`, затем запускай:
 
 ```bash
+cd /Users/belief/dev/projects/VoicetextAI/backend
+set -a; source .env >/dev/null 2>&1 || true; set +a
+AUTH__EMAIL__PROVIDER=console INTERVIEW_MEMORY__ENABLED=true APP_ENV=local AUTH__JWT__ACCESS_TTL_SECS=3600 cargo run
+
+cd /Users/belief/dev/projects/HackInterview
+pnpm e2e:prepare-local-memory-auth -- --api-url http://127.0.0.1:8080
 VITE_API_URL=http://127.0.0.1:8080 VOICE_TO_TEXT_API_URL=http://127.0.0.1:8080 VOICE_TO_TEXT_BACKEND_URL=ws://127.0.0.1:8080 INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080 INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+```
+
+`e2e:prepare-local-memory-auth` логинится в local backend через `/api/v1/auth/login`, пишет Tauri-native `auth_store.json` с `*_expires_at_ms` и кладёт raw access token в `/tmp/hackinterview-memory-e2e-token.txt` для `--verify-memory`.
+
+После local canary очисти тестовую native auth-сессию:
+
+```bash
+pnpm e2e:prepare-local-memory-auth -- --clear
 ```
 
 Backend, против которого идёт проверка, должен иметь включённые memory routes:

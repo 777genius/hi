@@ -4368,9 +4368,11 @@ Frontend companion synthetic context gate:
 
 Frontend companion memory retrieval gate:
   cd /Users/belief/dev/projects/HackInterview
+  pnpm e2e:prepare-local-memory-auth -- --api-url http://127.0.0.1:8080
   INTERVIEW_MEMORY_AUTH_TOKEN="$(cat /tmp/hackinterview-memory-e2e-token.txt)" \
   INTERVIEW_MEMORY_DB_URL=postgres://belief@localhost/voice_to_text \
   pnpm e2e:companion-context -- --filler-chars 52000 --verify-memory --memory-api-url http://127.0.0.1:8080
+  pnpm e2e:prepare-local-memory-auth -- --clear
 
 Frontend companion dual audio gate:
   cd /Users/belief/dev/projects/HackInterview
@@ -4400,6 +4402,23 @@ INTERVIEW_MEMORY_AUTH_TOKEN="<local-user-jwt>" INTERVIEW_MEMORY_API_URL=http://1
 `INTERVIEW_MEMORY_AUTH_TOKEN` is an explicit memory-bridge override for local E2E only. It must not change normal app auth semantics when unset.
 
 The `--verify-memory` gate must assert the backend `## retrieved_memory` section itself, not only the final AI answer. Required evidence: early code marker, late marker, project phrase, debounce/timer/argument question, queue-not-stack correction and linear-complexity requirement.
+
+Current local evidence log:
+
+```text
+2026-05-15T23:17:00Z:
+  full companion synthetic voice + real STT + real AI + backend memory retrieval passed
+  artifact: .e2e-artifacts/companion-synthetic-context/2026-05-15T23-17-00-401Z.json
+  checks: voiceOk=true, all AI checks=true, all memory retrieved_memory checks=true
+  memory session: f6594436-60fd-4658-a813-67dc3699113e
+  budget: 20448 / 22000 chars, includedChunks=15, droppedChunks=9
+
+2026-05-15T23:18:08Z:
+  memory-only recheck on the same session passed after tightening retrieved_memory section parsing
+  artifact: .e2e-artifacts/companion-synthetic-context/2026-05-15T23-18-08-737Z.json
+```
+
+This evidence is enough to keep implementation work moving, but not enough to promote memory as default. Before promotion, rerun the full gate at least twice on a clean profile and attach fresh artifacts.
 
 Backend must have memory routes enabled:
 

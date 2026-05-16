@@ -30,7 +30,8 @@
     "copy-helper:brave:restart-cdp": "tools/browser-focus-copy-extension/open-brave-silent-debugger.sh restart",
     "e2e:tauri": "node e2e-tests/run-e2e.mjs",
     "e2e:companion-audio": "node e2e-tests/companion-dual-audio-smoke.mjs",
-    "e2e:companion-context": "node e2e-tests/companion-synthetic-context.mjs"
+    "e2e:companion-context": "node e2e-tests/companion-synthetic-context.mjs",
+    "e2e:prepare-local-memory-auth": "node e2e-tests/prepare-local-memory-auth.mjs"
   },
   "dependencies": {
     "@mdi/font": "^7.4.47",
