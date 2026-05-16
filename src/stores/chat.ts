@@ -437,23 +437,36 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function textLooksLikeCurrentCode(text: string): boolean {
+    const raw = String(text ?? '');
+    if (raw.includes('```')) return true;
+
     const lower = String(text ?? '').toLowerCase();
-    return (
-      lower.includes('```') ||
-      lower.includes('function ') ||
-      lower.includes('class ') ||
-      lower.includes('interface ') ||
-      lower.includes('struct ') ||
-      lower.includes('impl ') ||
-      lower.includes('const ') ||
-      lower.includes('let ') ||
-      lower.includes('var ') ||
-      lower.includes('def ') ||
-      lower.includes('func ') ||
-      lower.includes('=>') ||
-      lower.includes('select ') ||
-      lower.includes(' from ')
-    );
+    if (lower.includes('select ') && lower.includes(' from ')) return true;
+
+    const hasCodePunctuation =
+      raw.includes('{') ||
+      raw.includes(';') ||
+      raw.includes('=>') ||
+      raw.includes('=') ||
+      raw.includes('()') ||
+      /\w+\s*\([^)]*\)\s*[:{]/.test(raw);
+    if (!hasCodePunctuation) return false;
+
+    return [
+      'function ',
+      'class ',
+      'interface ',
+      'struct ',
+      'impl ',
+      'const ',
+      'let ',
+      'var ',
+      'def ',
+      'func ',
+      'export ',
+      'import ',
+      'type ',
+    ].some((marker) => lower.includes(marker));
   }
 
   function buildMemoryContextEvidence(

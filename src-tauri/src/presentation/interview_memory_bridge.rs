@@ -723,21 +723,43 @@ fn push_context_block(
 }
 
 fn text_looks_like_current_code(text: &str) -> bool {
+    if text.contains("```") {
+        return true;
+    }
+
     let lower = text.to_ascii_lowercase();
-    text.contains("```")
-        || lower.contains("function ")
-        || lower.contains("class ")
-        || lower.contains("interface ")
-        || lower.contains("struct ")
-        || lower.contains("impl ")
-        || lower.contains("const ")
-        || lower.contains("let ")
-        || lower.contains("var ")
-        || lower.contains("def ")
-        || lower.contains("func ")
-        || lower.contains("=>")
-        || lower.contains("select ")
-        || lower.contains(" from ")
+    if lower.contains("select ") && lower.contains(" from ") {
+        return true;
+    }
+
+    let has_code_punctuation = text.contains('{')
+        || text.contains(';')
+        || text.contains("=>")
+        || text.contains('=')
+        || text.contains("()")
+        || text.contains("):")
+        || text.contains(") {");
+    if !has_code_punctuation {
+        return false;
+    }
+
+    [
+        "function ",
+        "class ",
+        "interface ",
+        "struct ",
+        "impl ",
+        "const ",
+        "let ",
+        "var ",
+        "def ",
+        "func ",
+        "export ",
+        "import ",
+        "type ",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn derive_stream_current_request(
@@ -1101,6 +1123,20 @@ mod tests {
             .text
             .contains("почему нужна очередь"));
         assert_eq!(request.recent_timeline[1].label, "microphone");
+    }
+
+    #[test]
+    fn context_parser_does_not_treat_plain_class_discussion_as_code() {
+        let request = build_chat_context_request(
+            Uuid::new_v4(),
+            "ОС: объясни разницу class component и function component".to_string(),
+            "ответь".to_string(),
+            None,
+        );
+
+        assert!(request.current_code.is_empty());
+        assert_eq!(request.recent_timeline.len(), 1);
+        assert!(request.recent_timeline[0].text.contains("class component"));
     }
 
     #[test]

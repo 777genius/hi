@@ -920,6 +920,34 @@ describe('chat store (selection + context)', () => {
     );
   });
 
+  it('keeps plain class discussion in recentTimeline memory evidence', async () => {
+    transcriptionProxy.finalUtterances.push({
+      id: 'stt:class-discussion',
+      sessionId: 1,
+      text: 'объясни разницу class component и function component',
+      timestamp: 1,
+    });
+    invokeMock.mockResolvedValue('r-class');
+    const store = useChatStore();
+
+    await store.sendPromptToLlm({ text: 'ответь кратко', images: [] });
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_chat_stream',
+      expect.objectContaining({
+        memoryContextEvidence: expect.objectContaining({
+          currentCode: [],
+          recentTimeline: [
+            expect.objectContaining({
+              label: 'system_audio',
+              text: 'объясни разницу class component и function component',
+            }),
+          ],
+        }),
+      })
+    );
+  });
+
   it('selection can explicitly use an old message after clearLlmContext', async () => {
     transcriptionProxy.finalUtterances.push(
       { id: 'stt:old', sessionId: 1, text: 'old selected question', timestamp: 1 },
