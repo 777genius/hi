@@ -14,6 +14,7 @@ pnpm e2e:companion-audio
 
 - не чистит историю companion, а запоминает текущий `seq` и проверяет только новые сообщения;
 - сам берёт companion token из `COMPANION_TOKEN`, `COMPANION_URL` или bridge-файла приложения;
+- по умолчанию генерирует детерминированные русские interview-вопросы через macOS `say`;
 - стартует запись через `/api/record/start`;
 - в system-фазе временно выключает app microphone transcript и проигрывает голосовые fixture-файлы через `afplay`;
 - в mic-фазе включает app microphone transcript и повторяет проигрывание, чтобы проверить реальный mic-path;
@@ -33,7 +34,7 @@ pnpm e2e:companion-audio -- --cycles 3 --allow-mic-miss
 COMPANION_URL="http://127.0.0.1:43821/companion.html?token=<token>" pnpm e2e:companion-audio
 ```
 
-Для текущих голосовых fixture-файлов по умолчанию используются:
+Для проверки сохранёнными голосовыми fixture-файлами используй `--real-fixtures`; тогда берутся:
 
 ```text
 /Users/belief/Documents/2026-05-14 23.56.41.ogg
@@ -46,6 +47,28 @@ COMPANION_URL="http://127.0.0.1:43821/companion.html?token=<token>" pnpm e2e:com
 ```bash
 pnpm e2e:companion-audio -- --allow-mic-miss
 ```
+
+Для детерминированной mic-проверки без акустики установи `SwitchAudioSource` и BlackHole:
+
+```bash
+brew install switchaudio-osx blackhole-2ch
+```
+
+`blackhole-2ch` ставится как системный audio driver и может потребовать пароль администратора и reboot. После появления устройства `BlackHole 2ch` тест можно запускать так:
+
+```bash
+pnpm e2e:companion-audio -- --skip-system --mic-route blackhole --require-mic
+```
+
+В `blackhole` route тест временно переключает только macOS input на `BlackHole 2ch`, проигрывает синтетический голос прямо в BlackHole через `ffmpeg` AudioToolbox output и затем восстанавливает прежний input. Обычный system output не переключается, поэтому звук компьютера для пользователя не должен пропадать. Если нужно другое имя устройства, передай `--blackhole-device "<name>"` или `COMPANION_BLACKHOLE_DEVICE`.
+
+Для проверки обоих каналов за один прогон:
+
+```bash
+pnpm e2e:companion-audio -- --cycles 2 --system-runs 2 --mic-runs 2 --mic-route blackhole --require-mic
+```
+
+Это проверяет system path и mic path последовательно. Полностью одновременная проверка разного текста в OS audio и mic audio требует отдельного mixer/test audio adapter, иначе один и тот же BlackHole stream может попасть сразу в несколько capture paths.
 
 ## Companion synthetic interview + AI context
 

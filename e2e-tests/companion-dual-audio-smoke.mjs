@@ -45,6 +45,8 @@ function parseArgs(argv) {
     gainDb: Number(process.env.COMPANION_AUDIO_GAIN_DB || 20),
     volume: Number(process.env.COMPANION_AUDIO_VOLUME || 3),
     minExpectedHits: Number(process.env.COMPANION_AUDIO_MIN_EXPECTED_HITS || 2),
+    micRoute: process.env.COMPANION_MIC_ROUTE || 'auto',
+    blackholeDevice: process.env.COMPANION_BLACKHOLE_DEVICE || 'BlackHole 2ch',
     startTimeoutMs: 20_000,
     transcriptionTimeoutMs: 65_000,
     settleMs: 4_000,
@@ -81,6 +83,8 @@ function parseArgs(argv) {
     else if (arg === '--cycles') options.cycles = Number(next());
     else if (arg === '--system-runs') options.systemRuns = Number(next());
     else if (arg === '--mic-runs') options.micRuns = Number(next());
+    else if (arg === '--mic-route') options.micRoute = next();
+    else if (arg === '--blackhole-device') options.blackholeDevice = next();
     else if (arg === '--gain-db') options.gainDb = Number(next());
     else if (arg === '--volume') options.volume = Number(next());
     else if (arg === '--min-expected-hits') options.minExpectedHits = Number(next());
@@ -104,6 +108,9 @@ function parseArgs(argv) {
   if (!options.synthetic && options.audio.length === 0) options.audio = DEFAULT_AUDIO;
   options.cycles = Math.max(1, Math.floor(options.cycles || 1));
   options.minExpectedHits = Math.max(0, Math.floor(options.minExpectedHits || 0));
+  if (!['auto', 'acoustic', 'blackhole'].includes(options.micRoute)) {
+    throw new Error(`Unsupported --mic-route value: ${options.micRoute}`);
+  }
   options.baseUrl = normalizeBaseUrl(options.baseUrl);
   if (!options.token) options.token = extractTokenFromUrl(process.env.COMPANION_URL || options.baseUrl) || '';
   return options;
@@ -128,6 +135,8 @@ Useful flags:
   --min-expected-hits <n>        Required expected-term hits, default 2 for synthetic.
   --skip-system                  Skip OS/system-audio phase.
   --skip-mic                     Skip microphone phase.
+  --mic-route <mode>             Mic injection route: auto, acoustic, blackhole. Default auto.
+  --blackhole-device <name>      BlackHole input/output device name. Default "BlackHole 2ch".
   --allow-mic-miss               Keep exit code 0 when microphone speech is not detected.
   --require-mic                  Fail mic misses even when no virtual loopback input is detected.
   --no-restore-mic               Do not restore app microphone mute state after the run.
@@ -196,6 +205,16 @@ function run(command, args, options = {}) {
       else reject(new Error(`${command} ${args.join(' ')} failed with ${code}\n${stderr || stdout}`));
     });
   });
+}
+
+function runSync(command, args) {
+  const result = spawnSync(command, args, { encoding: 'utf8' });
+  return {
+    ok: result.status === 0,
+    status: result.status,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+  };
 }
 
 async function fileExists(path) {
@@ -366,10 +385,31 @@ function meaningfulSpeech(text, expectedWords, minExpectedHits) {
   };
 }
 
-async function playAudioFiles(files, runs, volume) {
+async function playAudioFileToAudioToolboxDevice(file, volume, deviceIndex) {
+  await run('ffmpeg', [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-i',
+    file,
+    '-filter:a',
+    `volume=${volume}`,
+    '-f',
+    'audiotoolbox',
+    '-audio_device_index',
+    String(deviceIndex),
+    '-',
+  ]);
+}
+
+async function playAudioFiles(files, runs, volume, playback = {}) {
   for (let runIndex = 0; runIndex < runs; runIndex += 1) {
     for (const file of files) {
-      await run('afplay', ['-v', String(volume), file]);
+      if (typeof playback.audioToolboxDeviceIndex === 'number') {
+        await playAudioFileToAudioToolboxDevice(file, volume, playback.audioToolboxDeviceIndex);
+      } else {
+        await run('afplay', ['-v', String(volume), file]);
+      }
       await sleep(700);
     }
   }
@@ -397,7 +437,7 @@ async function runRecordingPhase(options, phase, config) {
     };
   });
 
-  await playAudioFiles(config.audioFiles, config.runs, options.volume);
+  await playAudioFiles(config.audioFiles, config.runs, options.volume, config.playback);
 
   const during = await waitFor(`${phase} transcription`, options.transcriptionTimeoutMs, async () => {
     const state = await getState(options);
@@ -442,6 +482,7 @@ async function runRecordingPhase(options, phase, config) {
   return {
     phase,
     cycle: config.cycle,
+    route: config.route || 'acoustic',
     ok: score.ok,
     timedOut: Boolean(during?.error),
     error: during?.error ? String(during.error.message || during.error) : '',
@@ -467,7 +508,73 @@ async function runRecordingPhase(options, phase, config) {
   };
 }
 
-function detectAudioRouting() {
+function switchAudioDevices(type) {
+  if (!commandExists('SwitchAudioSource')) return [];
+  const result = runSync('SwitchAudioSource', ['-a', '-t', type]);
+  if (!result.ok) return [];
+  return result.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function currentSwitchAudioDevice(type) {
+  if (!commandExists('SwitchAudioSource')) return '';
+  const result = runSync('SwitchAudioSource', ['-c', '-t', type]);
+  return result.ok ? result.stdout.trim() : '';
+}
+
+function findBlackHoleDevice(devices, preferredName) {
+  const normalizedPreferred = preferredName.trim().toLowerCase();
+  return (
+    devices.find((device) => device.toLowerCase() === normalizedPreferred) ||
+    devices.find((device) => /^blackhole\s+\d+ch$/i.test(device)) ||
+    devices.find((device) => device.toLowerCase().includes('blackhole')) ||
+    ''
+  );
+}
+
+function audioToolboxOutputDevices() {
+  if (!commandExists('ffmpeg')) return [];
+  const result = runSync('ffmpeg', [
+    '-hide_banner',
+    '-f',
+    'lavfi',
+    '-i',
+    'anullsrc',
+    '-t',
+    '0.01',
+    '-f',
+    'audiotoolbox',
+    '-list_devices',
+    'true',
+    '-',
+  ]);
+  const combined = `${result.stdout}\n${result.stderr}`;
+  return combined
+    .split('\n')
+    .map((line) => {
+      const match = line.match(/\[AudioToolbox[^\]]*\]\s+\[(\d+)\]\s+(.+)$/);
+      if (!match) return null;
+      return {
+        index: Number(match[1]),
+        label: match[2].trim(),
+      };
+    })
+    .filter(Boolean);
+}
+
+function findAudioToolboxBlackHoleDevice(devices, preferredName) {
+  const normalizedPreferred = preferredName.trim().toLowerCase();
+  return (
+    devices.find((device) => device.label.toLowerCase().includes(normalizedPreferred)) ||
+    devices.find((device) => /blackhole\s+\d+ch/i.test(device.label)) ||
+    devices.find((device) => device.label.toLowerCase().includes('blackhole')) ||
+    null
+  );
+}
+
+function detectAudioRouting(options) {
   const profiler = spawnSync('system_profiler', ['SPAudioDataType'], {
     encoding: 'utf8',
     maxBuffer: 1024 * 1024,
@@ -475,16 +582,89 @@ function detectAudioRouting() {
   const output = profiler.stdout || '';
   const loopbackHints = ['blackhole', 'loopback', 'soundflower', 'vb-cable', 'aggregate'];
   const hasLoopbackInput = loopbackHints.some((hint) => output.toLowerCase().includes(hint));
+  const switchAudioSourceAvailable = commandExists('SwitchAudioSource');
+  const inputDevices = switchAudioDevices('input');
+  const outputDevices = switchAudioDevices('output');
+  const blackholeInput = findBlackHoleDevice(inputDevices, options.blackholeDevice);
+  const blackholeOutput = findBlackHoleDevice(outputDevices, options.blackholeDevice);
+  const audioToolboxOutputs = audioToolboxOutputDevices();
+  const audioToolboxBlackHoleOutput = findAudioToolboxBlackHoleDevice(
+    audioToolboxOutputs,
+    options.blackholeDevice,
+  );
+  const blackholeAvailable = Boolean(blackholeInput && blackholeOutput && audioToolboxBlackHoleOutput);
+  let selectedMicRoute = options.micRoute;
+  if (selectedMicRoute === 'auto') selectedMicRoute = blackholeAvailable ? 'blackhole' : 'acoustic';
+  if (selectedMicRoute === 'blackhole' && !blackholeAvailable) {
+    throw new Error(
+      [
+        `BlackHole route requested, but matching input/output devices were not found for "${options.blackholeDevice}".`,
+        'Install prerequisites with: brew install switchaudio-osx blackhole-2ch',
+        'The route also requires ffmpeg with the AudioToolbox output device so test audio can be sent to BlackHole without changing your normal output.',
+        'After installing BlackHole, macOS may require allowing/restarting audio services before the device appears.',
+      ].join('\n'),
+    );
+  }
   return {
     hasLoopbackInput,
     hasAfplay: commandExists('afplay'),
     hasFfmpeg: commandExists('ffmpeg'),
+    switchAudioSourceAvailable,
+    selectedMicRoute,
+    blackhole: {
+      available: blackholeAvailable,
+      requestedDevice: options.blackholeDevice,
+      inputDevice: blackholeInput,
+      outputDevice: blackholeOutput,
+      audioToolboxOutput: audioToolboxBlackHoleOutput,
+      currentInput: currentSwitchAudioDevice('input'),
+      currentOutput: currentSwitchAudioDevice('output'),
+    },
+    audioToolboxOutputs,
+    inputDevices,
+    outputDevices,
     audioDevicesExcerpt: output
       .split('\n')
       .filter((line) => /Default Input Device|Default Output Device|Input Source|Output Source|BlackHole|Loopback|Soundflower|VB-Cable|Микрофон|Динамики|наушники/i.test(line))
       .join('\n')
       .trim(),
   };
+}
+
+async function activateBlackHoleMicRoute(route) {
+  const previousInput = route.blackhole.currentInput;
+
+  await run('SwitchAudioSource', ['-t', 'input', '-s', route.blackhole.inputDevice]);
+  await sleep(800);
+
+  return async () => {
+    const errors = [];
+    if (previousInput) {
+      await run('SwitchAudioSource', ['-t', 'input', '-s', previousInput]).catch((error) => {
+        errors.push(`input: ${error.message || error}`);
+      });
+    }
+    await sleep(500);
+    if (errors.length > 0) throw new Error(errors.join('; '));
+  };
+}
+
+async function runWithOptionalMicRoute(routing, phase, task) {
+  if (phase !== 'mic' || routing.selectedMicRoute !== 'blackhole') {
+    return task();
+  }
+
+  console.log(
+    `[companion-audio] routing macOS input through ${routing.blackhole.inputDevice}; test playback goes directly to AudioToolbox device #${routing.blackhole.audioToolboxOutput.index}, normal output is not changed`,
+  );
+  const restore = await activateBlackHoleMicRoute(routing);
+  try {
+    return await task();
+  } finally {
+    await restore().catch((error) => {
+      console.warn(`[companion-audio] failed to restore macOS audio devices: ${error.message || error}`);
+    });
+  }
 }
 
 async function main() {
@@ -498,7 +678,7 @@ async function main() {
     throw new Error('Companion token not found. Pass --token or set COMPANION_TOKEN/COMPANION_URL.');
   }
 
-  const routing = detectAudioRouting();
+  const routing = detectAudioRouting(options);
   if (!routing.hasAfplay) throw new Error('afplay is required on macOS for this smoke test.');
 
   const sourceAudio = options.synthetic ? await generateSyntheticAudioFixtures(options) : options.audio;
@@ -520,6 +700,7 @@ async function main() {
           runs: options.systemRuns,
           appMicMuted: true,
           cycle,
+          route: 'system',
           expectedWords,
           minExpectedHits,
         }),
@@ -528,17 +709,24 @@ async function main() {
 
     if (!options.skipMic) {
       console.log(
-        `[companion-audio] cycle ${cycle}/${options.cycles}: mic phase, app mic unmuted, playing ${options.synthetic ? 'synthetic interview audio' : 'fixtures'} for acoustic/loopback mic capture`,
+        `[companion-audio] cycle ${cycle}/${options.cycles}: mic phase, app mic unmuted, route=${routing.selectedMicRoute}, playing ${options.synthetic ? 'synthetic interview audio' : 'fixtures'}`,
       );
       results.push(
-        await runRecordingPhase(options, 'mic', {
-          audioFiles,
-          runs: options.micRuns,
-          appMicMuted: false,
-          cycle,
-          expectedWords,
-          minExpectedHits,
-        }),
+        await runWithOptionalMicRoute(routing, 'mic', () =>
+          runRecordingPhase(options, 'mic', {
+            audioFiles,
+            runs: options.micRuns,
+            appMicMuted: false,
+            cycle,
+            route: routing.selectedMicRoute,
+            playback:
+              routing.selectedMicRoute === 'blackhole'
+                ? { audioToolboxDeviceIndex: routing.blackhole.audioToolboxOutput.index }
+                : undefined,
+            expectedWords,
+            minExpectedHits,
+          }),
+        ),
       );
     }
   }
@@ -569,6 +757,9 @@ async function main() {
       cycles: options.cycles,
       systemRuns: options.systemRuns,
       micRuns: options.micRuns,
+      micRoute: options.micRoute,
+      selectedMicRoute: routing.selectedMicRoute,
+      blackholeDevice: options.blackholeDevice,
       gainDb: options.gainDb,
       volume: options.volume,
       allowMicMiss: options.allowMicMiss,
@@ -601,11 +792,11 @@ async function main() {
   for (const result of results) {
     const icon = result.ok ? '✅' : '❌';
     console.log(
-      `${icon} cycle=${result.cycle} ${result.phase}: messages=${result.messageCount}, system=${result.systemCount}, mic=${result.micCount}, activeAfterStop=${result.recordingAfterStop?.activeSessionId}`,
+      `${icon} cycle=${result.cycle} ${result.phase} route=${result.route}: messages=${result.messageCount}, system=${result.systemCount}, mic=${result.micCount}, activeAfterStop=${result.recordingAfterStop?.activeSessionId}`,
     );
     if (!result.ok) {
       console.log(`   reason=${result.error || 'target speech was not detected in expected channel'}`);
-      if (result.phase === 'mic' && !routing.hasLoopbackInput) {
+      if (result.phase === 'mic' && result.route !== 'blackhole' && !routing.hasLoopbackInput) {
         console.log(
           `   note=no virtual loopback input detected; mic phase depends on the real microphone hearing playback${options.requireMic ? '' : '; not counted as fatal by default'}`,
         );
@@ -617,7 +808,10 @@ async function main() {
   const failing = results.filter((result) => {
     if (result.ok) return false;
     const micEnvironmentCannotInjectAudio =
-      result.phase === 'mic' && !options.requireMic && !routing.hasLoopbackInput;
+      result.phase === 'mic' &&
+      result.route !== 'blackhole' &&
+      !options.requireMic &&
+      !routing.hasLoopbackInput;
     return !(result.phase === 'mic' && (options.allowMicMiss || micEnvironmentCannotInjectAudio));
   });
   if (failing.length > 0) process.exit(1);
