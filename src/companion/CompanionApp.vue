@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import ConversationFeed from '@/presentation/components/ConversationFeed.vue';
+import type { ConversationFeedMessage } from '@/presentation/conversationFeed';
 import { buildCompanionConversationFeedMessages } from '@/presentation/companionFeed';
 import { createPromptImageDraft, type PromptImageDraft } from '@/utils/promptImages';
 import {
@@ -19,6 +20,11 @@ import {
   validateCompanionManifest,
 } from './pwa';
 import { abortCompanionRequests, wasCompanionRequestHiddenAborted } from './requestAbortState';
+import {
+  isCompanionMessageSelectable,
+  normalizeCompanionSelectedIds,
+  toggleCompanionSelectedId,
+} from './selection';
 import type {
   CompanionActionResponse,
   CompanionRecordingStatus,
@@ -66,6 +72,7 @@ const pwaInstallHintDismissed = ref(
   typeof localStorage !== 'undefined' && localStorage.getItem(PWA_INSTALL_HINT_DISMISSED_KEY) === '1',
 );
 const feedScrolledDown = ref(false);
+const selectedMessageIds = ref<string[]>([]);
 
 let eventSource: EventSource | null = null;
 let displayModeMediaQuery: MediaQueryList | null = null;
@@ -75,6 +82,9 @@ let resyncPromise: Promise<void> | null = null;
 const requestControllers = new Set<AbortController>();
 
 const feedMessages = computed(() => buildCompanionConversationFeedMessages(snapshot.value?.data));
+const selectedMessageIdSet = computed(() => new Set(selectedMessageIds.value));
+const selectedMessageCount = computed(() => selectedMessageIds.value.length);
+const hasSelectedMessages = computed(() => selectedMessageCount.value > 0);
 const snapshotData = computed<CompanionSnapshotData | null>(() => snapshot.value?.data ?? null);
 const scrollEl = computed(() => companionFeedRef.value?.scrollEl ?? null);
 const snapshotReady = computed(() => snapshotData.value !== null);
@@ -188,6 +198,50 @@ function setOpenAiResponsesWebSearchEnabled(enabled: boolean): void {
 
 function toggleOpenAiResponsesWebSearch(): void {
   setOpenAiResponsesWebSearchEnabled(!openaiResponsesWebSearchEnabled.value);
+}
+
+function selectedMessageIdsPayload(): string[] | undefined {
+  const normalized = normalizeCompanionSelectedIds(selectedMessageIds.value, feedMessages.value);
+  if (normalized.length !== selectedMessageIds.value.length) {
+    selectedMessageIds.value = normalized;
+  }
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function clearSelectedMessages(): void {
+  selectedMessageIds.value = [];
+}
+
+function isFeedMessageSelected(id: string): boolean {
+  return selectedMessageIdSet.value.has(id);
+}
+
+function isAdditiveSelection(event: MouseEvent): boolean {
+  if (typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/i.test(navigator.platform || '')) {
+    return event.metaKey;
+  }
+  return event.ctrlKey || event.metaKey;
+}
+
+function hasActiveTextSelection(): boolean {
+  const selection = typeof window === 'undefined' ? null : window.getSelection?.();
+  return !!selection && !selection.isCollapsed && selection.toString().trim().length > 0;
+}
+
+function onFeedMessageClick(event: MouseEvent, message: ConversationFeedMessage): void {
+  if (!isCompanionMessageSelectable(message)) return;
+  if (hasActiveTextSelection()) return;
+
+  if (hasSelectedMessages.value || isAdditiveSelection(event)) {
+    selectedMessageIds.value = toggleCompanionSelectedId(
+      selectedMessageIds.value,
+      message,
+      feedMessages.value,
+    );
+    return;
+  }
+
+  selectedMessageIds.value = normalizeCompanionSelectedIds([message.id], feedMessages.value);
 }
 
 function isNearBottom(): boolean {
@@ -701,10 +755,18 @@ async function onRecordClick(): Promise<void> {
 }
 
 async function requestAiReply(): Promise<void> {
-  await sendAction('/api/ai/request', {
+  const selectedIds = selectedMessageIdsPayload();
+  const body: Record<string, unknown> = {
     text: '',
     openaiResponsesWebSearch: openaiResponsesWebSearchEnabled.value,
-  });
+  };
+  if (selectedIds) {
+    body.selectedMessageIds = selectedIds;
+  }
+  const applied = await sendAction('/api/ai/request', body);
+  if (applied && selectedIds) {
+    clearSelectedMessages();
+  }
 }
 
 async function sendPromptDraft(): Promise<void> {
@@ -713,16 +775,24 @@ async function sendPromptDraft(): Promise<void> {
     setTemporaryStatus('Добавь текст или фото для отправки', 'warn', 2600);
     return;
   }
-  const applied = await sendAction('/api/prompt/send', {
+  const selectedIds = selectedMessageIdsPayload();
+  const body: Record<string, unknown> = {
     text,
     openaiResponsesWebSearch: openaiResponsesWebSearchEnabled.value,
     images: promptImages.value.map((img) => ({
       mediaType: img.mime,
       dataBase64: img.dataBase64,
     })),
-  });
+  };
+  if (selectedIds) {
+    body.selectedMessageIds = selectedIds;
+  }
+  const applied = await sendAction('/api/prompt/send', body);
   if (!applied) {
     return;
+  }
+  if (selectedIds) {
+    clearSelectedMessages();
   }
   aiQuestion.value = '';
   promptImages.value = [];
@@ -958,6 +1028,20 @@ watch(
   { immediate: true },
 );
 
+watch(
+  feedMessages,
+  (messages) => {
+    const normalized = normalizeCompanionSelectedIds(selectedMessageIds.value, messages);
+    if (
+      normalized.length !== selectedMessageIds.value.length
+      || normalized.some((id, index) => id !== selectedMessageIds.value[index])
+    ) {
+      selectedMessageIds.value = normalized;
+    }
+  },
+  { immediate: true },
+);
+
 onUnmounted(() => {
   clearStatusTimer();
   cleanupPwaDisplayModeListener();
@@ -1041,6 +1125,9 @@ onUnmounted(() => {
           ref="companionFeedRef"
           :messages="feedMessages"
           :empty-text="emptyFeedText"
+          :messages-clickable="true"
+          :is-selected="isFeedMessageSelected"
+          @message-click="onFeedMessageClick"
         />
       </section>
 
@@ -1112,6 +1199,15 @@ onUnmounted(() => {
 
       <section class="controls-dock">
         <div class="controls-side">
+          <button
+            v-if="hasSelectedMessages"
+            class="dock-square-button selection-clear"
+            title="Снять выделение"
+            @click="clearSelectedMessages"
+          >
+            <span class="mdi mdi-close-circle-outline" />
+            <span class="selection-badge">{{ selectedMessageCount }}</span>
+          </button>
           <button
             class="dock-square-button"
             title="Очистить AI контекст"
@@ -1712,11 +1808,33 @@ onUnmounted(() => {
 }
 
 .dock-square-button {
+  position: relative;
   width: 46px;
   height: 46px;
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.08);
   font-size: 20px;
+}
+
+.dock-square-button.selection-clear {
+  background: rgba(80, 145, 255, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(130, 185, 255, 0.22);
+}
+
+.selection-badge {
+  position: absolute;
+  right: -5px;
+  top: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #4f8cff;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 18px;
+  box-shadow: 0 0 0 2px rgba(17, 21, 29, 0.92);
 }
 
 .dock-square-button.danger {

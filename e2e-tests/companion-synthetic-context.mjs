@@ -25,6 +25,8 @@ const DEFAULT_VOICE_SEGMENTS = [
 
 const CODE_MARKER = 'CODE_CTX_E2E_ALPHA';
 const LATE_MARKER = 'LATE_CTX_E2E_OMEGA';
+const SELECTED_CONTEXT_MARKER = 'SELECTED_CTX_E2E_TARGET';
+const UNSELECTED_CONTEXT_MARKER = 'UNSELECTED_CTX_E2E_DISTRACTOR';
 const BASE_ANSWER_EXPECTATIONS = [
   { label: 'project context', terms: ['север', 'мост'] },
   { label: 'queue not stack answer', terms: ['очеред', 'стек'] },
@@ -59,6 +61,7 @@ function parseArgs(argv) {
     artifactsDir: '.e2e-artifacts/companion-synthetic-context',
     skipVoice: false,
     skipAi: false,
+    selectedContext: true,
     allowAiMiss: false,
     verifyMemory: false,
     memoryApiUrl: process.env.INTERVIEW_MEMORY_E2E_API_URL || process.env.INTERVIEW_MEMORY_API_URL || '',
@@ -95,6 +98,7 @@ function parseArgs(argv) {
     else if (arg === '--artifacts-dir') options.artifactsDir = next();
     else if (arg === '--skip-voice') options.skipVoice = true;
     else if (arg === '--skip-ai') options.skipAi = true;
+    else if (arg === '--skip-selected-context') options.selectedContext = false;
     else if (arg === '--allow-ai-miss') options.allowAiMiss = true;
     else if (arg === '--verify-memory') options.verifyMemory = true;
     else if (arg === '--memory-api-url') options.memoryApiUrl = next();
@@ -140,6 +144,7 @@ Useful flags:
   --filler-chars <n>             Long middle context size, default 52000.
   --skip-voice                   Only test deterministic context + AI.
   --skip-ai                      Only synthesize voice and verify STT timeline.
+  --skip-selected-context        Skip selected-message AI context check.
   --allow-ai-miss                Keep exit code 0 when AI answer misses expectations.
   --web-search                   Enable OpenAI Responses web search for prompt.
   --verify-memory                Verify backend interview-memory retrieval after the companion flow.
@@ -406,6 +411,22 @@ function buildAiQuestion() {
   ].join(' ');
 }
 
+function buildSelectedContextTarget() {
+  return [
+    'Selected context E2E target.',
+    `The only selected marker is ${SELECTED_CONTEXT_MARKER}.`,
+    'If this message is selected, the assistant should answer with this marker only.',
+  ].join('\n');
+}
+
+function buildSelectedContextDistractor() {
+  return [
+    'Selected context E2E distractor.',
+    `This unselected marker must not affect the answer: ${UNSELECTED_CONTEXT_MARKER}.`,
+    'If the selection path leaks full context, this marker may appear in the answer.',
+  ].join('\n');
+}
+
 async function ingestFocusCopy(options, text, label) {
   return postAction(options, '/api/focus-copy/ingest', {
     text,
@@ -584,6 +605,85 @@ async function runAiContextPhase(options) {
   };
 }
 
+function findMessageContaining(snapshot, marker, baselineSeq = 0) {
+  return messagesAfter(snapshot, baselineSeq)
+    .find((message) => normalizedText(message.text).includes(normalizedText(marker)));
+}
+
+function scoreSelectedAnswer(answerText) {
+  const normalized = normalizedText(answerText);
+  return [
+    {
+      label: 'selected marker present',
+      ok: normalized.includes(normalizedText(SELECTED_CONTEXT_MARKER)),
+      terms: [SELECTED_CONTEXT_MARKER],
+    },
+    {
+      label: 'unselected distractor absent',
+      ok: !normalized.includes(normalizedText(UNSELECTED_CONTEXT_MARKER)),
+      terms: [UNSELECTED_CONTEXT_MARKER],
+    },
+  ];
+}
+
+async function runSelectedContextPhase(options) {
+  const before = await getState(options);
+  const baselineSeq = maxSeq(before);
+
+  await ingestFocusCopy(options, buildSelectedContextTarget(), 'code');
+  await ingestFocusCopy(options, buildSelectedContextDistractor(), 'filler');
+
+  const afterIngest = await getState(options);
+  const targetMessage = findMessageContaining(afterIngest, SELECTED_CONTEXT_MARKER, baselineSeq);
+  const distractorMessage = findMessageContaining(afterIngest, UNSELECTED_CONTEXT_MARKER, baselineSeq);
+  if (!targetMessage?.id) {
+    throw new Error(`Could not find selected target message ${SELECTED_CONTEXT_MARKER}`);
+  }
+  if (!distractorMessage?.id) {
+    throw new Error(`Could not find unselected distractor message ${UNSELECTED_CONTEXT_MARKER}`);
+  }
+
+  await postAction(options, '/api/prompt/send', {
+    text: 'Ответь одной строкой: какой контрольный marker есть в выбранном сообщении? Не используй историю вне выбранных сообщений.',
+    images: [],
+    openaiResponsesWebSearch: options.openaiResponsesWebSearch,
+    selectedMessageIds: [targetMessage.id],
+  });
+
+  const finalHaiku = await waitFor('selected-context AI answer', options.aiTimeoutMs, async () => {
+    const state = await getState(options);
+    const messages = messagesAfter(state, maxSeq(afterIngest));
+    const candidates = messages.filter((message) => message.kind === 'haiku');
+    const final = [...candidates].reverse().find((message) => message.status === 'final' && message.text.trim());
+    return {
+      ok: Boolean(final),
+      value: {
+        state: {
+          memory: state.memory,
+          timelineCount: state.timeline.length,
+          maxSeq: maxSeq(state),
+        },
+        final,
+      },
+    };
+  });
+
+  const answer = finalHaiku.final?.text || '';
+  const checks = scoreSelectedAnswer(answer);
+  const diagnosticChecks = scoreMemoryDiagnostics(finalHaiku.state.memory, options.expectedMemoryStatus);
+  const ok = checks.every((check) => check.ok) && diagnosticChecks.every((check) => check.ok);
+  return {
+    ok,
+    answer,
+    checks,
+    diagnosticChecks,
+    selectedMessageId: targetMessage.id,
+    distractorMessageId: distractorMessage.id,
+    finalMessage: finalHaiku.final,
+    timelineState: finalHaiku.state,
+  };
+}
+
 function sqlStringLiteral(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
@@ -700,6 +800,20 @@ function productionSafeAiResult(result) {
   };
 }
 
+function productionSafeSelectedContextResult(result) {
+  if (!result) return null;
+  return {
+    ok: result.ok,
+    checks: redactChecks(result.checks),
+    diagnosticChecks: redactChecks(result.diagnosticChecks),
+    answer: redactText(result.answer),
+    selectedMessageId: result.selectedMessageId,
+    distractorMessageId: result.distractorMessageId,
+    finalMessage: redactMessage(result.finalMessage),
+    timelineState: result.timelineState,
+  };
+}
+
 function productionSafeMemoryResult(result) {
   if (!result) return null;
   return {
@@ -780,7 +894,7 @@ async function runMemoryContextPhase(options) {
   };
 }
 
-function buildArtifact(options, initial, initialSeq, voiceResult, aiResult, memoryResult, final) {
+function buildArtifact(options, initial, initialSeq, voiceResult, aiResult, selectedContextResult, memoryResult, final) {
   const artifact = {
     createdAt: new Date().toISOString(),
     productionSafe: options.productionSafeArtifact,
@@ -790,6 +904,7 @@ function buildArtifact(options, initial, initialSeq, voiceResult, aiResult, memo
       fillerChars: options.fillerChars,
       skipVoice: options.skipVoice,
       skipAi: options.skipAi,
+      selectedContext: options.selectedContext,
       verifyMemory: options.verifyMemory,
       memoryApiUrl: options.memoryApiUrl,
       expectedMemoryStatus: options.expectedMemoryStatus,
@@ -805,6 +920,7 @@ function buildArtifact(options, initial, initialSeq, voiceResult, aiResult, memo
     },
     voiceResult,
     aiResult,
+    selectedContextResult,
     memoryResult,
     final: {
       timelineCount: final.timeline.length,
@@ -822,6 +938,7 @@ function buildArtifact(options, initial, initialSeq, voiceResult, aiResult, memo
     ...artifact,
     voiceResult: productionSafeVoiceResult(voiceResult),
     aiResult: productionSafeAiResult(aiResult),
+    selectedContextResult: productionSafeSelectedContextResult(selectedContextResult),
     memoryResult: productionSafeMemoryResult(memoryResult),
     final: {
       ...artifact.final,
@@ -837,6 +954,8 @@ function assertProductionSafeArtifact(artifact) {
   const forbiddenFragments = [
     CODE_MARKER.toLowerCase(),
     LATE_MARKER.toLowerCase(),
+    SELECTED_CONTEXT_MARKER.toLowerCase(),
+    UNSELECTED_CONTEXT_MARKER.toLowerCase(),
     'debouncesearch',
     'северный мост',
     'очередь событий',
@@ -909,6 +1028,19 @@ async function main() {
     );
   }
 
+  let selectedContextResult = null;
+  if (!options.skipAi && options.selectedContext) {
+    console.log('[companion-context] requesting real AI answer over selected companion messages');
+    selectedContextResult = await runSelectedContextPhase(options);
+    const icon = selectedContextResult.ok ? '✅' : '❌';
+    console.log(
+      `${icon} selected context: ${[
+        ...selectedContextResult.checks,
+        ...selectedContextResult.diagnosticChecks,
+      ].map((check) => `${check.label}=${check.ok ? 'ok' : 'miss'}`).join(', ')}`,
+    );
+  }
+
   let memoryResult = null;
   if (options.verifyMemory) {
     console.log('[companion-context] verifying backend interview memory retrieval');
@@ -926,7 +1058,7 @@ async function main() {
   assertMemorySnapshot(final, 'final companion');
   const artifactPath = await writeArtifact(
     options,
-    buildArtifact(options, initial, initialSeq, voiceResult, aiResult, memoryResult, final),
+    buildArtifact(options, initial, initialSeq, voiceResult, aiResult, selectedContextResult, memoryResult, final),
   );
 
   console.log(`[companion-context] artifact: ${artifactPath}`);
@@ -935,6 +1067,9 @@ async function main() {
     process.exitCode = 1;
   }
   if (aiResult && !aiResult.ok && !options.allowAiMiss) {
+    process.exitCode = 1;
+  }
+  if (selectedContextResult && !selectedContextResult.ok && !options.allowAiMiss) {
     process.exitCode = 1;
   }
   if (memoryResult && !memoryResult.ok) {

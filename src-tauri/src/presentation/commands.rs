@@ -1885,12 +1885,14 @@ pub async fn companion_request_ai(
     app_handle: AppHandle,
     question_text: Option<String>,
     openai_responses_web_search: Option<bool>,
+    selected_message_ids: Option<Vec<String>>,
 ) -> Result<crate::presentation::companion_actions::CompanionActionResponse, String> {
     crate::presentation::companion_actions::request_ai(
         state.inner(),
         &app_handle,
         question_text,
         openai_responses_web_search,
+        selected_message_ids,
     )
     .await
 }
@@ -1902,6 +1904,7 @@ pub async fn companion_send_prompt(
     text: String,
     images: Option<Vec<LlmImageInput>>,
     openai_responses_web_search: Option<bool>,
+    selected_message_ids: Option<Vec<String>>,
 ) -> Result<crate::presentation::companion_actions::CompanionActionResponse, String> {
     crate::presentation::companion_actions::send_prompt(
         state.inner(),
@@ -1909,6 +1912,7 @@ pub async fn companion_send_prompt(
         text,
         images.unwrap_or_default(),
         openai_responses_web_search,
+        selected_message_ids,
     )
     .await
 }

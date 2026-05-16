@@ -322,6 +322,8 @@ struct CompanionAiRequestBody {
     text: Option<String>,
     #[serde(default)]
     openai_responses_web_search: Option<bool>,
+    #[serde(default)]
+    selected_message_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -333,6 +335,8 @@ struct CompanionPromptSendBody {
     images: Vec<crate::presentation::commands::LlmImageInput>,
     #[serde(default)]
     openai_responses_web_search: Option<bool>,
+    #[serde(default)]
+    selected_message_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1185,6 +1189,7 @@ async fn handle_ai_request_post(
         &app_handle,
         body.text,
         body.openai_responses_web_search,
+        body.selected_message_ids,
     )
     .await
     {
@@ -1247,6 +1252,7 @@ async fn handle_prompt_send_post(
         body.text.unwrap_or_default(),
         body.images,
         body.openai_responses_web_search,
+        body.selected_message_ids,
     )
     .await
     {

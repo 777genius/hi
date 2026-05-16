@@ -19,6 +19,7 @@ const MAX_CONTEXT_CHARS: usize = 48_000;
 const MAX_CONTEXT_ANCHOR_CHARS: usize = 4_000;
 const RECENT_CONTEXT_CHARS: usize = 32_000;
 const MAX_PRUNED_IMPORTANT_OLD_MESSAGES: usize = 40;
+const MAX_SELECTED_MESSAGE_IDS: usize = 200;
 
 #[derive(Debug, Clone)]
 struct ContextPart {
@@ -1453,6 +1454,23 @@ pub async fn build_context_text_and_memory_evidence(
     )
 }
 
+pub async fn build_selected_context_text_and_memory_evidence(
+    state: &AppState,
+    selected_message_ids: &[String],
+) -> (String, MemoryContextEvidenceInput) {
+    let selected_ids = normalize_selected_message_ids(selected_message_ids);
+    if selected_ids.is_empty() {
+        return (String::new(), MemoryContextEvidenceInput::default());
+    }
+
+    let parts = collect_context_parts(state, true).await;
+    let selected = select_context_parts_by_ids(&parts, &selected_ids);
+    (
+        context_text_from_selected_parts(&selected),
+        selected_memory_context_evidence_from_parts(&selected),
+    )
+}
+
 async fn collect_context_parts(state: &AppState, include_full_history: bool) -> Vec<ContextPart> {
     let context_floor_seq = state.companion_context_floor_seq.load(Ordering::Relaxed);
     let live_system = visible_system_partial_text(state).await;
@@ -1495,6 +1513,37 @@ async fn collect_context_parts(state: &AppState, include_full_history: bool) -> 
     }
 
     parts
+}
+
+fn normalize_selected_message_ids(ids: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for id in ids {
+        let trimmed = id.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        result.push(trimmed.to_string());
+        if result.len() >= MAX_SELECTED_MESSAGE_IDS {
+            break;
+        }
+    }
+    result
+}
+
+fn select_context_parts_by_ids(parts: &[ContextPart], selected_ids: &[String]) -> Vec<ContextPart> {
+    if selected_ids.is_empty() {
+        return Vec::new();
+    }
+    let selected_ids = selected_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    parts
+        .iter()
+        .filter(|part| selected_ids.contains(part.id.as_str()))
+        .cloned()
+        .collect()
 }
 
 fn format_context_line(kind: &str, text: &str) -> String {
@@ -1923,6 +1972,33 @@ fn memory_context_evidence_from_parts(parts: &[ContextPart]) -> MemoryContextEvi
     }
 
     evidence
+}
+
+fn selected_memory_context_evidence_from_parts(
+    parts: &[ContextPart],
+) -> MemoryContextEvidenceInput {
+    let mut evidence = MemoryContextEvidenceInput::default();
+
+    for part in parts {
+        let text = context_part_evidence_text(part);
+        if text.is_empty() {
+            continue;
+        }
+        evidence.selected_messages.push(MemoryRequestEvidenceInput {
+            id: Some(part.id.clone()),
+            label: Some(selected_memory_context_label(part).to_string()),
+            text,
+        });
+    }
+
+    evidence
+}
+
+fn selected_memory_context_label(part: &ContextPart) -> &'static str {
+    if part.id.starts_with("focus-copy:") {
+        return "current_code";
+    }
+    memory_context_label(part)
 }
 
 fn memory_context_label(part: &ContextPart) -> &'static str {
@@ -2469,6 +2545,123 @@ mod tests {
         assert!(evidence.recent_timeline.iter().any(|item| {
             item.label.as_deref() == Some("manual_prompt") && item.text == "Сформулируй коротко"
         }));
+    }
+
+    #[tokio::test]
+    async fn selected_context_uses_only_selected_messages_in_timeline_order() {
+        let state = AppState::default();
+
+        append_system_final(&state, 1, &test_transcription("unselected early", 100)).await;
+        append_system_final(&state, 1, &test_transcription("selected first", 110)).await;
+        append_microphone_message(&state, 2, "selected second", 120).await;
+        append_prompt_message(
+            &state,
+            CompanionPromptDraft {
+                id: "prompt:selected".to_string(),
+                text: "unselected prompt".to_string(),
+                created_at_ms: 130,
+                attachments: Vec::new(),
+            },
+        )
+        .await;
+
+        let (context, evidence) = build_selected_context_text_and_memory_evidence(
+            &state,
+            &[
+                "mic:2:3".to_string(),
+                "stt:1:2".to_string(),
+                "stt:1:2".to_string(),
+            ],
+        )
+        .await;
+
+        assert!(context.contains("ОС: selected first"));
+        assert!(context.contains("МИКРОФОН: selected second"));
+        assert!(!context.contains("unselected early"));
+        assert!(!context.contains("unselected prompt"));
+        assert!(context.find("selected first") < context.find("selected second"));
+        assert_eq!(evidence.selected_messages.len(), 2);
+        assert!(evidence.recent_timeline.is_empty());
+        assert!(evidence.current_code.is_empty());
+        assert_eq!(
+            evidence
+                .selected_messages
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["selected first", "selected second"]
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_focus_copy_stays_selected_evidence_not_current_code() {
+        let state = AppState::default();
+
+        append_focus_copy_system_final(
+            &state,
+            "function selectedOnly() { return true; }".to_string(),
+            100,
+            Some("focus-copy:selected-code".to_string()),
+        )
+        .await
+        .expect("focus-copy message");
+        append_system_final(&state, 1, &test_transcription("unselected voice", 200)).await;
+
+        let (_, evidence) = build_selected_context_text_and_memory_evidence(
+            &state,
+            &["focus-copy:selected-code".to_string()],
+        )
+        .await;
+
+        assert!(evidence.current_code.is_empty());
+        assert!(evidence.recent_timeline.is_empty());
+        assert_eq!(evidence.selected_messages.len(), 1);
+        assert_eq!(
+            evidence.selected_messages[0].label.as_deref(),
+            Some("current_code")
+        );
+        assert!(evidence.selected_messages[0].text.contains("selectedOnly"));
+    }
+
+    #[tokio::test]
+    async fn selected_stale_ids_do_not_fallback_to_full_timeline() {
+        let state = AppState::default();
+
+        append_system_final(
+            &state,
+            1,
+            &test_transcription("full context must not leak", 100),
+        )
+        .await;
+
+        let (context, evidence) =
+            build_selected_context_text_and_memory_evidence(&state, &["stale:id".to_string()])
+                .await;
+
+        assert!(context.is_empty());
+        assert!(evidence.selected_messages.is_empty());
+        assert!(evidence.recent_timeline.is_empty());
+        assert!(evidence.current_code.is_empty());
+    }
+
+    #[tokio::test]
+    async fn selected_context_can_reference_messages_before_context_floor() {
+        let state = AppState::default();
+
+        append_system_final(&state, 1, &test_transcription("explicit old selected", 100)).await;
+        append_system_final(&state, 1, &test_transcription("new unselected", 200)).await;
+        state
+            .companion_context_floor_seq
+            .store(1, Ordering::Relaxed);
+
+        let (selected_context, _) =
+            build_selected_context_text_and_memory_evidence(&state, &["stt:1:1".to_string()]).await;
+        let full_context = build_context_text(&state, false).await;
+
+        assert!(selected_context.contains("explicit old selected"));
+        assert!(!selected_context.contains("new unselected"));
+        assert!(!full_context.contains("explicit old selected"));
+        assert!(full_context.contains("new unselected"));
     }
 
     #[tokio::test]

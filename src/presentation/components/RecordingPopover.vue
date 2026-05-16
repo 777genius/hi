@@ -758,14 +758,19 @@ async function runCompanionPromptSend(input: {
 }): Promise<CompanionActionResponse | null> {
   if (!isTauriAvailable()) return null;
 
-  const response = await invoke<CompanionActionResponse>(CMD_COMPANION_SEND_PROMPT, {
+  const args: Record<string, unknown> = {
     text: input.text,
     images: (input.images ?? []).map((img) => ({
       mediaType: img.mime,
       dataBase64: img.dataBase64,
     })),
     openaiResponsesWebSearch: chatStore.openaiResponsesWebSearchEnabled,
-  });
+  };
+  if (chatStore.selectedMessageIds.length > 0) {
+    args.selectedMessageIds = chatStore.selectedMessageIds;
+  }
+
+  const response = await invoke<CompanionActionResponse>(CMD_COMPANION_SEND_PROMPT, args);
   if (response.snapshot) {
     applyCompanionSnapshot(response.snapshot);
   }
@@ -906,6 +911,7 @@ async function sendAsk(): Promise<void> {
         }
         return;
       }
+      chatStore.clearSelection();
     } else {
       await chatStore.sendPromptToLlm(payload);
     }
@@ -1352,12 +1358,20 @@ const haikuHoverArmed = ref(true);
 const onHaikuHover = async () => {
   try {
     if (chatStore.companionModeEnabled) {
-      const response = await invoke<CompanionActionResponse>(CMD_COMPANION_REQUEST_AI, {
+      const args: Record<string, unknown> = {
         questionText: null,
         openaiResponsesWebSearch: chatStore.openaiResponsesWebSearchEnabled,
-      });
+      };
+      if (chatStore.selectedMessageIds.length > 0) {
+        args.selectedMessageIds = chatStore.selectedMessageIds;
+      }
+
+      const response = await invoke<CompanionActionResponse>(CMD_COMPANION_REQUEST_AI, args);
       if (response.snapshot) {
         applyCompanionSnapshot(response.snapshot);
+      }
+      if (response.ok) {
+        chatStore.clearSelection();
       }
       return;
     }

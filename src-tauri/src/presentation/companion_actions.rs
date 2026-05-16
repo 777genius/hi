@@ -318,6 +318,7 @@ pub async fn request_ai(
     app_handle: &AppHandle,
     question_text: Option<String>,
     openai_responses_web_search: Option<bool>,
+    selected_message_ids: Option<Vec<String>>,
 ) -> Result<CompanionActionResponse, String> {
     let Some(_guard) = acquire_action_lock(state).await else {
         return busy_transition(app_handle).await;
@@ -337,13 +338,12 @@ pub async fn request_ai(
     };
     let created_at_ms = crate::presentation::companion_timeline::now_ms();
     let question = question_text.unwrap_or_default().trim().to_string();
+    let selected_message_ids = selected_message_ids.unwrap_or_default();
+    let selected_message_ids = (!selected_message_ids.is_empty()).then_some(selected_message_ids);
 
     if question.is_empty() {
         let (context_text, memory_context_evidence) =
-            crate::presentation::companion_timeline::build_context_text_and_memory_evidence(
-                state, false,
-            )
-            .await;
+            build_request_context(state, selected_message_ids.as_deref()).await;
         if context_text.trim().is_empty() {
             return noop(app_handle, "noop").await;
         }
@@ -366,10 +366,7 @@ pub async fn request_ai(
         .await?;
     } else {
         let (context_text, memory_context_evidence) =
-            crate::presentation::companion_timeline::build_context_text_and_memory_evidence(
-                state, false,
-            )
-            .await;
+            build_request_context(state, selected_message_ids.as_deref()).await;
         let prompt_message_id = format!("prompt:{}", uuid::Uuid::new_v4());
         commands::start_haiku_chat_stream(
             command_state,
@@ -399,6 +396,7 @@ pub async fn send_prompt(
     text: String,
     images: Vec<commands::LlmImageInput>,
     openai_responses_web_search: Option<bool>,
+    selected_message_ids: Option<Vec<String>>,
 ) -> Result<CompanionActionResponse, String> {
     let Some(_guard) = acquire_action_lock(state).await else {
         return busy_transition(app_handle).await;
@@ -431,11 +429,10 @@ pub async fn send_prompt(
         (!trimmed.is_empty()).then_some(trimmed)
     };
     let created_at_ms = crate::presentation::companion_timeline::now_ms();
+    let selected_message_ids = selected_message_ids.unwrap_or_default();
+    let selected_message_ids = (!selected_message_ids.is_empty()).then_some(selected_message_ids);
     let (context_text, memory_context_evidence) =
-        crate::presentation::companion_timeline::build_context_text_and_memory_evidence(
-            state, false,
-        )
-        .await;
+        build_request_context(state, selected_message_ids.as_deref()).await;
     let prompt_message_id = format!("prompt:{}", uuid::Uuid::new_v4());
 
     commands::start_haiku_chat_stream(
@@ -457,4 +454,22 @@ pub async fn send_prompt(
     .await?;
 
     ok_with_current_snapshot(app_handle, "started_prompt").await
+}
+
+async fn build_request_context(
+    state: &AppState,
+    selected_message_ids: Option<&[String]>,
+) -> (
+    String,
+    crate::presentation::interview_memory_bridge::MemoryContextEvidenceInput,
+) {
+    if let Some(ids) = selected_message_ids {
+        return crate::presentation::companion_timeline::build_selected_context_text_and_memory_evidence(
+            state, ids,
+        )
+        .await;
+    }
+
+    crate::presentation::companion_timeline::build_context_text_and_memory_evidence(state, false)
+        .await
 }
