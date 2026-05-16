@@ -16,12 +16,14 @@ Implemented baseline:
 - backend delete/status responses expose chunk/fact/job counts for canary and E2E verification;
 - backend HTTP E2E now covers real `/api/v1/interview-memory/*` routes, JWT auth, Postgres storage, long filler, prompt artifacts, duplicate final-event ingest, same-user session isolation, cross-user isolation and session delete/status counts.
 - desktop memory bridge splits large timeline/focus-copy events into stable part events before ingest so backend `MAX_INGEST_TEXT_CHARS` cannot silently drop long code/context blocks.
+- local `ActiveContext` companion gates have passed repeated synthetic voice + real STT + real AI + backend retrieved-memory checks on a clean local auth profile, including backend-retrieval fallback when the memory API is unavailable.
+- legacy local anchor fallback is shrunk for `ActiveContext`: memory requests and memory-failure chat fallback now use a compact recent/current tail instead of a second full-history anchor packer.
+- desktop bridge resolves `INTERVIEW_MEMORY_MODE` into explicit modes (`Disabled`, `ShadowIngest`, `ShadowRetrieve`, `AssistiveContext`, `ActiveContext`, `LocalOnly`) with `INTERVIEW_MEMORY_FORCE_DISABLED` as the top kill switch, `INTERVIEW_MEMORY_FORCE_LOCAL_ONLY` avoiding backend memory calls, and legacy `INTERVIEW_MEMORY_ENABLED=1` mapped to `ActiveContext`.
+- companion `/api/state` exposes a production-safe memory snapshot with resolved mode, backend/local capabilities and session id, without raw retrieved text or prompt artifacts.
 
 Not yet promoted to default:
 
-- repeated companion UI smoke with synthetic voice/audio input, real STT and optional paid AI answer calls against the same session;
 - production/staging canary with prompt artifact review;
-- cleanup or shrink of old local anchor fallback after `ActiveContext` is stable.
 
 Цель: сделать долговременную память для интервью так, чтобы AI стабильно отвечал по длинной истории голосовых вопросов, кода, selected messages и уточнений, но без раздувания prompt, vendor lock-in и неконтролируемой "магии памяти".
 
@@ -4416,9 +4418,38 @@ Current local evidence log:
 2026-05-15T23:18:08Z:
   memory-only recheck on the same session passed after tightening retrieved_memory section parsing
   artifact: .e2e-artifacts/companion-synthetic-context/2026-05-15T23-18-08-737Z.json
+
+2026-05-16T06:21:44Z:
+  clean local auth profile, local backend memory routes, desktop bridge `ActiveContext`
+  full companion synthetic voice + real STT + real AI + backend memory retrieval passed
+  artifact: .e2e-artifacts/companion-synthetic-context/2026-05-16T06-21-44-314Z.json
+  checks: voiceOk=true, all AI checks=true, all memory retrieved_memory checks=true
+
+2026-05-16T06:22:36Z:
+  repeated long companion synthetic voice + real STT + real AI + backend memory retrieval passed with 80000 filler chars
+  artifact: .e2e-artifacts/companion-synthetic-context/2026-05-16T06-22-36-190Z.json
+  checks: voiceOk=true, all AI checks=true, all memory retrieved_memory checks=true
+
+2026-05-16T06:24:39Z:
+  memory API intentionally unavailable, desktop bridge fell back to local context and real AI still answered from current-session evidence
+  artifact: .e2e-artifacts/companion-synthetic-context/2026-05-16T06-24-39-232Z.json
+  checks: voiceOk=true, all AI checks=true, fallback logs showed failed memory ingest/context requests without blocking chat
+
+2026-05-16T09:36:00Z:
+  legacy full-history anchor fallback was reduced to compact current-session fallback for the `ActiveContext` path
+  checks: memory bridge unit tests cover tail-only fallback and backend request recent_timeline trimming
+  note: memory-down fallback is expected to preserve current/recent context and question flow, not old long-interview recall
+
+2026-05-16T09:44:00Z:
+  desktop bridge boolean flags were replaced with resolved `InterviewMemoryMode`
+  checks: unit tests cover default disabled mode, legacy active flag compatibility, force-disabled precedence, force-local-only backend avoidance, shadow retrieve without prompt impact, active context with prompt impact and invalid-mode safe fallback
+
+2026-05-16T09:52:00Z:
+  companion snapshot now includes production-safe memory mode/capability/session metadata
+  checks: e2e artifacts capture initial/final `memory` snapshot so desktop/web companion parity can assert mode without exposing prompt text; `pnpm e2e:companion-context` fails early if the memory snapshot is missing or malformed
 ```
 
-This evidence is enough to keep implementation work moving, but not enough to promote memory as default. Before promotion, rerun the full gate at least twice on a clean profile and attach fresh artifacts.
+This evidence is enough to treat the V1 local `ActiveContext` path as stabilized behind flags. It is still not enough to promote memory as default because the production/staging canary and production prompt artifact review are not done.
 
 Backend must have memory routes enabled:
 

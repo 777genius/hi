@@ -25,20 +25,24 @@ const DEFAULT_VOICE_SEGMENTS = [
 
 const CODE_MARKER = 'CODE_CTX_E2E_ALPHA';
 const LATE_MARKER = 'LATE_CTX_E2E_OMEGA';
-const ANSWER_EXPECTATIONS = [
+const BASE_ANSWER_EXPECTATIONS = [
   { label: 'project context', terms: ['север', 'мост'] },
-  { label: 'debounce answer', terms: ['debounce', 'таймер'] },
-  { label: 'last argument answer', terms: ['аргумент'] },
   { label: 'queue not stack answer', terms: ['очеред', 'стек'] },
   { label: 'linear complexity answer', terms: ['линей'] },
 ];
-const MEMORY_EXPECTATIONS = [
+const VOICE_ANSWER_EXPECTATIONS = [
+  { label: 'debounce answer', terms: ['debounce', 'таймер'] },
+  { label: 'last argument answer', terms: ['аргумент'] },
+];
+const BASE_MEMORY_EXPECTATIONS = [
   { label: 'early code marker', terms: [CODE_MARKER] },
   { label: 'late marker', terms: [LATE_MARKER] },
   { label: 'project context', terms: ['север', 'мост'] },
-  { label: 'debounce question', terms: ['debounce', 'таймер', 'аргумент'] },
   { label: 'queue not stack', terms: ['очеред', 'стек'] },
   { label: 'linear complexity', terms: ['линей'] },
+];
+const VOICE_MEMORY_EXPECTATIONS = [
+  { label: 'debounce question', terms: ['debounce', 'таймер', 'аргумент'] },
 ];
 
 function parseArgs(argv) {
@@ -277,6 +281,25 @@ function normalizedText(value) {
     .toLowerCase();
 }
 
+function assertMemorySnapshot(snapshot, label) {
+  const memory = snapshot?.memory;
+  if (!memory || typeof memory.mode !== 'string' || !memory.mode.trim()) {
+    throw new Error(`${label} state is missing memory.mode`);
+  }
+  for (const key of [
+    'backendIngestEnabled',
+    'backendPromptContextEnabled',
+    'minimalLocalPromptContextEnabled',
+  ]) {
+    if (typeof memory[key] !== 'boolean') {
+      throw new Error(`${label} state is missing memory.${key}`);
+    }
+  }
+  if (typeof memory.sessionId !== 'string' || !memory.sessionId.trim()) {
+    throw new Error(`${label} state is missing memory.sessionId`);
+  }
+}
+
 function buildCodeAnchor() {
   return [
     'Контрольный кодовый контекст для E2E.',
@@ -440,9 +463,21 @@ async function runVoicePhase(options) {
   };
 }
 
-function scoreAnswer(answerText) {
+function answerExpectations(options) {
+  return options.skipVoice
+    ? BASE_ANSWER_EXPECTATIONS
+    : [...BASE_ANSWER_EXPECTATIONS, ...VOICE_ANSWER_EXPECTATIONS];
+}
+
+function memoryExpectations(options) {
+  return options.skipVoice
+    ? BASE_MEMORY_EXPECTATIONS
+    : [...BASE_MEMORY_EXPECTATIONS, ...VOICE_MEMORY_EXPECTATIONS];
+}
+
+function scoreAnswer(answerText, options) {
   const normalized = normalizedText(answerText);
-  return ANSWER_EXPECTATIONS.map((expectation) => ({
+  return answerExpectations(options).map((expectation) => ({
     label: expectation.label,
     ok: expectation.terms.every((term) => normalized.includes(term)),
     terms: expectation.terms,
@@ -480,7 +515,7 @@ async function runAiContextPhase(options) {
   });
 
   const answer = finalHaiku.final?.text || '';
-  const checks = scoreAnswer(answer);
+  const checks = scoreAnswer(answer, options);
   const ok = checks.every((check) => check.ok);
   return {
     ok,
@@ -529,9 +564,9 @@ function retrievedMemoryText(contextText) {
   return nextSectionIndex >= 0 ? rest.slice(0, nextSectionIndex) : rest;
 }
 
-function scoreMemoryContext(contextText) {
+function scoreMemoryContext(contextText, options) {
   const retrieved = normalizedText(retrievedMemoryText(contextText));
-  return MEMORY_EXPECTATIONS.map((expectation) => ({
+  return memoryExpectations(options).map((expectation) => ({
     label: expectation.label,
     ok: expectation.terms.every((term) => retrieved.includes(normalizedText(term))),
     terms: expectation.terms,
@@ -582,7 +617,7 @@ async function runMemoryContextPhase(options) {
   }
 
   const context = payload.data?.text || '';
-  const checks = scoreMemoryContext(context);
+  const checks = scoreMemoryContext(context, options);
   const ok = checks.every((check) => check.ok);
   return {
     ok,
@@ -616,6 +651,7 @@ async function main() {
   if (!options.token) throw new Error('Companion token is required. Pass --token or COMPANION_URL.');
 
   const initial = await getState(options);
+  assertMemorySnapshot(initial, 'initial companion');
   const initialSeq = maxSeq(initial);
   console.log(`[companion-context] initial timeline=${initial.timeline.length}, maxSeq=${initialSeq}`);
 
@@ -659,6 +695,7 @@ async function main() {
   }
 
   const final = await getState(options);
+  assertMemorySnapshot(final, 'final companion');
   const artifactPath = await writeArtifact(options, {
     createdAt: new Date().toISOString(),
     options: {
@@ -676,6 +713,7 @@ async function main() {
       maxSeq: initialSeq,
       recording: initial.recording,
       microphone: initial.microphone,
+      memory: initial.memory,
     },
     voiceResult,
     aiResult,
@@ -685,6 +723,7 @@ async function main() {
       maxSeq: maxSeq(final),
       recording: final.recording,
       microphone: final.microphone,
+      memory: final.memory,
       tail: final.timeline.slice(-12),
     },
   });

@@ -98,6 +98,16 @@ pub struct CompanionLiveState {
 
 #[derive(Debug, Clone, serde::Serialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct CompanionMemoryState {
+    pub mode: String,
+    pub backend_ingest_enabled: bool,
+    pub backend_prompt_context_enabled: bool,
+    pub minimal_local_prompt_context_enabled: bool,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct CompanionAttachment {
     pub id: String,
     pub kind: String,
@@ -154,6 +164,7 @@ pub struct CompanionSnapshot {
     pub auth_required: bool,
     pub recording: CompanionRecordingState,
     pub microphone: CompanionMicrophoneState,
+    pub memory: CompanionMemoryState,
     pub controls: CompanionControlState,
     pub live: CompanionLiveState,
     pub timeline: Vec<CompanionMessage>,
@@ -639,6 +650,9 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
         .companion_conversation_generation
         .load(std::sync::atomic::Ordering::Relaxed);
     let last_action = state.companion_last_action.read().await.clone();
+    let memory_mode = crate::presentation::interview_memory_bridge::resolved_mode();
+    let memory_session_id =
+        crate::presentation::interview_memory_bridge::memory_session_id_string(state).await;
     let timeline = state
         .companion_timeline
         .read()
@@ -664,6 +678,14 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
             system_source: system_microphone_payload.source,
             app_muted: app_microphone_payload.muted,
             app_enabled: !app_microphone_payload.muted,
+        },
+        memory: CompanionMemoryState {
+            mode: memory_mode.as_str().to_string(),
+            backend_ingest_enabled: memory_mode.backend_ingest_enabled(),
+            backend_prompt_context_enabled: memory_mode.backend_prompt_context_enabled(),
+            minimal_local_prompt_context_enabled: memory_mode
+                .minimal_local_prompt_context_enabled(),
+            session_id: memory_session_id,
         },
         controls: CompanionControlState {
             history_floor_seq,

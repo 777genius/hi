@@ -3935,7 +3935,14 @@ pub async fn start_haiku_chat_stream(
         .await;
     }
 
-    let mut llm_context = context.clone();
+    let mut llm_context =
+        if crate::presentation::interview_memory_bridge::is_minimal_local_prompt_context_enabled() {
+            crate::presentation::interview_memory_bridge::minimal_current_session_fallback_context(
+                &context,
+            )
+        } else {
+            context.clone()
+        };
     let mut llm_question = question.clone();
     if let Some(memory_context) =
         crate::presentation::interview_memory_bridge::assemble_chat_context_or_fallback(

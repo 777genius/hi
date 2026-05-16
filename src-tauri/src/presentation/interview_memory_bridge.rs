@@ -5,6 +5,7 @@ use crate::presentation::AppState;
 
 const DEFAULT_API_BASE_URL: &str = "https://api.voicetext.site";
 const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 48_000;
+const DEFAULT_MINIMAL_FALLBACK_CONTEXT_CHARS: usize = 12_000;
 const DEFAULT_MAX_MEMORY_CANDIDATES: u64 = 2_000;
 const DEFAULT_MAX_MEMORY_RESULTS: usize = 32;
 const MAX_INGEST_EVENT_TEXT_CHARS: usize = 25_000;
@@ -98,10 +99,64 @@ pub struct MemoryTimelineEvent {
     pub final_answer: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterviewMemoryMode {
+    Disabled,
+    ShadowIngest,
+    ShadowRetrieve,
+    AssistiveContext,
+    ActiveContext,
+    LocalOnly,
+}
+
+impl InterviewMemoryMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::ShadowIngest => "shadow_ingest",
+            Self::ShadowRetrieve => "shadow_retrieve",
+            Self::AssistiveContext => "assistive_context",
+            Self::ActiveContext => "active_context",
+            Self::LocalOnly => "local_only",
+        }
+    }
+
+    pub fn backend_ingest_enabled(self) -> bool {
+        matches!(
+            self,
+            Self::ShadowIngest
+                | Self::ShadowRetrieve
+                | Self::AssistiveContext
+                | Self::ActiveContext
+        )
+    }
+
+    pub fn backend_prompt_context_enabled(self) -> bool {
+        matches!(self, Self::AssistiveContext | Self::ActiveContext)
+    }
+
+    pub fn minimal_local_prompt_context_enabled(self) -> bool {
+        matches!(
+            self,
+            Self::AssistiveContext | Self::ActiveContext | Self::LocalOnly
+        )
+    }
+}
+
 pub fn is_enabled() -> bool {
-    env_flag("INTERVIEW_MEMORY_ENABLED")
-        || env_flag("HACKINTERVIEW_INTERVIEW_MEMORY_ENABLED")
-        || env_flag("INTERVIEW_MEMORY_ACTIVE_CONTEXT")
+    resolved_mode().backend_ingest_enabled()
+}
+
+pub fn is_prompt_context_enabled() -> bool {
+    resolved_mode().backend_prompt_context_enabled()
+}
+
+pub fn is_minimal_local_prompt_context_enabled() -> bool {
+    resolved_mode().minimal_local_prompt_context_enabled()
+}
+
+pub fn resolved_mode() -> InterviewMemoryMode {
+    resolve_mode_from_env(|name| std::env::var(name).ok())
 }
 
 pub async fn reset_session(state: &AppState) {
@@ -128,7 +183,7 @@ pub async fn reset_session(state: &AppState) {
 }
 
 pub async fn spawn_ingest_timeline_event(state: &AppState, event: MemoryTimelineEvent) {
-    if !is_enabled() {
+    if !resolved_mode().backend_ingest_enabled() {
         return;
     }
 
@@ -162,16 +217,17 @@ pub async fn spawn_ingest_timeline_event(state: &AppState, event: MemoryTimeline
 }
 
 pub async fn assemble_stream_context_or_fallback(state: &AppState, local_context: &str) -> String {
-    if !is_enabled() {
+    if !is_prompt_context_enabled() {
         return local_context.to_string();
     }
 
+    let fallback_context = minimal_current_session_fallback_context(local_context);
     match assemble_stream_context(state, local_context).await {
         Ok(Some(text)) => text,
-        Ok(None) => local_context.to_string(),
+        Ok(None) => fallback_context,
         Err(err) => {
             log::warn!("Interview memory active context fallback: {}", err);
-            local_context.to_string()
+            fallback_context
         }
     }
 }
@@ -181,7 +237,7 @@ pub async fn assemble_chat_context_or_fallback(
     local_context: &str,
     question: &str,
 ) -> Option<String> {
-    if !is_enabled() {
+    if !is_prompt_context_enabled() {
         return None;
     }
 
@@ -194,11 +250,16 @@ pub async fn assemble_chat_context_or_fallback(
     }
 }
 
+pub fn minimal_current_session_fallback_context(local_context: &str) -> String {
+    trim_text_tail_to_line(local_context, DEFAULT_MINIMAL_FALLBACK_CONTEXT_CHARS)
+}
+
 async fn assemble_stream_context(
     state: &AppState,
     local_context: &str,
 ) -> Result<Option<String>, String> {
-    let trimmed = local_context.trim();
+    let fallback_context = minimal_current_session_fallback_context(local_context);
+    let trimmed = fallback_context.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
@@ -234,7 +295,11 @@ async fn assemble_chat_context(
     };
 
     let session_id = memory_session_id(state).await;
-    let request = build_chat_context_request(session_id, context.to_string(), question.to_string());
+    let request = build_chat_context_request(
+        session_id,
+        minimal_current_session_fallback_context(context),
+        question.to_string(),
+    );
     let response = post_json::<_, AssembleContextResponse>(
         "/api/v1/interview-memory/context",
         &auth_token,
@@ -322,6 +387,10 @@ async fn auth_token(state: &AppState) -> Option<String> {
 
 async fn memory_session_id(state: &AppState) -> Uuid {
     *state.companion_memory_session_id.read().await
+}
+
+pub async fn memory_session_id_string(state: &AppState) -> String {
+    memory_session_id(state).await.to_string()
 }
 
 fn build_ingest_requests(session_id: Uuid, event: MemoryTimelineEvent) -> Vec<IngestMemoryRequest> {
@@ -484,6 +553,30 @@ fn split_text_for_ingest(text: &str, max_chars: usize) -> Vec<String> {
     parts
 }
 
+fn trim_text_tail_to_line(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+
+    let tail = trimmed
+        .chars()
+        .rev()
+        .take(max_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+
+    if let Some(first_line_break) = tail.find('\n') {
+        if first_line_break < tail.len().saturating_sub(1) {
+            return tail[first_line_break + 1..].trim().to_string();
+        }
+    }
+
+    tail.trim().to_string()
+}
+
 fn push_non_empty(parts: &mut Vec<String>, current: &mut String, current_chars: &mut usize) {
     if !current.is_empty() {
         parts.push(std::mem::take(current));
@@ -509,18 +602,64 @@ fn push_hard_wrapped(parts: &mut Vec<String>, text: &str, max_chars: usize) {
     }
 }
 
-fn env_flag(name: &str) -> bool {
+fn env_value_is_true(value: Option<String>) -> bool {
     matches!(
-        std::env::var(name)
-            .ok()
-            .map(|value| value.trim().to_ascii_lowercase()),
+        value.map(|value| value.trim().to_ascii_lowercase()),
         Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
     )
+}
+
+fn resolve_mode_from_env(get_env: impl Fn(&str) -> Option<String>) -> InterviewMemoryMode {
+    if env_value_is_true(get_env("INTERVIEW_MEMORY_FORCE_DISABLED")) {
+        return InterviewMemoryMode::Disabled;
+    }
+    if env_value_is_true(get_env("INTERVIEW_MEMORY_FORCE_LOCAL_ONLY")) {
+        return InterviewMemoryMode::LocalOnly;
+    }
+
+    if let Some(mode) = get_env("INTERVIEW_MEMORY_MODE")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+    {
+        return match mode.as_str() {
+            "disabled" | "off" | "false" | "0" => InterviewMemoryMode::Disabled,
+            "shadow_ingest" | "shadow-ingest" | "shadowingest" => InterviewMemoryMode::ShadowIngest,
+            "shadow_retrieve" | "shadow-retrieve" | "shadowretrieve" => {
+                InterviewMemoryMode::ShadowRetrieve
+            }
+            "assistive_context" | "assistive-context" | "assistivecontext" => {
+                InterviewMemoryMode::AssistiveContext
+            }
+            "active_context" | "active-context" | "activecontext" | "active" => {
+                InterviewMemoryMode::ActiveContext
+            }
+            "local_only" | "local-only" | "localonly" => InterviewMemoryMode::LocalOnly,
+            _ => InterviewMemoryMode::Disabled,
+        };
+    }
+
+    if env_value_is_true(get_env("INTERVIEW_MEMORY_ACTIVE_CONTEXT"))
+        || env_value_is_true(get_env("INTERVIEW_MEMORY_ENABLED"))
+        || env_value_is_true(get_env("HACKINTERVIEW_INTERVIEW_MEMORY_ENABLED"))
+    {
+        return InterviewMemoryMode::ActiveContext;
+    }
+
+    InterviewMemoryMode::Disabled
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resolve_mode(entries: &[(&str, &str)]) -> InterviewMemoryMode {
+        resolve_mode_from_env(|name| {
+            entries
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        })
+    }
 
     #[test]
     fn ingest_requests_split_large_events_before_backend_limit() {
@@ -621,6 +760,114 @@ mod tests {
         assert_eq!(request.recent_timeline.len(), 1);
         assert_eq!(request.recent_timeline[0].text, "ОС: previous question");
         assert_eq!(request.budget_max_chars, Some(DEFAULT_CONTEXT_BUDGET_CHARS));
+    }
+
+    #[test]
+    fn minimal_fallback_keeps_recent_tail_without_old_anchor_packer() {
+        let local_context = format!(
+            "ОС: OLD_CODE_ANCHOR function stale() {{ return 1; }}\n{}\nОС: RECENT_CURRENT_QUESTION",
+            "фоновый длинный текст\n".repeat(1_000)
+        );
+
+        let fallback = minimal_current_session_fallback_context(&local_context);
+
+        assert!(fallback.chars().count() <= DEFAULT_MINIMAL_FALLBACK_CONTEXT_CHARS);
+        assert!(!fallback.contains("OLD_CODE_ANCHOR"));
+        assert!(fallback.contains("RECENT_CURRENT_QUESTION"));
+    }
+
+    #[test]
+    fn chat_context_request_uses_minimal_recent_timeline() {
+        let old_context = format!(
+            "ОС: OLD_MEMORY_SHOULD_COME_FROM_BACKEND\n{}\nОС: CURRENT_TAIL_FACT",
+            "длинный filler\n".repeat(1_200)
+        );
+
+        let request = build_chat_context_request(
+            Uuid::new_v4(),
+            minimal_current_session_fallback_context(&old_context),
+            "current question".to_string(),
+        );
+
+        assert_eq!(request.current_request.text, "current question");
+        assert_eq!(request.recent_timeline.len(), 1);
+        assert!(
+            request.recent_timeline[0].text.chars().count()
+                <= DEFAULT_MINIMAL_FALLBACK_CONTEXT_CHARS
+        );
+        assert!(!request.recent_timeline[0]
+            .text
+            .contains("OLD_MEMORY_SHOULD_COME_FROM_BACKEND"));
+        assert!(request.recent_timeline[0]
+            .text
+            .contains("CURRENT_TAIL_FACT"));
+    }
+
+    #[test]
+    fn memory_mode_defaults_to_disabled() {
+        assert_eq!(resolve_mode(&[]), InterviewMemoryMode::Disabled);
+    }
+
+    #[test]
+    fn memory_mode_supports_legacy_active_context_flags() {
+        assert_eq!(
+            resolve_mode(&[("INTERVIEW_MEMORY_ENABLED", "1")]),
+            InterviewMemoryMode::ActiveContext
+        );
+        assert_eq!(
+            resolve_mode(&[("INTERVIEW_MEMORY_ACTIVE_CONTEXT", "true")]),
+            InterviewMemoryMode::ActiveContext
+        );
+    }
+
+    #[test]
+    fn memory_mode_force_disabled_wins_over_active_context() {
+        assert_eq!(
+            resolve_mode(&[
+                ("INTERVIEW_MEMORY_FORCE_DISABLED", "true"),
+                ("INTERVIEW_MEMORY_MODE", "active_context"),
+                ("INTERVIEW_MEMORY_ENABLED", "1"),
+            ]),
+            InterviewMemoryMode::Disabled
+        );
+    }
+
+    #[test]
+    fn memory_mode_resolves_shadow_without_prompt_impact() {
+        let mode = resolve_mode(&[("INTERVIEW_MEMORY_MODE", "shadow_retrieve")]);
+
+        assert_eq!(mode, InterviewMemoryMode::ShadowRetrieve);
+        assert!(mode.backend_ingest_enabled());
+        assert!(!mode.backend_prompt_context_enabled());
+        assert!(!mode.minimal_local_prompt_context_enabled());
+    }
+
+    #[test]
+    fn memory_mode_resolves_active_with_prompt_impact() {
+        let mode = resolve_mode(&[("INTERVIEW_MEMORY_MODE", "active_context")]);
+
+        assert_eq!(mode, InterviewMemoryMode::ActiveContext);
+        assert!(mode.backend_ingest_enabled());
+        assert!(mode.backend_prompt_context_enabled());
+        assert!(mode.minimal_local_prompt_context_enabled());
+    }
+
+    #[test]
+    fn memory_mode_local_only_avoids_backend_calls_but_uses_minimal_local_context() {
+        let mode = resolve_mode(&[("INTERVIEW_MEMORY_FORCE_LOCAL_ONLY", "true")]);
+
+        assert_eq!(mode, InterviewMemoryMode::LocalOnly);
+        assert!(!mode.backend_ingest_enabled());
+        assert!(!mode.backend_prompt_context_enabled());
+        assert!(mode.minimal_local_prompt_context_enabled());
+    }
+
+    #[test]
+    fn invalid_memory_mode_resolves_to_disabled() {
+        assert_eq!(
+            resolve_mode(&[("INTERVIEW_MEMORY_MODE", "definitely-not-a-mode")]),
+            InterviewMemoryMode::Disabled
+        );
     }
 
     #[test]

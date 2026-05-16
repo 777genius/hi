@@ -62,6 +62,8 @@ pnpm copy-helper:brave:restart-cdp
 VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site INTERVIEW_MEMORY_ENABLED=1 FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
 ```
 
+`INTERVIEW_MEMORY_MODE=active_context` is the explicit equivalent of `INTERVIEW_MEMORY_ENABLED=1`. Lower modes are available for canaries: `shadow_ingest` stores chunks without prompt impact, `shadow_retrieve` enables retrieval checks without prompt impact, and `INTERVIEW_MEMORY_FORCE_DISABLED=true` is the emergency kill switch. `INTERVIEW_MEMORY_FORCE_LOCAL_ONLY=true` avoids backend memory calls and keeps only the minimal local prompt fallback.
+
 Для local memory backend canary, когда STT остаётся на production websocket, а `/api/v1/interview-memory/*` идёт в локальный backend:
 
 ```bash
@@ -121,6 +123,12 @@ pnpm e2e:companion-context -- --skip-voice
 pnpm e2e:companion-context -- --skip-ai
 pnpm e2e:companion-context -- --allow-ai-miss
 ```
+
+`--skip-voice` intentionally narrows AI/memory expectations to deterministic focus-copy and prompt facts only. It does not require voice-only facts like "таймер" or "последний аргумент", because those facts are introduced by the synthetic voice phase.
+
+When `INTERVIEW_MEMORY_ENABLED=1` and the memory API is intentionally unavailable, the desktop bridge now falls back to a compact current-session tail. That fallback should prove the chat still answers and the question flow does not break; it is not expected to preserve old long-interview recall without the backend memory context.
+
+The companion `/api/state` snapshot includes a production-safe `memory` block with the resolved mode, backend/local capabilities and memory session id. It intentionally does not include raw retrieved text or prompt artifacts. `pnpm e2e:companion-context` fails early if that block is missing.
 
 Проверка, что backend memory не только получил ingest, но и реально достаёт нужный контекст после длинной истории:
 
