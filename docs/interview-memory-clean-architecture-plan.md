@@ -22,6 +22,7 @@ Implemented baseline:
 - companion `/api/state` exposes a production-safe memory snapshot with resolved mode, backend/local capabilities and session id, without raw retrieved text or prompt artifacts.
 - backend application ports now include an `EmbeddingProvider` contract and infrastructure exposes `NoopEmbeddingAdapter` with adapter contract tests; V1 remains keyword/entity-only by default and does not call external embedding providers.
 - companion synthetic context E2E supports `--production-safe-artifact`/`COMPANION_PRODUCTION_SAFE_ARTIFACT=1`, redacting raw transcript/code/prompt/AI text, nested candidate text and attachment payloads while keeping release-review counts, checks, budgets and latency.
+- reusable backend production/staging canary `pnpm e2e:memory-canary` checks real `/api/v1/interview-memory/*` ingest/context/duplicate/delete/status with a JWT and writes a production-safe artifact without raw transcript/code/prompt text.
 
 Not yet promoted to default:
 
@@ -4378,6 +4379,10 @@ Frontend companion memory retrieval gate:
   pnpm e2e:companion-context -- --filler-chars 52000 --verify-memory --memory-api-url http://127.0.0.1:8080
   pnpm e2e:prepare-local-memory-auth -- --clear
 
+Backend production/staging canary gate:
+  cd /Users/belief/dev/projects/HackInterview
+  pnpm e2e:memory-canary -- --api-url https://api.voicetext.site
+
 Frontend companion dual audio gate:
   cd /Users/belief/dev/projects/HackInterview
   pnpm e2e:companion-audio -- --cycles 3 --allow-mic-miss
@@ -4454,6 +4459,11 @@ Current local evidence log:
   companion synthetic context E2E gained production-safe artifact mode for staging/canary review
   checks: `node --check e2e-tests/companion-synthetic-context.mjs`; `pnpm e2e:companion-context -- --help`
   note: full-text dev artifacts remain available by default; canary artifacts should use `--production-safe-artifact`
+
+2026-05-16T10:06:00Z:
+  backend memory API gained reusable production/staging canary script
+  checks: `node --check e2e-tests/interview-memory-canary.mjs`; `pnpm e2e:memory-canary -- --help`
+  note: canary creates an isolated session, verifies ingest/context/duplicate/delete/status and self-checks that the artifact does not leak raw E2E fragments
 ```
 
 This evidence is enough to treat the V1 local `ActiveContext` path as stabilized behind flags. It is still not enough to promote memory as default because the production/staging canary and production prompt artifact review are not done.

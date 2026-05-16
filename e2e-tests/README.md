@@ -106,6 +106,14 @@ cargo run -p migration -- up
 cargo test --test interview_memory_e2e -- --nocapture --test-threads=1
 ```
 
+Production/staging canary для уже задеплоенного backend memory API:
+
+```bash
+pnpm e2e:memory-canary -- --api-url https://api.voicetext.site
+```
+
+Canary берёт JWT из `INTERVIEW_MEMORY_AUTH_TOKEN`, `--auth-token-file` или native `~/Library/Application Support/HackInterview/auth_store.json`, создаёт отдельную synthetic session, проверяет ingest/context/duplicate/delete/status и пишет production-safe artifact в `.e2e-artifacts/interview-memory-canary/`. Raw transcript/code/prompt text в artifact не сохраняется, а скрипт падает, если видит утечку контрольных raw-фрагментов.
+
 Что делает тест:
 
 - добавляет ранний кодовый anchor через `/api/focus-copy/ingest`;
