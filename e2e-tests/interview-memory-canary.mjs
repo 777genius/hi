@@ -20,6 +20,11 @@ const REQUIRED_CHECKS = [
   { label: 'late marker', terms: ['IM_CANARY_LATE'] },
 ];
 
+const getDataNumber = (payload, key) => {
+  const value = payload?.data?.[key];
+  return Number.isFinite(Number(value)) ? Number(value) : 0;
+};
+
 function parseArgs(argv) {
   const options = {
     apiUrl: DEFAULT_API_URL,
@@ -362,6 +367,13 @@ async function main() {
     if (!duplicateResult.ok) {
       throw new Error(`Duplicate ingest failed: ${duplicateResult.status} ${JSON.stringify(duplicateResult.payload)}`);
     }
+    const duplicateStoredChunks = getDataNumber(duplicateResult.payload, 'stored_chunks');
+    const duplicateChunks = getDataNumber(duplicateResult.payload, 'duplicate_chunks');
+    if (duplicateStoredChunks !== 0 || duplicateChunks < 1) {
+      throw new Error(
+        `Duplicate ingest was not idempotent: stored=${duplicateStoredChunks}, duplicate=${duplicateChunks}`,
+      );
+    }
 
     contextResult = await authenticatedFetch(options, token, '/api/v1/interview-memory/context', {
       session_id: sessionId,
@@ -398,6 +410,10 @@ async function main() {
     if (!statusBeforeDelete.ok) {
       throw new Error(`Status before delete failed: ${statusBeforeDelete.status}`);
     }
+    const chunksBeforeDelete = getDataNumber(statusBeforeDelete.payload, 'chunks');
+    if (chunksBeforeDelete <= 0) {
+      throw new Error(`Status before delete reported no chunks: ${chunksBeforeDelete}`);
+    }
 
     if (!options.keepSession) {
       deleteResult = await authenticatedFetch(
@@ -420,6 +436,16 @@ async function main() {
       );
       if (!statusAfterDelete.ok) {
         throw new Error(`Status after delete failed: ${statusAfterDelete.status}`);
+      }
+      const countsAfterDelete = ['chunks', 'facts', 'jobs', 'pending_jobs'].map((key) => [
+        key,
+        getDataNumber(statusAfterDelete.payload, key),
+      ]);
+      const staleCounts = countsAfterDelete.filter(([, value]) => value !== 0);
+      if (staleCounts.length > 0) {
+        throw new Error(
+          `Delete cleanup left data: ${staleCounts.map(([key, value]) => `${key}=${value}`).join(', ')}`,
+        );
       }
     }
 
