@@ -26,8 +26,7 @@ Implemented baseline:
 
 Not yet promoted to product-wide default:
 
-- product decision to enable desktop `ActiveContext` by default for all users;
-- optional full voice + AI + memory production release smoke in one run before flipping the default for all users.
+- product decision to enable desktop `ActiveContext` by default for all users.
 
 Цель: сделать долговременную память для интервью так, чтобы AI стабильно отвечал по длинной истории голосовых вопросов, кода, selected messages и уточнений, но без раздувания prompt, vendor lock-in и неконтролируемой "магии памяти".
 
@@ -4490,9 +4489,20 @@ Current local evidence log:
   latency: memory retrieval latencyMs=401, budget=21919 / 22000 chars, criticalBudgetPressure=false
   privacy: production-safe artifact, raw code/transcript/prompt/AI text redacted
   note: synthetic voice + real STT + real AI had already passed earlier with local fallback; this final production run intentionally skipped voice to avoid spending time on audio while validating backend memory retrieval
+
+2026-05-16T07:26:16Z:
+  production companion full release smoke passed in one run: synthetic voice, real STT, real paid AI answer and backend memory retrieval
+  artifact: `.e2e-artifacts/companion-synthetic-context/2026-05-16T07-26-16-989Z.json`
+  launch mode: `INTERVIEW_MEMORY_ENABLED=1`, `VITE_API_URL=https://api.voicetext.site`, `VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site`
+  voice checks: messageCount=6, hitCount=11, transcript redacted in production-safe artifact
+  AI checks: project context, queue-not-stack, linear complexity, debounce/timer and last argument all passed
+  memory checks: early code marker, late marker, project context, queue-not-stack, linear complexity and debounce question all passed
+  counts: includedChunks=17, droppedChunks=7, timelineCount=11
+  latency: memory retrieval latencyMs=389, budget=21574 / 22000 chars, criticalBudgetPressure=false
+  privacy: production-safe artifact, raw code/transcript/prompt/AI text redacted
 ```
 
-This evidence is enough to treat the V1 `ActiveContext` path as stabilized behind opt-in flags. Backend production canary, production companion real AI smoke and production companion backend memory retrieval verification have passed. It is still not a product-wide default switch: the default rollout should be a deliberate product/release decision, with one final full voice + AI + memory smoke immediately before flipping the default for all users.
+This evidence is enough to treat the V1 `ActiveContext` path as stabilized behind opt-in flags. Backend production canary, production companion real AI smoke, production companion backend memory retrieval verification and one full voice + AI + memory release smoke have passed. It is still not a product-wide default switch: the remaining default rollout decision is a product/release switch, not a missing architecture or implementation step.
 
 Backend must have memory routes enabled:
 

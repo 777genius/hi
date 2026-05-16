@@ -144,7 +144,7 @@ Useful flags:
   --memory-api-url <url>         Backend memory API URL, defaults to INTERVIEW_MEMORY_API_URL.
   --memory-auth-token <token>    Bearer token for backend memory API.
   --memory-db-url <url>          Postgres URL used to discover the latest memory session.
-  --memory-session-id <uuid>     Memory session id, avoids DB discovery.
+  --memory-session-id <uuid>     Memory session id, avoids companion state/DB discovery.
   --memory-auth-token-file <p>   File with a raw token or auth_store.json.
   --keep-audio                   Keep generated TTS files.
   --production-safe-artifact     Redact raw transcript/code/prompt/AI text from the JSON artifact.
@@ -851,6 +851,11 @@ async function main() {
   let memoryResult = null;
   if (options.verifyMemory) {
     console.log('[companion-context] verifying backend interview memory retrieval');
+    if (!options.memorySessionId.trim()) {
+      const memoryState = await getState(options);
+      const stateSessionId = String(memoryState?.memory?.sessionId || '').trim();
+      if (stateSessionId) options.memorySessionId = stateSessionId;
+    }
     memoryResult = await runMemoryContextPhase(options);
     const icon = memoryResult.ok ? '✅' : '❌';
     console.log(`${icon} memory context: ${memoryResult.checks.map((check) => `${check.label}=${check.ok ? 'ok' : 'miss'}`).join(', ')}`);

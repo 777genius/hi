@@ -145,11 +145,10 @@ For staging/canary evidence, pass `--production-safe-artifact` or set `COMPANION
 
 ```bash
 INTERVIEW_MEMORY_AUTH_TOKEN="$(cat /tmp/hackinterview-memory-e2e-token.txt)" \
-INTERVIEW_MEMORY_DB_URL=postgres://belief@localhost/voice_to_text \
 pnpm e2e:companion-context -- --filler-chars 52000 --verify-memory --memory-api-url http://127.0.0.1:8080
 ```
 
-`--verify-memory` через `psql` находит свежий `session_id` по E2E markers, вызывает `/api/v1/interview-memory/context` и проверяет, что retrieved memory содержит ранний code marker, поздний marker, голосовой вопрос про проект, `debounce`, таймер/аргумент, очередь/стек и линейную сложность.
+`--verify-memory` по умолчанию берёт `session_id` из production-safe companion `/api/state` memory snapshot, вызывает `/api/v1/interview-memory/context` и проверяет, что retrieved memory содержит ранний code marker, поздний marker, голосовой вопрос про проект, `debounce`, таймер/аргумент, очередь/стек и линейную сложность. Если нужно проверить старый/внешний session вручную, передай `--memory-session-id <uuid>` или `INTERVIEW_MEMORY_DB_URL=...` для fallback discovery через `psql`.
 
 Если desktop app не залогинен, voice/recording phase ожидаемо вернёт `authRequired`. Для проверки long context/focus-copy/memory split без записи:
 
