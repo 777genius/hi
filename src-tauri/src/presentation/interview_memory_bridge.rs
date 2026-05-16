@@ -722,7 +722,7 @@ fn push_context_block(
     text.clear();
 }
 
-fn text_looks_like_current_code(text: &str) -> bool {
+pub(crate) fn text_looks_like_current_code(text: &str) -> bool {
     if text.contains("```") {
         return true;
     }
@@ -766,9 +766,11 @@ fn derive_stream_current_request(
     local_context: &str,
     evidence: &StructuredContextEvidence,
 ) -> String {
-    if let Some(item) = evidence.recent_timeline.iter().rev().find(|item| {
-        !matches!(item.label.as_str(), "assistant") && !item.text.trim().is_empty()
-    }) {
+    if let Some(item) =
+        evidence.recent_timeline.iter().rev().find(|item| {
+            !matches!(item.label.as_str(), "assistant") && !item.text.trim().is_empty()
+        })
+    {
         return trim_text_tail_to_line(&item.text, 4_000);
     }
 

@@ -6,6 +6,9 @@ use crate::presentation::companion::{
     CompanionAttachment, CompanionLlmCandidate, CompanionMessage, LIVE_STT_MESSAGE_ID,
 };
 use crate::presentation::events::{FinalTranscriptionPayload, PartialTranscriptionPayload};
+use crate::presentation::interview_memory_bridge::{
+    MemoryContextEvidenceInput, MemoryRequestEvidenceInput,
+};
 use crate::presentation::AppState;
 
 const CROSS_STREAM_DEDUP_WINDOW_MS: i64 = 8_000;
@@ -19,6 +22,7 @@ const MAX_PRUNED_IMPORTANT_OLD_MESSAGES: usize = 40;
 
 #[derive(Debug, Clone)]
 struct ContextPart {
+    id: String,
     kind: String,
     line: String,
 }
@@ -1425,6 +1429,31 @@ pub async fn on_microphone_final(state: &AppState, payload: &FinalTranscriptionP
 }
 
 pub async fn build_context_text(state: &AppState, include_full_history: bool) -> String {
+    let parts = collect_context_parts(state, include_full_history).await;
+    context_text_from_selected_parts(&select_context_parts(&parts))
+}
+
+pub async fn build_memory_context_evidence(
+    state: &AppState,
+    include_full_history: bool,
+) -> MemoryContextEvidenceInput {
+    let parts = collect_context_parts(state, include_full_history).await;
+    memory_context_evidence_from_parts(&select_context_parts(&parts))
+}
+
+pub async fn build_context_text_and_memory_evidence(
+    state: &AppState,
+    include_full_history: bool,
+) -> (String, MemoryContextEvidenceInput) {
+    let parts = collect_context_parts(state, include_full_history).await;
+    let selected = select_context_parts(&parts);
+    (
+        context_text_from_selected_parts(&selected),
+        memory_context_evidence_from_parts(&selected),
+    )
+}
+
+async fn collect_context_parts(state: &AppState, include_full_history: bool) -> Vec<ContextPart> {
     let context_floor_seq = state.companion_context_floor_seq.load(Ordering::Relaxed);
     let live_system = visible_system_partial_text(state).await;
     let live_mic = visible_microphone_partial_text(state).await;
@@ -1443,6 +1472,7 @@ pub async fn build_context_text(state: &AppState, include_full_history: bool) ->
         let line = format_context_line(message.kind.as_str(), &message.text);
         if !line.is_empty() {
             parts.push(ContextPart {
+                id: message.id.clone(),
                 kind: message.kind.clone(),
                 line,
             });
@@ -1451,18 +1481,20 @@ pub async fn build_context_text(state: &AppState, include_full_history: bool) ->
 
     if let Some(text) = live_system {
         parts.push(ContextPart {
+            id: LIVE_STT_MESSAGE_ID.to_string(),
             kind: "stt".to_string(),
             line: format!("ОС: {}", text),
         });
     }
     if let Some(text) = live_mic {
         parts.push(ContextPart {
+            id: "mic:live".to_string(),
             kind: "mic".to_string(),
             line: format!("МИКРОФОН: {}", text),
         });
     }
 
-    trim_context_parts(&parts)
+    parts
 }
 
 fn format_context_line(kind: &str, text: &str) -> String {
@@ -1587,6 +1619,7 @@ fn add_anchor_candidate(
     anchors.push((
         index,
         ContextPart {
+            id: part.id.clone(),
             kind: part.kind.clone(),
             line,
         },
@@ -1697,6 +1730,7 @@ fn is_important_pruned_old_message(message: &CompanionMessage) -> bool {
 
     let line = format_context_line(message.kind.as_str(), &message.text);
     is_important_older_context_part(&ContextPart {
+        id: message.id.clone(),
         kind: message.kind.clone(),
         line,
     })
@@ -1735,7 +1769,7 @@ fn select_pruned_important_old_indexes(messages: &[CompanionMessage], limit: usi
     selected
 }
 
-fn trim_context_parts(raw_parts: &[ContextPart]) -> String {
+fn select_context_parts(raw_parts: &[ContextPart]) -> Vec<ContextPart> {
     let parts = raw_parts
         .iter()
         .filter_map(|part| {
@@ -1744,6 +1778,7 @@ fn trim_context_parts(raw_parts: &[ContextPart]) -> String {
                 None
             } else {
                 Some(ContextPart {
+                    id: part.id.clone(),
                     kind: part.kind.clone(),
                     line: line.to_string(),
                 })
@@ -1752,15 +1787,11 @@ fn trim_context_parts(raw_parts: &[ContextPart]) -> String {
         .collect::<Vec<_>>();
 
     if parts.is_empty() {
-        return String::new();
+        return Vec::new();
     }
 
     if context_len(&parts) <= MAX_CONTEXT_CHARS {
-        return parts
-            .iter()
-            .map(|part| part.line.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+        return parts;
     }
 
     let recent_limit = RECENT_CONTEXT_CHARS.min(MAX_CONTEXT_CHARS);
@@ -1773,6 +1804,7 @@ fn trim_context_parts(raw_parts: &[ContextPart]) -> String {
             recent.insert(
                 0,
                 ContextPart {
+                    id: part.id.clone(),
                     kind: part.kind.clone(),
                     line: trim_context_text_to(&part.line, recent_limit),
                 },
@@ -1826,13 +1858,34 @@ fn trim_context_parts(raw_parts: &[ContextPart]) -> String {
     selected.extend(recent);
 
     if selected.is_empty() {
-        return trim_context_text(
+        let line = trim_context_text(
             &parts
                 .iter()
                 .map(|part| part.line.as_str())
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
+        if line.is_empty() {
+            return Vec::new();
+        }
+        return vec![ContextPart {
+            id: "context:trimmed".to_string(),
+            kind: "context".to_string(),
+            line,
+        }];
+    }
+
+    selected
+}
+
+fn trim_context_parts(raw_parts: &[ContextPart]) -> String {
+    let selected = select_context_parts(raw_parts);
+    context_text_from_selected_parts(&selected)
+}
+
+fn context_text_from_selected_parts(selected: &[ContextPart]) -> String {
+    if selected.is_empty() {
+        return String::new();
     }
 
     trim_context_text(
@@ -1842,6 +1895,56 @@ fn trim_context_parts(raw_parts: &[ContextPart]) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
     )
+}
+
+fn memory_context_evidence_from_parts(parts: &[ContextPart]) -> MemoryContextEvidenceInput {
+    let mut evidence = MemoryContextEvidenceInput::default();
+
+    for part in parts {
+        let text = context_part_evidence_text(part);
+        if text.is_empty() {
+            continue;
+        }
+
+        let item = MemoryRequestEvidenceInput {
+            id: Some(part.id.clone()),
+            label: Some(memory_context_label(part).to_string()),
+            text: text.clone(),
+        };
+
+        if part.id.starts_with("focus-copy:")
+            || crate::presentation::interview_memory_bridge::text_looks_like_current_code(&text)
+        {
+            evidence.current_code.push(MemoryRequestEvidenceInput {
+                label: Some("current_code".to_string()),
+                ..item
+            });
+        } else {
+            evidence.recent_timeline.push(item);
+        }
+    }
+
+    evidence
+}
+
+fn memory_context_label(part: &ContextPart) -> &'static str {
+    match part.kind.as_str() {
+        "stt" => "system_audio",
+        "mic" => "microphone",
+        "prompt" => "manual_prompt",
+        "haiku" => "assistant",
+        _ => "recent_timeline",
+    }
+}
+
+fn context_part_evidence_text(part: &ContextPart) -> String {
+    let trimmed = part.line.trim();
+    for prefix in ["ОС:", "МИКРОФОН:", "ЗАПРОС:", "ПОМОЩНИК:"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return rest.trim().to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 pub async fn resolve_insert_after_id(state: &AppState) -> Option<String> {
@@ -2318,11 +2421,136 @@ mod tests {
         assert!(context.contains("CTX-PRUNE-RECENT-279"));
     }
 
+    #[tokio::test]
+    async fn build_memory_context_evidence_sends_structured_companion_sections() {
+        let state = AppState::default();
+
+        append_focus_copy_system_final(
+            &state,
+            "function solveQueue(items) { return items.length; }".to_string(),
+            100,
+            Some("focus-copy:code".to_string()),
+        )
+        .await
+        .expect("focus-copy message");
+        append_system_final(
+            &state,
+            1,
+            &test_transcription("Как работает очередь событий?", 200),
+        )
+        .await;
+        append_microphone_message(&state, 2, "Я бы ответил через FIFO", 220).await;
+        append_prompt_message(
+            &state,
+            CompanionPromptDraft {
+                id: "prompt:memory-check".to_string(),
+                text: "Сформулируй коротко".to_string(),
+                created_at_ms: 230,
+                attachments: Vec::new(),
+            },
+        )
+        .await;
+
+        let (context, evidence) = build_context_text_and_memory_evidence(&state, false).await;
+
+        assert!(context.contains("function solveQueue"));
+        assert!(evidence.selected_messages.is_empty());
+        assert!(evidence.current_code.iter().any(|item| {
+            item.id.as_deref() == Some("focus-copy:code")
+                && item.label.as_deref() == Some("current_code")
+                && item.text.contains("function solveQueue")
+                && !item.text.starts_with("ОС:")
+        }));
+        assert!(evidence.recent_timeline.iter().any(|item| {
+            item.label.as_deref() == Some("system_audio")
+                && item.text == "Как работает очередь событий?"
+        }));
+        assert!(evidence.recent_timeline.iter().any(|item| {
+            item.label.as_deref() == Some("microphone") && item.text == "Я бы ответил через FIFO"
+        }));
+        assert!(evidence.recent_timeline.iter().any(|item| {
+            item.label.as_deref() == Some("manual_prompt") && item.text == "Сформулируй коротко"
+        }));
+    }
+
+    #[tokio::test]
+    async fn build_memory_context_evidence_keeps_plain_class_discussion_out_of_code() {
+        let state = AppState::default();
+
+        append_system_final(
+            &state,
+            1,
+            &test_transcription(
+                "Объясни разницу между class component и function component без примеров кода",
+                200,
+            ),
+        )
+        .await;
+
+        let evidence = build_memory_context_evidence(&state, false).await;
+
+        assert!(evidence.current_code.is_empty());
+        assert!(evidence.recent_timeline.iter().any(|item| {
+            item.label.as_deref() == Some("system_audio")
+                && item.text.contains("class component и function component")
+        }));
+    }
+
+    #[tokio::test]
+    async fn build_memory_context_evidence_uses_same_long_context_retention() {
+        let state = AppState::default();
+
+        append_focus_copy_system_final(
+            &state,
+            format!(
+                "CTX-EVIDENCE-CODE-001\nconst answer = new Map();\n{}",
+                "x".repeat(2_000)
+            ),
+            100,
+            Some("focus-copy:evidence-code".to_string()),
+        )
+        .await
+        .expect("focus-copy message");
+
+        for idx in 0..320 {
+            append_system_final(
+                &state,
+                1,
+                &test_transcription(
+                    &format!("EVIDENCE-FOLLOW-UP-{idx:03} {}", "ж".repeat(180)),
+                    200 + idx,
+                ),
+            )
+            .await;
+        }
+
+        let (context, evidence) = build_context_text_and_memory_evidence(&state, false).await;
+        let evidence_text = evidence
+            .current_code
+            .iter()
+            .chain(evidence.recent_timeline.iter())
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(context.chars().count() <= MAX_CONTEXT_CHARS);
+        assert!(context.contains("CTX-EVIDENCE-CODE-001"));
+        assert!(context.contains("EVIDENCE-FOLLOW-UP-319"));
+        assert!(!context.contains("EVIDENCE-FOLLOW-UP-000"));
+        assert!(evidence.current_code.iter().any(|item| {
+            item.id.as_deref() == Some("focus-copy:evidence-code")
+                && item.text.contains("CTX-EVIDENCE-CODE-001")
+        }));
+        assert!(evidence_text.contains("EVIDENCE-FOLLOW-UP-319"));
+        assert!(!evidence_text.contains("EVIDENCE-FOLLOW-UP-000"));
+    }
+
     #[test]
     fn trim_context_parts_keeps_first_and_fresh_old_code_anchors() {
         let mut parts = Vec::new();
         for idx in 0..24 {
             parts.push(ContextPart {
+                id: format!("stt:old:{idx}"),
                 kind: "stt".to_string(),
                 line: format!(
                     "ОС: CODE-OLD-{idx:02} function sample{idx}() {{ return {idx}; }} {}",
@@ -2331,11 +2559,13 @@ mod tests {
             });
         }
         parts.push(ContextPart {
+            id: "haiku:old-noise".to_string(),
             kind: "haiku".to_string(),
             line: format!("ПОМОЩНИК: ASSISTANT-OLD-NOISE-001 {}", "y".repeat(12_000)),
         });
         for idx in 0..180 {
             parts.push(ContextPart {
+                id: format!("stt:recent:{idx}"),
                 kind: "stt".to_string(),
                 line: format!("ОС: RECENT-HOUR-{idx:03} {}", "z".repeat(220)),
             });
@@ -2354,6 +2584,7 @@ mod tests {
     fn trim_context_parts_keeps_compact_voice_facts_when_long_filler_competes() {
         let parts = vec![
             ContextPart {
+                id: "stt:code-alpha".to_string(),
                 kind: "stt".to_string(),
                 line: format!(
                     "ОС: CODE_CTX_E2E_ALPHA function debounceSearch() {{ return true; }} {}",
@@ -2361,21 +2592,25 @@ mod tests {
                 ),
             },
             ContextPart {
+                id: "stt:fact-one".to_string(),
                 kind: "stt".to_string(),
                 line: "ОС: Контрольный голосовой факт номер один. Проект называется Северный мост."
                     .to_string(),
             },
             ContextPart {
+                id: "stt:fact-two".to_string(),
                 kind: "stt".to_string(),
                 line: "ОС: Контрольный голосовой факт номер два. Для очереди событий нужно использовать очередь, а не стек."
                     .to_string(),
             },
             ContextPart {
+                id: "stt:fact-three".to_string(),
                 kind: "stt".to_string(),
                 line: "ОС: Контрольный голосовой факт номер три. Сложность решения должна быть линейная."
                     .to_string(),
             },
             ContextPart {
+                id: "stt:filler".to_string(),
                 kind: "stt".to_string(),
                 line: format!(
                     "ОС: длинный filler без контрольных фактов {}",
@@ -2383,6 +2618,7 @@ mod tests {
                 ),
             },
             ContextPart {
+                id: "stt:late".to_string(),
                 kind: "stt".to_string(),
                 line: "ОС: Поздний маркер LATE_CTX_E2E_OMEGA.".to_string(),
             },

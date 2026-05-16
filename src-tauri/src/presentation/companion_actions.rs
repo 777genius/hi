@@ -339,8 +339,11 @@ pub async fn request_ai(
     let question = question_text.unwrap_or_default().trim().to_string();
 
     if question.is_empty() {
-        let context_text =
-            crate::presentation::companion_timeline::build_context_text(state, false).await;
+        let (context_text, memory_context_evidence) =
+            crate::presentation::companion_timeline::build_context_text_and_memory_evidence(
+                state, false,
+            )
+            .await;
         if context_text.trim().is_empty() {
             return noop(app_handle, "noop").await;
         }
@@ -358,12 +361,15 @@ pub async fn request_ai(
                 prompt_created_at_ms: None,
             }),
             openai_responses_web_search,
-            None,
+            Some(memory_context_evidence),
         )
         .await?;
     } else {
-        let context_text =
-            crate::presentation::companion_timeline::build_context_text(state, false).await;
+        let (context_text, memory_context_evidence) =
+            crate::presentation::companion_timeline::build_context_text_and_memory_evidence(
+                state, false,
+            )
+            .await;
         let prompt_message_id = format!("prompt:{}", uuid::Uuid::new_v4());
         commands::start_haiku_chat_stream(
             command_state,
@@ -379,7 +385,7 @@ pub async fn request_ai(
                 prompt_created_at_ms: Some(created_at_ms),
             }),
             openai_responses_web_search,
-            None,
+            Some(memory_context_evidence),
         )
         .await?;
     }
@@ -425,8 +431,11 @@ pub async fn send_prompt(
         (!trimmed.is_empty()).then_some(trimmed)
     };
     let created_at_ms = crate::presentation::companion_timeline::now_ms();
-    let context_text =
-        crate::presentation::companion_timeline::build_context_text(state, false).await;
+    let (context_text, memory_context_evidence) =
+        crate::presentation::companion_timeline::build_context_text_and_memory_evidence(
+            state, false,
+        )
+        .await;
     let prompt_message_id = format!("prompt:{}", uuid::Uuid::new_v4());
 
     commands::start_haiku_chat_stream(
@@ -443,7 +452,7 @@ pub async fn send_prompt(
             prompt_created_at_ms: Some(created_at_ms),
         }),
         openai_responses_web_search,
-        None,
+        Some(memory_context_evidence),
     )
     .await?;
 
