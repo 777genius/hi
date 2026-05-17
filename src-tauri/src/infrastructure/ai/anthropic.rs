@@ -1,6 +1,7 @@
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde_json::Value;
+use std::time::Duration;
 
 use super::sse::SseDecoder;
 
@@ -8,6 +9,8 @@ pub const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 pub const DEFAULT_HAIKU_MODEL: &str = crate::domain::DEFAULT_ANTHROPIC_MODEL;
 
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const ANTHROPIC_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum AnthropicError {
@@ -67,7 +70,10 @@ pub async fn stream_user_content_deltas(
         return Err(AnthropicError::MissingApiKey);
     }
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(ANTHROPIC_CONNECT_TIMEOUT)
+        .read_timeout(ANTHROPIC_READ_TIMEOUT)
+        .build()?;
     let payload = serde_json::json!({
         "model": opts.model,
         "max_tokens": opts.max_tokens,

@@ -729,7 +729,6 @@ function buildScenarioTurns(runId, count, scenario) {
 function scenarioMemoryRequiredTerms(runId, scenario) {
   if (scenario === 'multi-topic') {
     return [
-      'Полярная станция',
       'LRU',
       'TTL',
       'LEFT JOIN',
@@ -933,6 +932,20 @@ async function runAiTurn(options, turn, turnIndex, baselineSeq) {
     const state = await getState(options);
     const messages = messagesAfter(state, promptSeq);
     const candidates = messages.filter((message) => message.kind === 'haiku');
+    const errored = [...candidates].reverse().find((message) => message.status === 'error');
+    if (errored) {
+      throw new Error(
+        `AI stream failed for turn ${turnIndex}: ${JSON.stringify({
+          error: redactText(errored.text || errored.error || 'unknown error'),
+          state: {
+            recording: state.recording,
+            memory: state.memory,
+            timelineCount: state.timeline.length,
+            maxSeq: maxSeq(state),
+          },
+        })}`,
+      );
+    }
     const final = [...candidates].reverse().find((message) => message.status === 'final' && message.text.trim());
     return {
       ok: Boolean(final),
@@ -1216,6 +1229,13 @@ function buildRunAcceptance(options, turnResults, memoryResult) {
   };
 }
 
+function shouldFailRun(options, acceptance) {
+  const hasUnacceptedTurnFailures =
+    acceptance.hardFailedTurns.length > 0 ||
+    acceptance.contextFallbackTurns.length > options.maxContextFallbacks;
+  return (hasUnacceptedTurnFailures && !options.allowAiMiss) || !acceptance.memoryOk;
+}
+
 async function writeArtifact(options, artifact) {
   await mkdir(options.artifactsDir, { recursive: true });
   const path = join(options.artifactsDir, `${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
@@ -1292,8 +1312,9 @@ function runSelfTest() {
   assertSelfTest(
     multiTopicRequiredTerms.includes('LEFT JOIN') &&
       multiTopicRequiredTerms.some((term) => Array.isArray(term) && term.includes('idempotency')) &&
+      !multiTopicRequiredTerms.includes('Полярная станция') &&
       !multiTopicRequiredTerms.includes(marker(runId, 'SQL_LEFT_JOIN_WINDOW')),
-    'multi-topic broad memory verification should focus on semantic recall',
+    'multi-topic broad memory verification should focus on semantic topic recall, not exact project details',
   );
   const multiTopicPhases = scenarioMemoryCheckPhases(runId, 'multi-topic');
   assertSelfTest(multiTopicPhases.length === 5, 'multi-topic memory verification should use broad and exact phases');
@@ -1301,6 +1322,42 @@ function runSelfTest() {
     multiTopicPhases.some((phase) => phase.requiredTerms.includes(marker(runId, 'SQL_LEFT_JOIN_WINDOW'))) &&
       multiTopicPhases.some((phase) => phase.requiredTerms.includes(marker(runId, 'REACT_STALE_CLOSURE_MEMO'))),
     'multi-topic exact phases should verify source markers separately',
+  );
+
+  const fallbackOnlyTurn = {
+    ok: false,
+    index: 42,
+    label: 'fallback-only turn',
+    answerChecks: [{ ok: true }],
+    diagnosticChecks: [
+      { label: 'context status ok', ok: false, value: 'fallback' },
+      { label: 'context latency recorded', ok: true },
+      { label: 'ingest status ok', ok: true },
+    ],
+    timelineState: {
+      memory: {
+        lastContextLatencyMs: 123,
+        lastContextError: 'simulated transient',
+      },
+    },
+  };
+  const acceptedFallback = buildRunAcceptance({ maxContextFallbacks: 1 }, [fallbackOnlyTurn], { ok: true });
+  assertSelfTest(acceptedFallback.ok, 'single observable fallback should be accepted within configured limit');
+  assertSelfTest(
+    !shouldFailRun({ maxContextFallbacks: 1, allowAiMiss: false }, acceptedFallback),
+    'single observable fallback within limit should not fail the run',
+  );
+  const rejectedFallback = buildRunAcceptance({ maxContextFallbacks: 0 }, [fallbackOnlyTurn], { ok: true });
+  assertSelfTest(!rejectedFallback.ok, 'observable fallback should be rejected when fallback limit is zero');
+  assertSelfTest(
+    shouldFailRun({ maxContextFallbacks: 0, allowAiMiss: false }, rejectedFallback),
+    'observable fallback above limit should fail the run',
+  );
+  const memoryFailure = buildRunAcceptance({ maxContextFallbacks: 1 }, [fallbackOnlyTurn], { ok: false });
+  assertSelfTest(!memoryFailure.ok, 'memory verification failure should make acceptance fail');
+  assertSelfTest(
+    shouldFailRun({ maxContextFallbacks: 1, allowAiMiss: true }, memoryFailure),
+    'allow-ai-miss must not hide backend memory verification failure',
   );
   console.log('[long-interview] self-test ok');
 }
@@ -1437,11 +1494,7 @@ async function main() {
     );
   }
 
-  const hasUnacceptedTurnFailures =
-    acceptance.hardFailedTurns.length > 0 ||
-    acceptance.contextFallbackTurns.length > options.maxContextFallbacks;
-  if (hasUnacceptedTurnFailures && !options.allowAiMiss) process.exitCode = 1;
-  if (!acceptance.memoryOk) process.exitCode = 1;
+  if (shouldFailRun(options, acceptance)) process.exitCode = 1;
 }
 
 main().catch((error) => {

@@ -7,7 +7,7 @@ use crate::presentation::AppState;
 const DEFAULT_API_BASE_URL: &str = "https://api.voicetext.site";
 const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 48_000;
 const DEFAULT_MINIMAL_FALLBACK_CONTEXT_CHARS: usize = 12_000;
-const DEFAULT_MAX_MEMORY_CANDIDATES: u64 = 2_000;
+const DEFAULT_MAX_MEMORY_CANDIDATES: u64 = 500;
 const DEFAULT_MAX_MEMORY_RESULTS: usize = 32;
 const MAX_INGEST_EVENT_TEXT_CHARS: usize = 25_000;
 const CONTEXT_HTTP_TIMEOUT: Duration = Duration::from_millis(2_000);
@@ -1317,6 +1317,7 @@ mod tests {
         assert_eq!(request.recent_timeline[0].text, "previous question");
         assert_eq!(request.recent_timeline[0].label, "system_audio");
         assert_eq!(request.budget_max_chars, Some(DEFAULT_CONTEXT_BUDGET_CHARS));
+        assert_eq!(request.max_memory_candidates, Some(500));
     }
 
     #[test]
