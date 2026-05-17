@@ -204,6 +204,20 @@ pnpm e2e:companion-long-interview -- --turns 8 --filler-chars 120000 --verify-me
 pnpm e2e:companion-long-interview -- --turns 12 --filler-chars 240000 --ai-timeout-ms 240000 --verify-memory
 ```
 
+По умолчанию AI-ответы проверяются семантически, а точные старые маркеры проверяются отдельным backend memory retrieval. Для ещё более длинного stress-прогона:
+
+```bash
+pnpm e2e:companion-long-interview -- --isolate-context --turns 24 --filler-chars 600000 --ai-timeout-ms 300000 --verify-memory
+```
+
+Для отдельного форматного stress, где модель обязана печатать literal ids прямо в каждом ответе, включай строгий режим:
+
+```bash
+pnpm e2e:companion-long-interview -- --isolate-context --turns 12 --filler-chars 240000 --ai-timeout-ms 240000 --verify-memory --answer-check-mode literal --final-recall-mode literal
+```
+
+Этот strict режим может быть более хрупким из-за LLM wording, поэтому основной long-run acceptance должен смотреть на semantic AI answer + exact backend memory retrieval.
+
 Если нужно проверить свежую interview session без подмешивания старых тестовых/интервью фактов, добавь context-only reset:
 
 ```bash

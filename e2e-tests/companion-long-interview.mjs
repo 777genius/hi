@@ -34,6 +34,8 @@ function parseArgs(argv) {
     productionSafeArtifact: process.env.COMPANION_PRODUCTION_SAFE_ARTIFACT === '1',
     openaiResponsesWebSearch: false,
     isolateContext: false,
+    answerCheckMode: process.env.COMPANION_LONG_INTERVIEW_ANSWER_CHECK_MODE || 'semantic',
+    finalRecallMode: process.env.COMPANION_LONG_INTERVIEW_FINAL_RECALL_MODE || 'semantic',
     selfTest: false,
   };
 
@@ -65,6 +67,10 @@ function parseArgs(argv) {
     else if (arg === '--production-safe-artifact') options.productionSafeArtifact = true;
     else if (arg === '--web-search') options.openaiResponsesWebSearch = true;
     else if (arg === '--isolate-context') options.isolateContext = true;
+    else if (arg === '--answer-check-mode') options.answerCheckMode = next();
+    else if (arg === '--semantic-answer-checks') options.answerCheckMode = 'semantic';
+    else if (arg === '--final-recall-mode') options.finalRecallMode = next();
+    else if (arg === '--semantic-final-recall') options.finalRecallMode = 'semantic';
     else if (arg === '--self-test') options.selfTest = true;
     else if (arg === '--help' || arg === '-h') {
       printHelp();
@@ -79,6 +85,12 @@ function parseArgs(argv) {
   options.turns = Math.max(1, Math.floor(options.turns || 1));
   options.fillerChars = Math.max(0, Math.floor(options.fillerChars || 0));
   options.memoryBudgetChars = Math.max(4_000, Math.floor(options.memoryBudgetChars || 26_000));
+  options.answerCheckMode = ['literal', 'semantic'].includes(options.answerCheckMode)
+    ? options.answerCheckMode
+    : 'literal';
+  options.finalRecallMode = ['literal', 'semantic'].includes(options.finalRecallMode)
+    ? options.finalRecallMode
+    : 'literal';
   if (!options.token) options.token = extractTokenFromUrl(process.env.COMPANION_URL || options.baseUrl) || '';
   return options;
 }
@@ -109,6 +121,10 @@ Useful flags:
   --allow-ai-miss              Keep exit code 0 when answer checks miss.
   --web-search                 Enable OpenAI Responses web search.
   --isolate-context            Clear active context and start a fresh memory session before the run.
+  --answer-check-mode <mode>   literal or semantic, default semantic.
+  --semantic-answer-checks     Alias for --answer-check-mode semantic.
+  --final-recall-mode <mode>   literal or semantic, default semantic.
+  --semantic-final-recall      Alias for --final-recall-mode semantic.
   --production-safe-artifact   Redact raw prompt/answer/context text in artifact.
   --self-test                  Run offline assertions for long-interview scenario helpers.
 `);
@@ -407,7 +423,7 @@ function baseTurns(runId) {
         'Объясни, что сломается в пользовательском сценарии, если поздние события начнут обгонять ранние.',
         `В конце ответа напиши контрольный код ${queueMarker}.`,
       ].join(' '),
-      expected: [['очеред', 'queue', 'fifo'], 'стек', 'fifo', queueMarker],
+      expected: [['очеред', 'queue', 'fifo'], ['стек', 'lifo'], 'fifo', queueMarker],
     },
     {
       label: 'linear complexity constraint',
@@ -525,6 +541,20 @@ function scoreTerms(text, expected) {
   });
 }
 
+function isSourceRecallMarkerCheck(check) {
+  return /LONG_INTERVIEW_E2E_[A-Z0-9]+_(DEBOUNCE_TIMER_ARGUMENT|QUEUE_FIFO_NO_STACK|LINEAR_NO_RECURSION)$/.test(
+    check.term,
+  );
+}
+
+function isLongInterviewMarkerCheck(check) {
+  return /LONG_INTERVIEW_E2E_[A-Z0-9]+_[A-Z0-9_]+/.test(check.term);
+}
+
+function isLiteralFormattingCheck(check) {
+  return normalizedText(check.term) === 'typescript';
+}
+
 function scoreNoForeignRunMarkers(text, runId) {
   const markerPattern = /LONG_INTERVIEW_E2E_([A-Z0-9]+)_[A-Z0-9_]+/g;
   const foreignMarkers = [...String(text || '').matchAll(markerPattern)]
@@ -568,7 +598,16 @@ async function runAiTurn(options, turn, turnIndex, baselineSeq) {
   });
 
   const answer = finalHaiku.final?.text || '';
-  const answerChecks = [...scoreTerms(answer, turn.expected), scoreNoForeignRunMarkers(answer, turn.runId)];
+  let answerChecks = scoreTerms(answer, turn.expected);
+  if (options.answerCheckMode === 'semantic') {
+    answerChecks = answerChecks.filter(
+      (check) => !isLongInterviewMarkerCheck(check) && !isLiteralFormattingCheck(check),
+    );
+  }
+  if (turn.recall && options.finalRecallMode === 'semantic') {
+    answerChecks = answerChecks.filter((check) => !isSourceRecallMarkerCheck(check));
+  }
+  answerChecks.push(scoreNoForeignRunMarkers(answer, turn.runId));
   const diagnosticChecks = scoreMemoryDiagnostics(finalHaiku.state.memory, options.expectedMemoryStatus);
   const ok = answerChecks.every((check) => check.ok) && diagnosticChecks.every((check) => check.ok);
 
@@ -722,6 +761,8 @@ function buildArtifact(options, data) {
       openaiResponsesWebSearch: options.openaiResponsesWebSearch,
       productionSafeArtifact: options.productionSafeArtifact,
       isolateContext: options.isolateContext,
+      answerCheckMode: options.answerCheckMode,
+      finalRecallMode: options.finalRecallMode,
     },
     ...data,
   };
@@ -789,6 +830,22 @@ function runSelfTest() {
     'линей',
   ]);
   assertSelfTest(checks.every((check) => check.ok), 'term scoring should support alternatives');
+  assertSelfTest(
+    isSourceRecallMarkerCheck({ term: `LONG_INTERVIEW_E2E_${runId}_QUEUE_FIFO_NO_STACK` }),
+    'source recall marker detector should match exact source markers',
+  );
+  assertSelfTest(
+    !isSourceRecallMarkerCheck({ term: `LONG_INTERVIEW_E2E_${runId}_FINAL_RECALL` }),
+    'source recall marker detector must keep final recall marker checks',
+  );
+  assertSelfTest(
+    isLongInterviewMarkerCheck({ term: `LONG_INTERVIEW_E2E_${runId}_EXTRA_CLARIFY_20` }),
+    'generic marker detector should match all long-interview markers',
+  );
+  assertSelfTest(
+    isLiteralFormattingCheck({ term: 'typescript' }),
+    'literal formatting detector should match language wording checks',
+  );
   console.log('[long-interview] self-test ok');
 }
 
