@@ -1,0 +1,935 @@
+#!/usr/bin/env node
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import process from 'node:process';
+
+const DEFAULT_API_URL =
+  process.env.INTERVIEW_MEMORY_E2E_API_URL ||
+  process.env.INTERVIEW_MEMORY_API_URL ||
+  process.env.VITE_API_URL ||
+  'https://api.voicetext.site';
+
+const DEFAULT_AUTH_STORE = join(homedir(), 'Library/Application Support/HackInterview/auth_store.json');
+
+function parseArgs(argv) {
+  const options = {
+    baseUrl: process.env.COMPANION_BASE_URL || process.env.COMPANION_URL || 'http://127.0.0.1:43821',
+    token: process.env.COMPANION_TOKEN || '',
+    turns: Number(process.env.COMPANION_LONG_INTERVIEW_TURNS || 8),
+    fillerChars: Number(process.env.COMPANION_LONG_INTERVIEW_FILLER_CHARS || 120_000),
+    aiTimeoutMs: Number(process.env.COMPANION_LONG_INTERVIEW_AI_TIMEOUT_MS || 180_000),
+    settleMs: Number(process.env.COMPANION_LONG_INTERVIEW_SETTLE_MS || 800),
+    artifactsDir: '.e2e-artifacts/companion-long-interview',
+    expectedMemoryStatus: process.env.COMPANION_EXPECT_MEMORY_CONTEXT_STATUS || 'ok',
+    allowAiMiss: false,
+    verifyMemory: false,
+    memoryApiUrl: DEFAULT_API_URL,
+    memoryAuthToken: process.env.INTERVIEW_MEMORY_AUTH_TOKEN || '',
+    memoryAuthTokenFile: process.env.INTERVIEW_MEMORY_AUTH_TOKEN_FILE || '',
+    authStorePath: process.env.HACKINTERVIEW_AUTH_STORE_PATH || DEFAULT_AUTH_STORE,
+    memoryBudgetChars: Number(process.env.COMPANION_LONG_INTERVIEW_MEMORY_BUDGET_CHARS || 26_000),
+    productionSafeArtifact: process.env.COMPANION_PRODUCTION_SAFE_ARTIFACT === '1',
+    openaiResponsesWebSearch: false,
+    isolateContext: false,
+    selfTest: false,
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--') continue;
+
+    const next = () => {
+      index += 1;
+      if (index >= argv.length) throw new Error(`Missing value for ${arg}`);
+      return argv[index];
+    };
+
+    if (arg === '--base-url') options.baseUrl = next();
+    else if (arg === '--token') options.token = next();
+    else if (arg === '--turns') options.turns = Number(next());
+    else if (arg === '--filler-chars') options.fillerChars = Number(next());
+    else if (arg === '--ai-timeout-ms') options.aiTimeoutMs = Number(next());
+    else if (arg === '--settle-ms') options.settleMs = Number(next());
+    else if (arg === '--artifacts-dir') options.artifactsDir = next();
+    else if (arg === '--expect-memory-status') options.expectedMemoryStatus = next();
+    else if (arg === '--allow-ai-miss') options.allowAiMiss = true;
+    else if (arg === '--verify-memory') options.verifyMemory = true;
+    else if (arg === '--memory-api-url') options.memoryApiUrl = next();
+    else if (arg === '--memory-auth-token') options.memoryAuthToken = next();
+    else if (arg === '--memory-auth-token-file') options.memoryAuthTokenFile = next();
+    else if (arg === '--auth-store-path') options.authStorePath = next();
+    else if (arg === '--memory-budget-chars') options.memoryBudgetChars = Number(next());
+    else if (arg === '--production-safe-artifact') options.productionSafeArtifact = true;
+    else if (arg === '--web-search') options.openaiResponsesWebSearch = true;
+    else if (arg === '--isolate-context') options.isolateContext = true;
+    else if (arg === '--self-test') options.selfTest = true;
+    else if (arg === '--help' || arg === '-h') {
+      printHelp();
+      process.exit(0);
+    } else {
+      throw new Error(`Unknown argument: ${arg}`);
+    }
+  }
+
+  options.baseUrl = normalizeBaseUrl(options.baseUrl);
+  if (options.memoryApiUrl) options.memoryApiUrl = normalizeBaseUrl(options.memoryApiUrl);
+  options.turns = Math.max(1, Math.floor(options.turns || 1));
+  options.fillerChars = Math.max(0, Math.floor(options.fillerChars || 0));
+  options.memoryBudgetChars = Math.max(4_000, Math.floor(options.memoryBudgetChars || 26_000));
+  if (!options.token) options.token = extractTokenFromUrl(process.env.COMPANION_URL || options.baseUrl) || '';
+  return options;
+}
+
+function printHelp() {
+  console.log(`Companion long interview memory E2E
+
+Usage:
+  pnpm e2e:companion-long-interview -- --turns 8 --filler-chars 120000 --verify-memory
+
+What it checks:
+  - builds a long interview-shaped companion timeline without clearing history;
+  - injects code/context/filler through the same companion HTTP APIs used by the app;
+  - sends several real AI prompts: question, answer, clarification, answer, final recall;
+  - verifies each AI answer uses the current question and memory diagnostics stay observable;
+  - verifies final recall can recover early/middle requirements after large filler;
+  - optionally calls backend /api/v1/interview-memory/context for retrieved-memory assertions.
+
+Useful flags:
+  --turns <n>                  Number of AI turns, default 8.
+  --filler-chars <n>           Total long filler chars spread across turns, default 120000.
+  --verify-memory              Verify backend memory retrieval for the active companion session.
+  --memory-api-url <url>       Backend URL, default VITE_API_URL/INTERVIEW_MEMORY_API_URL/prod.
+  --memory-auth-token <token>  Raw bearer token for backend memory API.
+  --memory-auth-token-file <p> Raw token or auth_store.json.
+  --auth-store-path <path>     Native auth store, default ~/Library/Application Support/HackInterview/auth_store.json.
+  --expect-memory-status <s>   Expected companion memory status after each answer, default ok.
+  --allow-ai-miss              Keep exit code 0 when answer checks miss.
+  --web-search                 Enable OpenAI Responses web search.
+  --isolate-context            Clear active context and start a fresh memory session before the run.
+  --production-safe-artifact   Redact raw prompt/answer/context text in artifact.
+  --self-test                  Run offline assertions for long-interview scenario helpers.
+`);
+}
+
+function normalizeBaseUrl(rawUrl) {
+  const url = new URL(rawUrl);
+  return `${url.protocol}//${url.host}`;
+}
+
+function extractTokenFromUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    const queryToken = url.searchParams.get('token');
+    if (queryToken) return queryToken;
+    const match = url.pathname.match(/\/c\/([^/]+)/);
+    return match ? decodeURIComponent(match[1]) : '';
+  } catch {
+    return '';
+  }
+}
+
+async function readBridgeToken() {
+  const candidates = [
+    join(homedir(), 'Library/Application Support/ClipboardTools/bridge.json'),
+    join(homedir(), 'Library/Application Support/HackInterview/companion_bridge.json'),
+  ];
+
+  for (const path of candidates) {
+    try {
+      const raw = await readFile(path, 'utf8');
+      const value = JSON.parse(raw);
+      const token = String(value.companionAccessToken || '').trim();
+      if (token) return { token, path };
+    } catch {}
+  }
+
+  return { token: '', path: '' };
+}
+
+async function readJsonIfExists(path) {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(await readFile(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function tokenFromJson(json) {
+  return String(
+    json?.session?.access_token ||
+      json?.access_token ||
+      json?.token ||
+      json?.data?.access_token ||
+      json?.data?.session?.access_token ||
+      '',
+  ).trim();
+}
+
+async function readMemoryAuthToken(options) {
+  if (options.memoryAuthToken.trim()) return options.memoryAuthToken.trim();
+  if (options.memoryAuthTokenFile.trim()) {
+    const raw = (await readFile(options.memoryAuthTokenFile, 'utf8')).trim();
+    if (!raw) return '';
+    try {
+      return tokenFromJson(JSON.parse(raw));
+    } catch {
+      return raw;
+    }
+  }
+  return tokenFromJson(await readJsonIfExists(options.authStorePath));
+}
+
+async function companionFetch(options, path, init = {}) {
+  const response = await fetch(`${options.baseUrl}${path}`, init);
+  const contentType = response.headers.get('content-type') || '';
+  const body = contentType.includes('application/json') ? await response.json() : await response.text();
+  if (!response.ok) {
+    throw new Error(`${init.method || 'GET'} ${path} failed: ${response.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
+async function getState(options) {
+  const payload = await companionFetch(options, `/api/state?token=${encodeURIComponent(options.token)}`);
+  return payload?.data?.timeline ? payload.data : payload;
+}
+
+async function postAction(options, path, body = {}) {
+  return companionFetch(options, path, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-companion-token': options.token,
+      'x-companion-request-id': `long-interview-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitFor(label, timeoutMs, predicate) {
+  const started = Date.now();
+  let lastValue;
+  while (Date.now() - started < timeoutMs) {
+    lastValue = await predicate();
+    if (lastValue.ok) return lastValue.value;
+    await sleep(700);
+  }
+  throw new Error(`Timed out waiting for ${label}. Last value: ${JSON.stringify(lastValue?.value)}`);
+}
+
+function maxSeq(snapshot) {
+  return Math.max(0, ...snapshot.timeline.map((message) => Number(message.seq) || 0));
+}
+
+function messagesAfter(snapshot, baselineSeq) {
+  return snapshot.timeline.filter((message) => Number(message.seq) > baselineSeq);
+}
+
+function normalizedText(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function assertMemorySnapshot(snapshot, label) {
+  const memory = snapshot?.memory;
+  if (!memory || typeof memory.mode !== 'string' || !memory.mode.trim()) {
+    throw new Error(`${label} state is missing memory.mode`);
+  }
+  for (const key of [
+    'backendIngestEnabled',
+    'backendPromptContextEnabled',
+    'minimalLocalPromptContextEnabled',
+  ]) {
+    if (typeof memory[key] !== 'boolean') {
+      throw new Error(`${label} state is missing memory.${key}`);
+    }
+  }
+  if (typeof memory.sessionId !== 'string' || !memory.sessionId.trim()) {
+    throw new Error(`${label} state is missing memory.sessionId`);
+  }
+  if (typeof memory.lastContextStatus !== 'string' || !memory.lastContextStatus.trim()) {
+    throw new Error(`${label} state is missing memory.lastContextStatus`);
+  }
+  if (typeof memory.lastIngestStatus !== 'string' || !memory.lastIngestStatus.trim()) {
+    throw new Error(`${label} state is missing memory.lastIngestStatus`);
+  }
+}
+
+function scoreMemoryDiagnostics(memory, expectedStatus) {
+  const checks = [
+    {
+      label: `context status ${expectedStatus}`,
+      ok: memory?.lastContextStatus === expectedStatus,
+      value: memory?.lastContextStatus,
+    },
+    {
+      label: 'context latency recorded',
+      ok: Number.isFinite(Number(memory?.lastContextLatencyMs)) && Number(memory.lastContextLatencyMs) >= 0,
+      value: memory?.lastContextLatencyMs,
+    },
+    {
+      label: expectedStatus === 'fallback' ? 'ingest status observable' : 'ingest status ok',
+      ok:
+        expectedStatus === 'fallback'
+          ? ['ok', 'failed'].includes(String(memory?.lastIngestStatus || ''))
+          : memory?.lastIngestStatus === 'ok',
+      value: memory?.lastIngestStatus,
+    },
+  ];
+
+  if (expectedStatus === 'fallback') {
+    checks.push({
+      label: 'fallback reason recorded',
+      ok: typeof memory?.lastContextError === 'string' && memory.lastContextError.trim().length > 0,
+      value: memory?.lastContextError,
+    });
+  }
+
+  return checks;
+}
+
+function marker(runId, name) {
+  return `LONG_INTERVIEW_E2E_${runId}_${name}`.replace(/[^A-Z0-9_]/gi, '_').toUpperCase();
+}
+
+function buildCodeAnchor(runId) {
+  const debounceMarker = marker(runId, 'DEBOUNCE_TIMER_ARGUMENT');
+  return [
+    'Long interview E2E early code context.',
+    `Контроль раннего вопроса: ${debounceMarker}.`,
+    'Проект называется Северный мост. Собеседник будет спрашивать про debounceSearch и сохранение последнего аргумента.',
+    '```ts',
+    `const E2E_PROJECT_MARKER = '${debounceMarker}';`,
+    'export function debounceSearch(fn: (query: string) => void, delayMs: number) {',
+    '  let timer: ReturnType<typeof setTimeout> | undefined;',
+    '  let lastQuery = "";',
+    '  return (query: string) => {',
+    '    lastQuery = query;',
+    '    if (timer) clearTimeout(timer);',
+    '    timer = setTimeout(() => fn(lastQuery), delayMs);',
+    '  };',
+    '}',
+    '```',
+  ].join('\n');
+}
+
+function buildQueueAnchor(runId) {
+  const queueMarker = marker(runId, 'QUEUE_FIFO_NO_STACK');
+  return [
+    'Long interview E2E middle code context.',
+    `Контроль очереди событий: ${queueMarker}.`,
+    'Требование: события должны обрабатываться FIFO через очередь, а не LIFO через стек.',
+    '```ts',
+    'type EventJob = { id: string; payload: unknown };',
+    'const queue: EventJob[] = [];',
+    'export function pushJob(job: EventJob) { queue.push(job); }',
+    'export function nextJob() { return queue.shift(); }',
+    '```',
+  ].join('\n');
+}
+
+function buildComplexityAnchor(runId) {
+  const complexityMarker = marker(runId, 'LINEAR_NO_RECURSION');
+  return [
+    'Long interview E2E late constraint.',
+    `Контроль сложности: ${complexityMarker}.`,
+    'Собеседник уточнил: решение должно быть линейным O(n), без рекурсии и без вложенного перебора всех пар.',
+  ].join('\n');
+}
+
+function buildFiller(runId, turnIndex, targetChars) {
+  if (targetChars <= 0) return '';
+  const line = [
+    `Организационная пауза интервью, блок ${turnIndex}.`,
+    'Собеседник обсуждает расписание встречи, формат ответа, звук, связь, заметки, планы релиза, стиль объяснения, ожидания команды, демонстрацию решения и общие детали созвона.',
+  ].join(' ');
+  const parts = [];
+  let chars = 0;
+  let index = 1;
+  while (chars < targetChars) {
+    const next = `${line} filler-line-${index}.`;
+    parts.push(next);
+    chars += next.length + 1;
+    index += 1;
+  }
+  return parts.join('\n').slice(0, targetChars);
+}
+
+function baseTurns(runId) {
+  const debounceMarker = marker(runId, 'DEBOUNCE_TIMER_ARGUMENT');
+  const debounceRaceMarker = marker(runId, 'DEBOUNCE_RACE_CLARIFY');
+  const queueMarker = marker(runId, 'QUEUE_FIFO_NO_STACK');
+  const complexityMarker = marker(runId, 'LINEAR_NO_RECURSION');
+  const codeSketchMarker = marker(runId, 'CODE_SKETCH_STABLE');
+  const finalRecallMarker = marker(runId, 'FINAL_RECALL');
+
+  return [
+    {
+      label: 'debounce initial question',
+      contextBefore: buildCodeAnchor(runId),
+      languageId: 'typescript',
+      question: [
+        'Собеседник спрашивает на интервью несколькими предложениями.',
+        'В проекте Северный мост есть функция debounceSearch из кода выше.',
+        'Почему при каждом новом вводе нужно отменять прошлый таймер, но при этом сохранять последний аргумент?',
+        'Начни ответ точной фразой "Северный мост:", чтобы E2E мог проверить, что project context учитывается.',
+        `В конце ответа напиши контрольный код ${debounceMarker}.`,
+      ].join(' '),
+      expected: ['север', 'мост', 'debounce', 'таймер', 'аргумент', debounceMarker],
+    },
+    {
+      label: 'debounce clarification',
+      question: [
+        'Уточнение собеседника: пользователь быстро вводит "ab", потом "abc", потом стирает обратно.',
+        'Какие race conditions здесь возможны, если старый таймер не отменить или использовать устаревший аргумент?',
+        'Ответь как кандидат: коротко, но с причинно-следственной связью.',
+        `В конце ответа напиши контрольный код ${debounceRaceMarker}.`,
+      ].join(' '),
+      expected: ['таймер', 'устар', ['аргумент', 'query', 'ввод', 'значен'], debounceRaceMarker],
+    },
+    {
+      label: 'queue instead of stack',
+      contextBefore: buildQueueAnchor(runId),
+      languageId: 'typescript',
+      question: [
+        'Новый вопрос собеседника: теперь говорим про обработчик событий.',
+        'Почему для событий нужна очередь FIFO, а не стек LIFO?',
+        'Объясни, что сломается в пользовательском сценарии, если поздние события начнут обгонять ранние.',
+        `В конце ответа напиши контрольный код ${queueMarker}.`,
+      ].join(' '),
+      expected: [['очеред', 'queue', 'fifo'], 'стек', 'fifo', queueMarker],
+    },
+    {
+      label: 'linear complexity constraint',
+      contextBefore: buildComplexityAnchor(runId),
+      contextRoute: 'system',
+      languageId: 'text',
+      question: [
+        'Собеседник добавляет ограничение к прошлой задаче.',
+        'Нужно объяснить решение с линейной сложностью и без рекурсии.',
+        'Как бы ты сформулировал инвариант и почему вложенный перебор здесь плохой?',
+        `В конце ответа напиши контрольный код ${complexityMarker}.`,
+      ].join(' '),
+      expected: ['линей', 'рекурс', 'инвариант', complexityMarker],
+    },
+    {
+      label: 'code sketch with remembered constraints',
+      question: [
+        'Теперь собеседник просит короткий TypeScript sketch.',
+        'Используй всё, что уже было: debounce должен не терять последний аргумент, события должны идти через очередь, сложность должна остаться линейной.',
+        'Не надо большой код, достаточно каркаса и пояснения.',
+        `В конце ответа напиши контрольный код ${codeSketchMarker}.`,
+      ].join(' '),
+      expected: ['typescript', 'debounce', ['очеред', 'queue', 'fifo'], 'линей', codeSketchMarker],
+    },
+    {
+      label: 'final recall without restating markers',
+      question: [
+        'Финальный контроль памяти без повторения старых деталей.',
+        'Собеседник просит собрать итог по раннему debounce-вопросу, middle queue-вопросу и late complexity-ограничению.',
+        'Назови контрольные коды из предыдущих этапов и кратко объясни, что каждый доказывает.',
+        'Не используй EXTRA_CLARIFY коды из промежуточных уточнений.',
+        'Нужны именно исходные коды про debounce timer argument, queue FIFO no stack и linear no recursion.',
+        'Не придумывай новые контрольные коды.',
+        `Первой строкой обязательно напиши: FINAL_RECALL=${finalRecallMarker}.`,
+      ].join(' '),
+      expected: [
+        debounceMarker,
+        queueMarker,
+        complexityMarker,
+        finalRecallMarker,
+        'debounce',
+        ['очеред', 'queue', 'fifo'],
+        'линей',
+      ],
+      recall: true,
+    },
+  ];
+}
+
+function buildTurns(runId, count) {
+  const coreTurns = baseTurns(runId);
+  if (count <= coreTurns.length) return coreTurns.slice(0, count);
+
+  const finalRecallTurn = coreTurns.at(-1);
+  const turns = coreTurns.slice(0, -1);
+  for (let index = turns.length + 1; index < count; index += 1) {
+    const extraMarker = marker(runId, `EXTRA_CLARIFY_${index}`);
+    turns.push({
+      label: `extra clarification ${index}`,
+      question: [
+        `Дополнительное уточнение интервью номер ${index}.`,
+        'Собеседник проверяет, не потерял ли кандидат связь между debounce, очередью событий и линейной сложностью.',
+        'Ответь одним компактным блоком и явно свяжи эти три темы.',
+        `В конце ответа напиши контрольный код ${extraMarker}.`,
+      ].join(' '),
+      expected: ['debounce', ['очеред', 'queue', 'fifo'], 'линей', extraMarker],
+    });
+  }
+  turns.push(finalRecallTurn);
+  return turns;
+}
+
+async function ingestFocusCopy(options, text, label, languageId = 'text') {
+  if (!text.trim()) return null;
+  const response = await postAction(options, '/api/focus-copy/ingest', {
+    text,
+    method: 'long-interview-e2e',
+    source: 'companion-long-interview-e2e',
+    appName: 'HackInterview Long Interview E2E',
+    languageId,
+    lineCount: text.split('\n').length,
+    characterCount: text.length,
+  });
+  await sleep(options.settleMs);
+  return {
+    label,
+    messageId: response?.messageId,
+    characterCount: response?.characterCount ?? text.length,
+  };
+}
+
+async function ingestSystemTranscript(options, text, label, sessionId) {
+  if (!text.trim()) return null;
+  const response = await postAction(options, '/api/e2e/timeline/system', {
+    text,
+    sessionId,
+  });
+  await sleep(options.settleMs);
+  return {
+    label,
+    route: 'system',
+    sessionId: response?.sessionId ?? sessionId,
+    characterCount: response?.characterCount ?? text.length,
+  };
+}
+
+function scoreTerms(text, expected) {
+  const normalized = normalizedText(text);
+  return expected.map((expectation) => {
+    const alternatives = Array.isArray(expectation) ? expectation : [expectation];
+    return {
+      term: alternatives.join('|'),
+      ok: alternatives.some((term) => normalized.includes(normalizedText(term))),
+    };
+  });
+}
+
+function scoreNoForeignRunMarkers(text, runId) {
+  const markerPattern = /LONG_INTERVIEW_E2E_([A-Z0-9]+)_[A-Z0-9_]+/g;
+  const foreignMarkers = [...String(text || '').matchAll(markerPattern)]
+    .map((match) => match[0])
+    .filter((value) => !value.startsWith(`LONG_INTERVIEW_E2E_${runId}_`));
+  return {
+    term: 'no_foreign_long_interview_markers',
+    ok: foreignMarkers.length === 0,
+    foreignMarkers: [...new Set(foreignMarkers)].slice(0, 8),
+  };
+}
+
+async function runAiTurn(options, turn, turnIndex, baselineSeq) {
+  const before = await getState(options);
+  const promptSeq = maxSeq(before);
+
+  await postAction(options, '/api/prompt/send', {
+    text: turn.question,
+    images: [],
+    openaiResponsesWebSearch: options.openaiResponsesWebSearch,
+  });
+
+  const finalHaiku = await waitFor(`AI final answer for turn ${turnIndex}`, options.aiTimeoutMs, async () => {
+    const state = await getState(options);
+    const messages = messagesAfter(state, promptSeq);
+    const candidates = messages.filter((message) => message.kind === 'haiku');
+    const final = [...candidates].reverse().find((message) => message.status === 'final' && message.text.trim());
+    return {
+      ok: Boolean(final),
+      value: {
+        state: {
+          recording: state.recording,
+          memory: state.memory,
+          timelineCount: state.timeline.length,
+          maxSeq: maxSeq(state),
+        },
+        promptMessages: messages.filter((message) => message.kind === 'prompt'),
+        final,
+      },
+    };
+  });
+
+  const answer = finalHaiku.final?.text || '';
+  const answerChecks = [...scoreTerms(answer, turn.expected), scoreNoForeignRunMarkers(answer, turn.runId)];
+  const diagnosticChecks = scoreMemoryDiagnostics(finalHaiku.state.memory, options.expectedMemoryStatus);
+  const ok = answerChecks.every((check) => check.ok) && diagnosticChecks.every((check) => check.ok);
+
+  return {
+    index: turnIndex,
+    label: turn.label,
+    ok,
+    recall: Boolean(turn.recall),
+    promptSeq,
+    baselineSeq,
+    question: turn.question,
+    answer,
+    answerChecks,
+    diagnosticChecks,
+    finalMessage: finalHaiku.final,
+    timelineState: finalHaiku.state,
+  };
+}
+
+function retrievedMemoryText(contextText) {
+  const markerText = '## retrieved_memory';
+  const index = contextText.indexOf(markerText);
+  if (index < 0) return '';
+  const rest = contextText.slice(index + markerText.length);
+  const nextSectionIndex = rest.search(/\n##\s+/);
+  return nextSectionIndex >= 0 ? rest.slice(0, nextSectionIndex) : rest;
+}
+
+async function fetchMemoryContextOnce(options, runId, sessionId, requiredTerms) {
+  if (!options.memoryApiUrl) throw new Error('Memory verification needs --memory-api-url');
+  const authToken = await readMemoryAuthToken(options);
+  if (!authToken) {
+    throw new Error('Memory verification needs auth token, auth token file, or native auth_store.json');
+  }
+  if (!sessionId) throw new Error('Memory verification needs companion memory session id');
+
+  const startedAt = performance.now();
+  const response = await fetch(`${options.memoryApiUrl}/api/v1/interview-memory/context`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${authToken}`,
+      'content-type': 'application/json',
+      'x-memory-canary-id': `long-interview-${runId}`,
+    },
+    body: JSON.stringify({
+      session_id: sessionId,
+      current_request: {
+        id: `long-interview-memory-${runId}-${Date.now()}`,
+        label: 'long_interview_final_recall',
+        text: [
+          'Финальный контроль памяти: нужно достать факты по проекту Северный мост и функции debounceSearch.',
+          'Нужны раннее требование про последний аргумент debounce, middle требование про FIFO queue вместо stack, late ограничение O(n) без рекурсии и связанные контрольные коды.',
+        ].join(' '),
+      },
+      budget_max_chars: options.memoryBudgetChars,
+      max_memory_candidates: 120,
+      max_memory_results: 32,
+    }),
+  });
+  const latencyMs = Math.round(performance.now() - startedAt);
+  const text = await response.text();
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    payload = { raw: text };
+  }
+  if (!response.ok || payload?.success === false) {
+    throw new Error(`Memory context failed: ${response.status} ${JSON.stringify(payload)}`);
+  }
+
+  const context = payload.data?.text || '';
+  const retrieved = normalizedText(retrievedMemoryText(context));
+  const checks = requiredTerms.map((term) => ({
+    term,
+    ok: retrieved.includes(normalizedText(term)),
+  }));
+
+  return {
+    ok: checks.every((check) => check.ok),
+    sessionId,
+    latencyMs,
+    checks,
+    budgetUsed: payload.data?.artifact?.budget_used,
+    budgetTotal: payload.data?.artifact?.budget_total,
+    includedChunks: payload.data?.artifact?.included_chunks?.length ?? 0,
+    droppedChunks: payload.data?.artifact?.dropped_chunks?.length ?? 0,
+    criticalBudgetPressure: payload.data?.artifact?.critical_budget_pressure,
+  };
+}
+
+async function runMemoryContextPhase(options, runId, sessionId, requiredTerms) {
+  const startedAt = Date.now();
+  let lastResult = null;
+  let attempt = 0;
+  while (Date.now() - startedAt < 45_000) {
+    attempt += 1;
+    lastResult = await fetchMemoryContextOnce(options, runId, sessionId, requiredTerms);
+    lastResult.attempts = attempt;
+    if (lastResult.ok) return lastResult;
+    await sleep(2_500);
+  }
+  return lastResult;
+}
+
+function redactText(value) {
+  const text = String(value || '');
+  return text
+    ? {
+        redacted: true,
+        charCount: text.length,
+      }
+    : '';
+}
+
+function redactMessage(message) {
+  if (!message || typeof message !== 'object') return message;
+  const copy = { ...message };
+  if ('text' in copy) copy.text = redactText(copy.text);
+  if (Array.isArray(copy.candidates)) {
+    copy.candidates = copy.candidates.map((candidate) => ({
+      ...candidate,
+      text: redactText(candidate.text),
+      error: candidate.error ? redactText(candidate.error) : candidate.error,
+    }));
+  }
+  return copy;
+}
+
+function productionSafeTurnResult(result) {
+  return {
+    ...result,
+    question: redactText(result.question),
+    answer: redactText(result.answer),
+    finalMessage: redactMessage(result.finalMessage),
+  };
+}
+
+function buildArtifact(options, data) {
+  const artifact = {
+    createdAt: new Date().toISOString(),
+    productionSafe: options.productionSafeArtifact,
+    options: {
+      baseUrl: options.baseUrl,
+      turns: options.turns,
+      fillerChars: options.fillerChars,
+      verifyMemory: options.verifyMemory,
+      memoryApiUrl: options.memoryApiUrl,
+      expectedMemoryStatus: options.expectedMemoryStatus,
+      memoryBudgetChars: options.memoryBudgetChars,
+      openaiResponsesWebSearch: options.openaiResponsesWebSearch,
+      productionSafeArtifact: options.productionSafeArtifact,
+      isolateContext: options.isolateContext,
+    },
+    ...data,
+  };
+
+  if (!options.productionSafeArtifact) return artifact;
+
+  return {
+    ...artifact,
+    ingested: artifact.ingested.map((item) => ({
+      label: item.label,
+      messageId: item.messageId,
+      characterCount: item.characterCount,
+    })),
+    turnResults: artifact.turnResults.map(productionSafeTurnResult),
+    final: {
+      ...artifact.final,
+      tail: artifact.final.tail.map(redactMessage),
+    },
+  };
+}
+
+async function writeArtifact(options, artifact) {
+  await mkdir(options.artifactsDir, { recursive: true });
+  const path = join(options.artifactsDir, `${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+  await writeFile(path, `${JSON.stringify(artifact, null, 2)}\n`, 'utf8');
+  return path;
+}
+
+const MEMORY_NEGATION_TOKENS = new Set(['not', 'не', 'нельзя', 'без', 'avoid', 'without']);
+
+function assertSelfTest(condition, message) {
+  if (!condition) throw new Error(`Self-test failed: ${message}`);
+}
+
+function containsStandaloneToken(text, token) {
+  return normalizedText(text)
+    .split(/\s+/)
+    .some((word) => word === token);
+}
+
+function runSelfTest() {
+  const runId = 'ABC12345';
+  const filler = buildFiller(runId, 2, 5_000);
+  assertSelfTest(filler.length === 5_000, 'filler should honor target length');
+  assertSelfTest(!filler.includes(runId), 'filler must not repeat run id');
+  assertSelfTest(!/long interview|e2e/i.test(filler), 'filler must not contain test harness keywords');
+  for (const token of MEMORY_NEGATION_TOKENS) {
+    assertSelfTest(
+      !containsStandaloneToken(filler, token),
+      `filler must not trip negative-constraint token: ${token}`,
+    );
+  }
+
+  const turns = buildTurns(runId, 12);
+  assertSelfTest(turns.length === 12, 'turn count should match requested count');
+  assertSelfTest(turns.at(-1)?.recall === true, 'final recall should stay last for extended runs');
+  assertSelfTest(
+    turns.slice(0, -1).every((turn) => !turn.recall),
+    'only final turn should be marked recall',
+  );
+
+  const checks = scoreTerms('FIFO queue keeps debounce линейно', [
+    ['очеред', 'queue', 'fifo'],
+    'debounce',
+    'линей',
+  ]);
+  assertSelfTest(checks.every((check) => check.ok), 'term scoring should support alternatives');
+  console.log('[long-interview] self-test ok');
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  if (options.selfTest) {
+    runSelfTest();
+    return;
+  }
+
+  if (!options.token) {
+    const bridge = await readBridgeToken();
+    options.token = bridge.token;
+    options.bridgePath = bridge.path;
+  }
+  if (!options.token) throw new Error('Companion token is required. Pass --token or COMPANION_URL.');
+
+  const runId = randomUUID().slice(0, 8).toUpperCase();
+  if (options.isolateContext) {
+    await postAction(options, '/api/context/clear');
+    await sleep(options.settleMs);
+  }
+  const initial = await getState(options);
+  assertMemorySnapshot(initial, 'initial companion');
+  const initialSeq = maxSeq(initial);
+  const turns = buildTurns(runId, options.turns);
+  for (const turn of turns) turn.runId = runId;
+  const syntheticSystemSessionId = Date.now();
+  const fillerPerGap = turns.length > 1 ? Math.floor(options.fillerChars / (turns.length - 1)) : 0;
+  const ingested = [];
+  const turnResults = [];
+
+  console.log(
+    `[long-interview] run=${runId}, initial timeline=${initial.timeline.length}, maxSeq=${initialSeq}, turns=${turns.length}, fillerChars=${options.fillerChars}`,
+  );
+
+  for (let index = 0; index < turns.length; index += 1) {
+    const turn = turns[index];
+    const turnNumber = index + 1;
+
+    if (turn.contextBefore) {
+      const item =
+        turn.contextRoute === 'system'
+          ? await ingestSystemTranscript(
+              options,
+              turn.contextBefore,
+              `${turn.label} context`,
+              syntheticSystemSessionId,
+            )
+          : await ingestFocusCopy(
+              options,
+              turn.contextBefore,
+              `${turn.label} context`,
+              turn.languageId || 'text',
+            );
+      if (item) ingested.push(item);
+    }
+
+    if (index > 0 && fillerPerGap > 0) {
+      const filler = buildFiller(runId, turnNumber, fillerPerGap);
+      const item = await ingestSystemTranscript(
+        options,
+        filler,
+        `${turn.label} filler`,
+        syntheticSystemSessionId,
+      );
+      if (item) ingested.push(item);
+      console.log(`[long-interview] turn=${turnNumber} filler chars=${filler.length}`);
+    }
+
+    console.log(`[long-interview] turn=${turnNumber}/${turns.length}: ${turn.label}`);
+    const result = await runAiTurn(options, turn, turnNumber, initialSeq);
+    turnResults.push(result);
+    const icon = result.ok ? '✅' : '❌';
+    console.log(
+      `${icon} turn=${turnNumber}: ${[
+        ...result.answerChecks,
+        ...result.diagnosticChecks,
+      ].map((check) => `${check.term || check.label}=${check.ok ? 'ok' : 'miss'}`).join(', ')}`,
+    );
+  }
+
+  let memoryResult = null;
+  if (options.verifyMemory) {
+    const state = await getState(options);
+    const requiredTerms = [
+      marker(runId, 'DEBOUNCE_TIMER_ARGUMENT'),
+      marker(runId, 'QUEUE_FIFO_NO_STACK'),
+      marker(runId, 'LINEAR_NO_RECURSION'),
+      'Северный мост',
+      'debounceSearch',
+      'очередь',
+      'линей',
+    ];
+    console.log('[long-interview] verifying backend memory retrieval');
+    memoryResult = await runMemoryContextPhase(options, runId, state.memory?.sessionId, requiredTerms);
+    const icon = memoryResult.ok ? '✅' : '❌';
+    console.log(
+      `${icon} memory: ${memoryResult.checks.map((check) => `${check.term}=${check.ok ? 'ok' : 'miss'}`).join(', ')}`,
+    );
+  }
+
+  const final = await getState(options);
+  assertMemorySnapshot(final, 'final companion');
+
+  const artifact = buildArtifact(options, {
+    runId,
+    markers: {
+      debounce: marker(runId, 'DEBOUNCE_TIMER_ARGUMENT'),
+      queue: marker(runId, 'QUEUE_FIFO_NO_STACK'),
+      complexity: marker(runId, 'LINEAR_NO_RECURSION'),
+      finalRecall: marker(runId, 'FINAL_RECALL'),
+    },
+    initial: {
+      timelineCount: initial.timeline.length,
+      maxSeq: initialSeq,
+      memory: initial.memory,
+      recording: initial.recording,
+      microphone: initial.microphone,
+    },
+    ingested,
+    turnResults,
+    memoryResult,
+    final: {
+      timelineCount: final.timeline.length,
+      maxSeq: maxSeq(final),
+      memory: final.memory,
+      recording: final.recording,
+      microphone: final.microphone,
+      tail: final.timeline.slice(-16),
+    },
+  });
+  const artifactPath = await writeArtifact(options, artifact);
+  console.log(`[long-interview] artifact: ${artifactPath}`);
+
+  const failedTurns = turnResults.filter((result) => !result.ok);
+  if (failedTurns.length > 0 && !options.allowAiMiss) process.exitCode = 1;
+  if (memoryResult && !memoryResult.ok) process.exitCode = 1;
+}
+
+main().catch((error) => {
+  console.error(`[long-interview] ${error.stack || error.message || error}`);
+  process.exit(1);
+});

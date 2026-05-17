@@ -364,6 +364,16 @@ struct FocusCopyIngestBody {
     character_count: Option<usize>,
 }
 
+#[cfg(debug_assertions)]
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct E2eSystemTranscriptBody {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    session_id: Option<u64>,
+}
+
 pub fn new_runtime() -> CompanionRuntime {
     let snapshot = CompanionSnapshotEnvelope::default();
     let (sse_tx, _sse_rx) = watch::channel(snapshot.clone());
@@ -863,6 +873,10 @@ async fn route_request(
         (Method::POST, "/api/focus-copy/ingest") => {
             handle_focus_copy_ingest_post(app_handle.clone(), req).await
         }
+        #[cfg(debug_assertions)]
+        (Method::POST, "/api/e2e/timeline/system") => {
+            handle_e2e_system_transcript_post(app_handle.clone(), req).await
+        }
         (Method::HEAD, path) if path.starts_with("/c/") => {
             let token = path.trim_start_matches("/c/").to_string();
             if is_valid_token(&app_handle, &token).await {
@@ -1341,6 +1355,68 @@ async fn handle_focus_copy_ingest_post(
                 .to_string(),
             )
         }
+        Err(error) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+#[cfg(debug_assertions)]
+async fn handle_e2e_system_transcript_post(
+    app_handle: AppHandle,
+    req: Request<Incoming>,
+) -> Response<CompanionBody> {
+    let Some(token) = parse_header_token(req.headers()) else {
+        return text_response(StatusCode::UNAUTHORIZED, "Missing token");
+    };
+    if !is_valid_token(&app_handle, &token).await {
+        return text_response(StatusCode::FORBIDDEN, "Forbidden");
+    }
+    if !has_json_content_type(req.headers()) {
+        return text_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Expected application/json",
+        );
+    }
+
+    let body = match read_json_body::<E2eSystemTranscriptBody>(req).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+
+    let Some(text) = body.text.map(|value| value.trim().to_string()) else {
+        return text_response(StatusCode::BAD_REQUEST, "Missing text");
+    };
+    if text.is_empty() {
+        return text_response(StatusCode::BAD_REQUEST, "Empty text");
+    }
+
+    let state = match app_handle.try_state::<AppState>() {
+        Some(state) => state,
+        None => return text_response(StatusCode::INTERNAL_SERVER_ERROR, "AppState not available"),
+    };
+
+    let session_id = body.session_id.unwrap_or_else(|| {
+        crate::presentation::companion_timeline::now_ms()
+            .unsigned_abs()
+            .max(1)
+    });
+    let transcription = crate::domain::Transcription::final_result(text);
+    crate::presentation::companion_timeline::append_system_final(
+        state.inner(),
+        session_id,
+        &transcription,
+    )
+    .await;
+
+    match publish_snapshot(&app_handle).await {
+        Ok(_) => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "ok": true,
+                "sessionId": session_id,
+                "characterCount": transcription.text.len(),
+            })
+            .to_string(),
+        ),
         Err(error) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
 }

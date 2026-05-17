@@ -179,6 +179,51 @@ pnpm e2e:companion-context -- --filler-chars 52000 --verify-memory --memory-api-
 pnpm e2e:companion-context -- --skip-voice --skip-ai --filler-chars 52000
 ```
 
+## Companion long interview memory E2E
+
+Для проверки цепочки "вопрос собеседника -> реальный AI ответ -> уточнение -> новый AI ответ -> финальный recall" есть отдельный long-interview сценарий:
+
+```bash
+pnpm e2e:companion-long-interview -- --turns 8 --filler-chars 120000 --verify-memory
+```
+
+Что делает тест:
+
+- не чистит историю и проверяет только новые сообщения после стартового `seq`;
+- добавляет ранний TypeScript-контекст про `debounceSearch`;
+- задаёт несколько многострочных interview-вопросов через реальный `/api/prompt/send`;
+- между ответами добавляет большой нейтральный system-transcript filler через debug-only `/api/e2e/timeline/system`, чтобы вытеснить ранние сообщения из простого recent-tail контекста, но не пометить шум как `focus-copy/currentCode`;
+- добавляет middle-контекст про FIFO очередь вместо стека и late-ограничение `O(n)` без рекурсии;
+- на каждом ответе проверяет ожидаемые термины и companion memory diagnostics;
+- в финальном вопросе не повторяет старые контрольные коды, а просит AI вспомнить их из предыдущего контекста;
+- с `--verify-memory` отдельно вызывает backend `/api/v1/interview-memory/context` для active companion memory session.
+
+Для более тяжёлой "примерно 30 минут по форме интервью" проверки:
+
+```bash
+pnpm e2e:companion-long-interview -- --turns 12 --filler-chars 240000 --ai-timeout-ms 240000 --verify-memory
+```
+
+Если нужно проверить свежую interview session без подмешивания старых тестовых/интервью фактов, добавь context-only reset:
+
+```bash
+pnpm e2e:companion-long-interview -- --isolate-context --turns 12 --filler-chars 240000 --ai-timeout-ms 240000 --verify-memory
+```
+
+`--isolate-context` вызывает companion `/api/context/clear`: видимая история остаётся, но активный context floor и memory session сбрасываются. Это полезно для E2E и для сценария "новое интервью". Сам тест также падает, если AI подмешал `LONG_INTERVIEW_E2E_*` маркер из другого run.
+
+Если нужно сохранить production-safe артефакт без raw prompt/answer/context:
+
+```bash
+pnpm e2e:companion-long-interview -- --turns 8 --filler-chars 120000 --verify-memory --production-safe-artifact
+```
+
+Для быстрой проверки самого сценария без companion/backend:
+
+```bash
+pnpm e2e:companion-long-interview -- --self-test
+```
+
 ## Важно про macOS
 
 По текущей документации Tauri v2 WebDriver **не поддерживается на macOS** (нет WKWebView driver).

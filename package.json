@@ -31,6 +31,7 @@
     "e2e:tauri": "node e2e-tests/run-e2e.mjs",
     "e2e:companion-audio": "node e2e-tests/companion-dual-audio-smoke.mjs",
     "e2e:companion-context": "node e2e-tests/companion-synthetic-context.mjs",
+    "e2e:companion-long-interview": "node e2e-tests/companion-long-interview.mjs",
     "e2e:memory-canary": "node e2e-tests/interview-memory-canary.mjs",
     "e2e:prepare-local-memory-auth": "node e2e-tests/prepare-local-memory-auth.mjs"
   },
