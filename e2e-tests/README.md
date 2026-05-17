@@ -206,6 +206,8 @@ pnpm e2e:companion-long-interview -- --scenario multi-topic --isolate-context --
 
 В `multi-topic` режиме `--verify-memory` делает несколько backend retrieval фаз: один широкий semantic recall и отдельные topic-specific exact recall проверки для cache, SQL, React и idempotency source markers. Это снижает хрупкость одного огромного запроса и одновременно проверяет, что точные старые детали не потеряны.
 
+Для endurance-прогонов на десятки реальных AI-запросов можно задать небольшой лимит observable fallback, например `--max-context-fallbacks 3`. Такой fallback не считается успешной backend memory retrieval, но принимается только если ответ AI всё равно прошёл semantic checks, ingest остался `ok`, а snapshot явно записал `lastContextStatus=fallback` и причину.
+
 Для более тяжёлой "примерно 30 минут по форме интервью" проверки:
 
 ```bash

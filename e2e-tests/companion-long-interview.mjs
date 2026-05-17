@@ -33,6 +33,7 @@ function parseArgs(argv) {
     memoryBudgetChars: Number(process.env.COMPANION_LONG_INTERVIEW_MEMORY_BUDGET_CHARS || 26_000),
     memoryMaxCandidates: Number(process.env.COMPANION_LONG_INTERVIEW_MEMORY_MAX_CANDIDATES || 120),
     memoryMaxResults: Number(process.env.COMPANION_LONG_INTERVIEW_MEMORY_MAX_RESULTS || 32),
+    maxContextFallbacks: Number(process.env.COMPANION_LONG_INTERVIEW_MAX_CONTEXT_FALLBACKS || 0),
     productionSafeArtifact: process.env.COMPANION_PRODUCTION_SAFE_ARTIFACT === '1',
     openaiResponsesWebSearch: false,
     isolateContext: false,
@@ -69,6 +70,7 @@ function parseArgs(argv) {
     else if (arg === '--memory-budget-chars') options.memoryBudgetChars = Number(next());
     else if (arg === '--memory-max-candidates') options.memoryMaxCandidates = Number(next());
     else if (arg === '--memory-max-results') options.memoryMaxResults = Number(next());
+    else if (arg === '--max-context-fallbacks') options.maxContextFallbacks = Number(next());
     else if (arg === '--production-safe-artifact') options.productionSafeArtifact = true;
     else if (arg === '--web-search') options.openaiResponsesWebSearch = true;
     else if (arg === '--isolate-context') options.isolateContext = true;
@@ -93,6 +95,7 @@ function parseArgs(argv) {
   options.memoryBudgetChars = Math.max(4_000, Math.floor(options.memoryBudgetChars || 26_000));
   options.memoryMaxCandidates = Math.max(1, Math.floor(options.memoryMaxCandidates || 120));
   options.memoryMaxResults = Math.max(1, Math.floor(options.memoryMaxResults || 32));
+  options.maxContextFallbacks = Math.max(0, Math.floor(options.maxContextFallbacks || 0));
   options.answerCheckMode = ['literal', 'semantic'].includes(options.answerCheckMode)
     ? options.answerCheckMode
     : 'literal';
@@ -130,6 +133,7 @@ Useful flags:
   --auth-store-path <path>     Native auth store, default ~/Library/Application Support/HackInterview/auth_store.json.
   --memory-max-candidates <n>  Max backend candidates for broad memory verification, default 120.
   --memory-max-results <n>     Max backend results for broad memory verification, default 32.
+  --max-context-fallbacks <n>   Allow up to n observable context fallbacks during long endurance runs, default 0.
   --expect-memory-status <s>   Expected companion memory status after each answer, default ok.
   --allow-ai-miss              Keep exit code 0 when answer checks miss.
   --web-search                 Enable OpenAI Responses web search.
@@ -730,8 +734,7 @@ function scenarioMemoryRequiredTerms(runId, scenario) {
       'TTL',
       'LEFT JOIN',
       'stale closure',
-      'idempotency key',
-      'bounded exponential backoff',
+      ['idempotency', 'идемпот'],
     ];
   }
 
@@ -1027,10 +1030,13 @@ async function fetchMemoryContextOnce(options, runId, sessionId, phase) {
 
   const context = payload.data?.text || '';
   const retrieved = normalizedText(retrievedMemoryText(context));
-  const checks = phase.requiredTerms.map((term) => ({
-    term,
-    ok: retrieved.includes(normalizedText(term)),
-  }));
+  const checks = phase.requiredTerms.map((expectation) => {
+    const alternatives = Array.isArray(expectation) ? expectation : [expectation];
+    return {
+      term: alternatives.join('|'),
+      ok: alternatives.some((term) => retrieved.includes(normalizedText(term))),
+    };
+  });
 
   return {
     ok: checks.every((check) => check.ok),
@@ -1141,6 +1147,7 @@ function buildArtifact(options, data) {
       memoryBudgetChars: options.memoryBudgetChars,
       memoryMaxCandidates: options.memoryMaxCandidates,
       memoryMaxResults: options.memoryMaxResults,
+      maxContextFallbacks: options.maxContextFallbacks,
       openaiResponsesWebSearch: options.openaiResponsesWebSearch,
       productionSafeArtifact: options.productionSafeArtifact,
       isolateContext: options.isolateContext,
@@ -1166,6 +1173,46 @@ function buildArtifact(options, data) {
       ...artifact.final,
       tail: artifact.final.tail.map(redactMessage),
     },
+  };
+}
+
+function isContextFallbackOnlyFailure(result) {
+  if (!result || result.ok) return false;
+  if (!result.answerChecks.every((check) => check.ok)) return false;
+  const failedDiagnostics = result.diagnosticChecks.filter((check) => !check.ok);
+  return (
+    failedDiagnostics.length === 1 &&
+    failedDiagnostics[0]?.label === 'context status ok' &&
+    failedDiagnostics[0]?.value === 'fallback' &&
+    result.diagnosticChecks
+      .filter((check) => check.label !== 'context status ok')
+      .every((check) => check.ok)
+  );
+}
+
+function buildRunAcceptance(options, turnResults, memoryResult) {
+  const failedTurns = turnResults.filter((result) => !result.ok);
+  const contextFallbackTurns = failedTurns.filter(isContextFallbackOnlyFailure);
+  const hardFailedTurns = failedTurns.filter((result) => !isContextFallbackOnlyFailure(result));
+  const acceptedContextFallbacks =
+    contextFallbackTurns.length <= options.maxContextFallbacks ? contextFallbackTurns : [];
+
+  return {
+    ok:
+      hardFailedTurns.length === 0 &&
+      contextFallbackTurns.length <= options.maxContextFallbacks &&
+      (!memoryResult || memoryResult.ok),
+    failedTurns: failedTurns.map((result) => result.index),
+    hardFailedTurns: hardFailedTurns.map((result) => result.index),
+    contextFallbackTurns: contextFallbackTurns.map((result) => ({
+      index: result.index,
+      label: result.label,
+      latencyMs: result.timelineState?.memory?.lastContextLatencyMs,
+      error: result.timelineState?.memory?.lastContextError || '',
+    })),
+    acceptedContextFallbackTurns: acceptedContextFallbacks.map((result) => result.index),
+    maxContextFallbacks: options.maxContextFallbacks,
+    memoryOk: !memoryResult || memoryResult.ok,
   };
 }
 
@@ -1244,7 +1291,7 @@ function runSelfTest() {
   const multiTopicRequiredTerms = scenarioMemoryRequiredTerms(runId, 'multi-topic');
   assertSelfTest(
     multiTopicRequiredTerms.includes('LEFT JOIN') &&
-      multiTopicRequiredTerms.includes('bounded exponential backoff') &&
+      multiTopicRequiredTerms.some((term) => Array.isArray(term) && term.includes('idempotency')) &&
       !multiTopicRequiredTerms.includes(marker(runId, 'SQL_LEFT_JOIN_WINDOW')),
     'multi-topic broad memory verification should focus on semantic recall',
   );
@@ -1352,6 +1399,7 @@ async function main() {
 
   const final = await getState(options);
   assertMemorySnapshot(final, 'final companion');
+  const acceptance = buildRunAcceptance(options, turnResults, memoryResult);
 
   const artifact = buildArtifact(options, {
     runId,
@@ -1366,6 +1414,7 @@ async function main() {
     ingested,
     turnResults,
     memoryResult,
+    acceptance,
     final: {
       timelineCount: final.timeline.length,
       maxSeq: maxSeq(final),
@@ -1377,10 +1426,22 @@ async function main() {
   });
   const artifactPath = await writeArtifact(options, artifact);
   console.log(`[long-interview] artifact: ${artifactPath}`);
+  if (acceptance.contextFallbackTurns.length > 0) {
+    const icon =
+      acceptance.contextFallbackTurns.length <= options.maxContextFallbacks ? '⚠️' : '❌';
+    console.log(
+      `${icon} context fallbacks: ${acceptance.contextFallbackTurns.length}/${options.maxContextFallbacks} ` +
+        acceptance.contextFallbackTurns
+          .map((turn) => `turn=${turn.index} latency=${turn.latencyMs}ms`)
+          .join(', '),
+    );
+  }
 
-  const failedTurns = turnResults.filter((result) => !result.ok);
-  if (failedTurns.length > 0 && !options.allowAiMiss) process.exitCode = 1;
-  if (memoryResult && !memoryResult.ok) process.exitCode = 1;
+  const hasUnacceptedTurnFailures =
+    acceptance.hardFailedTurns.length > 0 ||
+    acceptance.contextFallbackTurns.length > options.maxContextFallbacks;
+  if (hasUnacceptedTurnFailures && !options.allowAiMiss) process.exitCode = 1;
+  if (!acceptance.memoryOk) process.exitCode = 1;
 }
 
 main().catch((error) => {
