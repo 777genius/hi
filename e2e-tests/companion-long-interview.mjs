@@ -34,6 +34,7 @@ function parseArgs(argv) {
     productionSafeArtifact: process.env.COMPANION_PRODUCTION_SAFE_ARTIFACT === '1',
     openaiResponsesWebSearch: false,
     isolateContext: false,
+    scenario: process.env.COMPANION_LONG_INTERVIEW_SCENARIO || 'single-task',
     answerCheckMode: process.env.COMPANION_LONG_INTERVIEW_ANSWER_CHECK_MODE || 'semantic',
     finalRecallMode: process.env.COMPANION_LONG_INTERVIEW_FINAL_RECALL_MODE || 'semantic',
     selfTest: false,
@@ -67,6 +68,7 @@ function parseArgs(argv) {
     else if (arg === '--production-safe-artifact') options.productionSafeArtifact = true;
     else if (arg === '--web-search') options.openaiResponsesWebSearch = true;
     else if (arg === '--isolate-context') options.isolateContext = true;
+    else if (arg === '--scenario') options.scenario = next();
     else if (arg === '--answer-check-mode') options.answerCheckMode = next();
     else if (arg === '--semantic-answer-checks') options.answerCheckMode = 'semantic';
     else if (arg === '--final-recall-mode') options.finalRecallMode = next();
@@ -91,6 +93,9 @@ function parseArgs(argv) {
   options.finalRecallMode = ['literal', 'semantic'].includes(options.finalRecallMode)
     ? options.finalRecallMode
     : 'literal';
+  options.scenario = ['single-task', 'multi-topic'].includes(options.scenario)
+    ? options.scenario
+    : 'single-task';
   if (!options.token) options.token = extractTokenFromUrl(process.env.COMPANION_URL || options.baseUrl) || '';
   return options;
 }
@@ -121,6 +126,7 @@ Useful flags:
   --allow-ai-miss              Keep exit code 0 when answer checks miss.
   --web-search                 Enable OpenAI Responses web search.
   --isolate-context            Clear active context and start a fresh memory session before the run.
+  --scenario <name>            single-task or multi-topic, default single-task.
   --answer-check-mode <mode>   literal or semantic, default semantic.
   --semantic-answer-checks     Alias for --answer-check-mode semantic.
   --final-recall-mode <mode>   literal or semantic, default semantic.
@@ -363,6 +369,63 @@ function buildComplexityAnchor(runId) {
   ].join('\n');
 }
 
+function buildLruAnchor(runId) {
+  const lruMarker = marker(runId, 'LRU_TTL_EVICTION');
+  return [
+    'Long interview E2E multi-topic cache context.',
+    `Контроль cache-задачи: ${lruMarker}.`,
+    'Проект называется Полярная станция. Собеседник спрашивает про LRU cache с TTL и eviction старых значений.',
+    '```ts',
+    `const E2E_CACHE_MARKER = '${lruMarker}';`,
+    'type CacheEntry = { key: string; value: string; expiresAt: number; lastUsedAt: number };',
+    'export function shouldEvict(entry: CacheEntry, now: number, capacityExceeded: boolean) {',
+    '  return entry.expiresAt <= now || capacityExceeded;',
+    '}',
+    '```',
+  ].join('\n');
+}
+
+function buildSqlAnchor(runId) {
+  const sqlMarker = marker(runId, 'SQL_LEFT_JOIN_WINDOW');
+  return [
+    'Long interview E2E multi-topic SQL context.',
+    `Контроль SQL-задачи: ${sqlMarker}.`,
+    'Нужно объяснить запрос, который сохраняет пользователей без заказов через LEFT JOIN и ранжирует покупки оконной функцией.',
+    '```sql',
+    `-- ${sqlMarker}`,
+    'select u.id, u.name, row_number() over (partition by u.id order by o.created_at desc) as order_rank',
+    'from users u',
+    'left join orders o on o.user_id = u.id;',
+    '```',
+  ].join('\n');
+}
+
+function buildReactAnchor(runId) {
+  const reactMarker = marker(runId, 'REACT_STALE_CLOSURE_MEMO');
+  return [
+    'Long interview E2E multi-topic React context.',
+    `Контроль React-задачи: ${reactMarker}.`,
+    'Собеседник проверяет stale closure, зависимости useCallback/useMemo и аккуратный rerender budget.',
+    '```tsx',
+    `const E2E_REACT_MARKER = '${reactMarker}';`,
+    'function SearchBox({ onSearch }: { onSearch: (value: string) => void }) {',
+    '  const [query, setQuery] = useState("");',
+    '  const submit = useCallback(() => onSearch(query), [onSearch, query]);',
+    '  return <button onClick={submit}>Search</button>;',
+    '}',
+    '```',
+  ].join('\n');
+}
+
+function buildIdempotencyAnchor(runId) {
+  const idempotencyMarker = marker(runId, 'IDEMPOTENCY_RETRY_BACKOFF');
+  return [
+    'Long interview E2E multi-topic distributed systems context.',
+    `Контроль idempotency-задачи: ${idempotencyMarker}.`,
+    'Сервис платежей должен принимать idempotency key, безопасно повторять transient ошибки и использовать bounded exponential backoff без дублирования списаний.',
+  ].join('\n');
+}
+
 function buildFiller(runId, turnIndex, targetChars) {
   if (targetChars <= 0) return '';
   const line = [
@@ -494,6 +557,223 @@ function buildTurns(runId, count) {
   }
   turns.push(finalRecallTurn);
   return turns;
+}
+
+function multiTopicTurns(runId) {
+  const lruMarker = marker(runId, 'LRU_TTL_EVICTION');
+  const lruRaceMarker = marker(runId, 'LRU_TTL_RACE_CLARIFY');
+  const sqlMarker = marker(runId, 'SQL_LEFT_JOIN_WINDOW');
+  const reactMarker = marker(runId, 'REACT_STALE_CLOSURE_MEMO');
+  const idempotencyMarker = marker(runId, 'IDEMPOTENCY_RETRY_BACKOFF');
+  const crossTopicMarker = marker(runId, 'CROSS_TOPIC_SYNTHESIS');
+  const finalRecallMarker = marker(runId, 'MULTI_TOPIC_FINAL_RECALL');
+
+  return [
+    {
+      label: 'multi-topic lru cache initial question',
+      contextBefore: buildLruAnchor(runId),
+      languageId: 'typescript',
+      question: [
+        'Собеседник задаёт первый большой вопрос интервью несколькими предложениями.',
+        'В проекте Полярная станция нужно объяснить LRU cache с TTL.',
+        'Почему expired записи надо удалять независимо от capacity, а при переполнении выбирать least recently used?',
+        'Начни ответ точной фразой "Полярная станция:", чтобы проверить, что ранний project context попал в ответ.',
+        `В конце ответа напиши контрольный код ${lruMarker}.`,
+      ].join(' '),
+      expected: ['полярная', 'станция', 'lru', 'ttl', ['evict', 'удал', 'вытесн'], lruMarker],
+    },
+    {
+      label: 'multi-topic lru race clarification',
+      question: [
+        'Уточнение по cache-задаче: два запроса почти одновременно читают один ключ, а TTL истекает между read и write-back.',
+        'Какие race conditions возможны и какой инвариант должен сохраняться, чтобы не вернуть устаревшее значение?',
+        'Ответь как на интервью, без кода, но с конкретной причинно-следственной связью.',
+        `В конце ответа напиши контрольный код ${lruRaceMarker}.`,
+      ].join(' '),
+      expected: ['ttl', ['race', 'гонк'], ['инвариант', 'устар'], lruRaceMarker],
+    },
+    {
+      label: 'multi-topic sql join window question',
+      contextBefore: buildSqlAnchor(runId),
+      languageId: 'sql',
+      question: [
+        'Собеседник переключает тему на SQL.',
+        'Почему в запросе из контекста важен LEFT JOIN, а не INNER JOIN, и зачем нужна оконная функция row_number?',
+        'Объясни, как сохранить пользователей без заказов и выбрать последние заказы без потери строк.',
+        `В конце ответа напиши контрольный код ${sqlMarker}.`,
+      ].join(' '),
+      expected: [['left join', 'лев'], ['row_number', 'окон'], ['null', 'без заказ'], sqlMarker],
+    },
+    {
+      label: 'multi-topic react stale closure question',
+      contextBefore: buildReactAnchor(runId),
+      languageId: 'tsx',
+      question: [
+        'Новая тема интервью: React performance и корректность.',
+        'По коду выше объясни, как stale closure возникает при неправильных зависимостях useCallback или useMemo.',
+        'Почему нельзя просто выкинуть query из dependency array ради меньшего числа rerender?',
+        `В конце ответа напиши контрольный код ${reactMarker}.`,
+      ].join(' '),
+      expected: [['stale', 'устаревш'], ['closure', 'замыкан'], ['usecallback', 'usememo', 'dependency'], reactMarker],
+    },
+    {
+      label: 'multi-topic idempotency retry question',
+      contextBefore: buildIdempotencyAnchor(runId),
+      contextRoute: 'system',
+      languageId: 'text',
+      question: [
+        'Собеседник задаёт distributed systems вопрос.',
+        'Как проектировать retry для платежного API, чтобы transient 500 или network timeout не создавали двойное списание?',
+        'Свяжи idempotency key, bounded backoff и хранение результата первой успешной операции.',
+        `В конце ответа напиши контрольный код ${idempotencyMarker}.`,
+      ].join(' '),
+      expected: [['idempotency', 'идемпот'], ['retry', 'повтор'], 'backoff', idempotencyMarker],
+    },
+    {
+      label: 'multi-topic cross-topic synthesis',
+      question: [
+        'Собеседник проверяет, не перемешались ли темы после долгой беседы.',
+        'Сравни cache TTL eviction, SQL LEFT JOIN и платежный idempotency retry: что в них общее с точки зрения инвариантов?',
+        'Не надо код, нужен компактный ответ кандидата с разграничением тем.',
+        `В конце ответа напиши контрольный код ${crossTopicMarker}.`,
+      ].join(' '),
+      expected: ['ttl', ['left join', 'sql'], ['idempotency', 'идемпот'], ['инвариант', 'гарант'], crossTopicMarker],
+    },
+    {
+      label: 'multi-topic final recall without restating markers',
+      question: [
+        'Финальный контроль памяти после долгого интервью без повторения старых деталей.',
+        'Собеседник просит вспомнить самые ранние и средние темы: cache LRU/TTL, SQL LEFT JOIN/window function, React stale closure и idempotency retry.',
+        'Назови контрольные коды этих этапов и кратко объясни, что каждый доказывает.',
+        'Не используй EXTRA_MULTI_TOPIC коды из промежуточных уточнений.',
+        'Нужны именно исходные коды про LRU TTL eviction, SQL LEFT JOIN window, React stale closure memo и idempotency retry backoff.',
+        'Не придумывай новые контрольные коды.',
+        `Первой строкой обязательно напиши: MULTI_TOPIC_FINAL_RECALL=${finalRecallMarker}.`,
+      ].join(' '),
+      expected: [
+        lruMarker,
+        sqlMarker,
+        reactMarker,
+        idempotencyMarker,
+        finalRecallMarker,
+        'lru',
+        'ttl',
+        ['left join', 'sql'],
+        ['stale', 'устаревш'],
+        ['idempotency', 'идемпот'],
+      ],
+      recall: true,
+    },
+  ];
+}
+
+function buildMultiTopicTurns(runId, count) {
+  const coreTurns = multiTopicTurns(runId);
+  if (count <= coreTurns.length) return coreTurns.slice(0, count);
+
+  const finalRecallTurn = coreTurns.at(-1);
+  const turns = coreTurns.slice(0, -1);
+  const topicChecks = [
+    {
+      label: 'cache and sql',
+      expected: ['lru', 'ttl', ['left join', 'sql']],
+      prompt: 'Свяжи LRU/TTL cache и SQL LEFT JOIN: где важно не потерять данные и где важно убрать устаревшие данные.',
+    },
+    {
+      label: 'react and idempotency',
+      expected: [['stale', 'устаревш'], ['idempotency', 'идемпот'], ['retry', 'повтор']],
+      prompt: 'Свяжи React stale closure и платежный idempotency retry: где опасна устаревшая информация и где опасны повторные эффекты.',
+    },
+    {
+      label: 'all topics',
+      expected: ['ttl', ['left join', 'sql'], ['stale', 'устаревш'], ['idempotency', 'идемпот']],
+      prompt: 'Собери одним ответом все темы: TTL cache, SQL LEFT JOIN/window, React stale closure и idempotency retry.',
+    },
+  ];
+
+  for (let index = turns.length + 1; index < count; index += 1) {
+    const topic = topicChecks[index % topicChecks.length];
+    const extraMarker = marker(runId, `EXTRA_MULTI_TOPIC_${index}`);
+    turns.push({
+      label: `multi-topic extra clarification ${index}: ${topic.label}`,
+      question: [
+        `Дополнительное уточнение интервью номер ${index}.`,
+        topic.prompt,
+        'Ответь как кандидат на собеседовании: несколько предложений, конкретно и без смешивания причин.',
+        `В конце ответа напиши контрольный код ${extraMarker}.`,
+      ].join(' '),
+      expected: [...topic.expected, extraMarker],
+    });
+  }
+
+  turns.push(finalRecallTurn);
+  return turns;
+}
+
+function buildScenarioTurns(runId, count, scenario) {
+  return scenario === 'multi-topic' ? buildMultiTopicTurns(runId, count) : buildTurns(runId, count);
+}
+
+function scenarioMemoryRequiredTerms(runId, scenario) {
+  if (scenario === 'multi-topic') {
+    return [
+      marker(runId, 'LRU_TTL_EVICTION'),
+      marker(runId, 'SQL_LEFT_JOIN_WINDOW'),
+      marker(runId, 'REACT_STALE_CLOSURE_MEMO'),
+      marker(runId, 'IDEMPOTENCY_RETRY_BACKOFF'),
+      'Полярная станция',
+      'LRU',
+      'TTL',
+      'LEFT JOIN',
+      'row_number',
+      'stale closure',
+      'idempotency key',
+      'bounded exponential backoff',
+    ];
+  }
+
+  return [
+    marker(runId, 'DEBOUNCE_TIMER_ARGUMENT'),
+    marker(runId, 'QUEUE_FIFO_NO_STACK'),
+    marker(runId, 'LINEAR_NO_RECURSION'),
+    'Северный мост',
+    'debounceSearch',
+    'очередь',
+    'линей',
+  ];
+}
+
+function scenarioMarkers(runId, scenario) {
+  if (scenario === 'multi-topic') {
+    return {
+      lru: marker(runId, 'LRU_TTL_EVICTION'),
+      sql: marker(runId, 'SQL_LEFT_JOIN_WINDOW'),
+      react: marker(runId, 'REACT_STALE_CLOSURE_MEMO'),
+      idempotency: marker(runId, 'IDEMPOTENCY_RETRY_BACKOFF'),
+      finalRecall: marker(runId, 'MULTI_TOPIC_FINAL_RECALL'),
+    };
+  }
+
+  return {
+    debounce: marker(runId, 'DEBOUNCE_TIMER_ARGUMENT'),
+    queue: marker(runId, 'QUEUE_FIFO_NO_STACK'),
+    complexity: marker(runId, 'LINEAR_NO_RECURSION'),
+    finalRecall: marker(runId, 'FINAL_RECALL'),
+  };
+}
+
+function scenarioMemoryQueryText(scenario) {
+  if (scenario === 'multi-topic') {
+    return [
+      'Финальный контроль памяти: нужно достать факты по проекту Полярная станция и нескольким темам интервью.',
+      'Нужны ранняя cache-задача LRU cache с TTL eviction, SQL LEFT JOIN с row_number/window function, React stale closure/useCallback dependencies и платежный idempotency retry с bounded exponential backoff.',
+    ].join(' ');
+  }
+
+  return [
+    'Финальный контроль памяти: нужно достать факты по проекту Северный мост и функции debounceSearch.',
+    'Нужны раннее требование про последний аргумент debounce, middle требование про FIFO queue вместо stack, late ограничение O(n) без рекурсии и связанные контрольные коды.',
+  ].join(' ');
 }
 
 async function ingestFocusCopy(options, text, label, languageId = 'text') {
@@ -657,10 +937,7 @@ async function fetchMemoryContextOnce(options, runId, sessionId, requiredTerms) 
       current_request: {
         id: `long-interview-memory-${runId}-${Date.now()}`,
         label: 'long_interview_final_recall',
-        text: [
-          'Финальный контроль памяти: нужно достать факты по проекту Северный мост и функции debounceSearch.',
-          'Нужны раннее требование про последний аргумент debounce, middle требование про FIFO queue вместо stack, late ограничение O(n) без рекурсии и связанные контрольные коды.',
-        ].join(' '),
+        text: scenarioMemoryQueryText(options.scenario),
       },
       budget_max_chars: options.memoryBudgetChars,
       max_memory_candidates: 120,
@@ -761,6 +1038,7 @@ function buildArtifact(options, data) {
       openaiResponsesWebSearch: options.openaiResponsesWebSearch,
       productionSafeArtifact: options.productionSafeArtifact,
       isolateContext: options.isolateContext,
+      scenario: options.scenario,
       answerCheckMode: options.answerCheckMode,
       finalRecallMode: options.finalRecallMode,
     },
@@ -816,7 +1094,7 @@ function runSelfTest() {
     );
   }
 
-  const turns = buildTurns(runId, 12);
+  const turns = buildScenarioTurns(runId, 12, 'single-task');
   assertSelfTest(turns.length === 12, 'turn count should match requested count');
   assertSelfTest(turns.at(-1)?.recall === true, 'final recall should stay last for extended runs');
   assertSelfTest(
@@ -846,6 +1124,22 @@ function runSelfTest() {
     isLiteralFormattingCheck({ term: 'typescript' }),
     'literal formatting detector should match language wording checks',
   );
+
+  const multiTopicTurns = buildScenarioTurns(runId, 14, 'multi-topic');
+  assertSelfTest(multiTopicTurns.length === 14, 'multi-topic turn count should match requested count');
+  assertSelfTest(multiTopicTurns.at(-1)?.recall === true, 'multi-topic final recall should stay last');
+  assertSelfTest(
+    multiTopicTurns.some((turn) => String(turn.label).includes('sql')) &&
+      multiTopicTurns.some((turn) => String(turn.label).includes('react')) &&
+      multiTopicTurns.some((turn) => String(turn.label).includes('idempotency')),
+    'multi-topic scenario should cover SQL, React and idempotency topics',
+  );
+  const multiTopicRequiredTerms = scenarioMemoryRequiredTerms(runId, 'multi-topic');
+  assertSelfTest(
+    multiTopicRequiredTerms.includes(marker(runId, 'LRU_TTL_EVICTION')) &&
+      multiTopicRequiredTerms.includes(marker(runId, 'IDEMPOTENCY_RETRY_BACKOFF')),
+    'multi-topic memory verification should require early and late source markers',
+  );
   console.log('[long-interview] self-test ok');
 }
 
@@ -871,7 +1165,7 @@ async function main() {
   const initial = await getState(options);
   assertMemorySnapshot(initial, 'initial companion');
   const initialSeq = maxSeq(initial);
-  const turns = buildTurns(runId, options.turns);
+  const turns = buildScenarioTurns(runId, options.turns, options.scenario);
   for (const turn of turns) turn.runId = runId;
   const syntheticSystemSessionId = Date.now();
   const fillerPerGap = turns.length > 1 ? Math.floor(options.fillerChars / (turns.length - 1)) : 0;
@@ -879,7 +1173,7 @@ async function main() {
   const turnResults = [];
 
   console.log(
-    `[long-interview] run=${runId}, initial timeline=${initial.timeline.length}, maxSeq=${initialSeq}, turns=${turns.length}, fillerChars=${options.fillerChars}`,
+    `[long-interview] run=${runId}, scenario=${options.scenario}, initial timeline=${initial.timeline.length}, maxSeq=${initialSeq}, turns=${turns.length}, fillerChars=${options.fillerChars}`,
   );
 
   for (let index = 0; index < turns.length; index += 1) {
@@ -931,15 +1225,7 @@ async function main() {
   let memoryResult = null;
   if (options.verifyMemory) {
     const state = await getState(options);
-    const requiredTerms = [
-      marker(runId, 'DEBOUNCE_TIMER_ARGUMENT'),
-      marker(runId, 'QUEUE_FIFO_NO_STACK'),
-      marker(runId, 'LINEAR_NO_RECURSION'),
-      'Северный мост',
-      'debounceSearch',
-      'очередь',
-      'линей',
-    ];
+    const requiredTerms = scenarioMemoryRequiredTerms(runId, options.scenario);
     console.log('[long-interview] verifying backend memory retrieval');
     memoryResult = await runMemoryContextPhase(options, runId, state.memory?.sessionId, requiredTerms);
     const icon = memoryResult.ok ? '✅' : '❌';
@@ -953,12 +1239,7 @@ async function main() {
 
   const artifact = buildArtifact(options, {
     runId,
-    markers: {
-      debounce: marker(runId, 'DEBOUNCE_TIMER_ARGUMENT'),
-      queue: marker(runId, 'QUEUE_FIFO_NO_STACK'),
-      complexity: marker(runId, 'LINEAR_NO_RECURSION'),
-      finalRecall: marker(runId, 'FINAL_RECALL'),
-    },
+    markers: scenarioMarkers(runId, options.scenario),
     initial: {
       timelineCount: initial.timeline.length,
       maxSeq: initialSeq,

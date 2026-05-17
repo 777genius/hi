@@ -198,6 +198,12 @@ pnpm e2e:companion-long-interview -- --turns 8 --filler-chars 120000 --verify-me
 - в финальном вопросе не повторяет старые контрольные коды, а просит AI вспомнить их из предыдущего контекста;
 - с `--verify-memory` отдельно вызывает backend `/api/v1/interview-memory/context` для active companion memory session.
 
+Для более похожего на реальное интервью multi-topic сценария используй `--scenario multi-topic`. Он проверяет не одну задачу с уточнениями, а несколько независимых тем: LRU/TTL cache, SQL `LEFT JOIN` + window function, React stale closure/useCallback dependencies, idempotency retry/backoff и финальный recall по ранним/средним фактам:
+
+```bash
+pnpm e2e:companion-long-interview -- --scenario multi-topic --isolate-context --turns 18 --filler-chars 360000 --ai-timeout-ms 300000 --verify-memory
+```
+
 Для более тяжёлой "примерно 30 минут по форме интервью" проверки:
 
 ```bash
