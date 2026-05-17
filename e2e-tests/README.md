@@ -204,6 +204,8 @@ pnpm e2e:companion-long-interview -- --turns 8 --filler-chars 120000 --verify-me
 pnpm e2e:companion-long-interview -- --scenario multi-topic --isolate-context --turns 18 --filler-chars 360000 --ai-timeout-ms 300000 --verify-memory
 ```
 
+В `multi-topic` режиме `--verify-memory` делает несколько backend retrieval фаз: один широкий semantic recall и отдельные topic-specific exact recall проверки для cache, SQL, React и idempotency source markers. Это снижает хрупкость одного огромного запроса и одновременно проверяет, что точные старые детали не потеряны.
+
 Для более тяжёлой "примерно 30 минут по форме интервью" проверки:
 
 ```bash

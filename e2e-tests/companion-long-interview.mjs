@@ -31,6 +31,8 @@ function parseArgs(argv) {
     memoryAuthTokenFile: process.env.INTERVIEW_MEMORY_AUTH_TOKEN_FILE || '',
     authStorePath: process.env.HACKINTERVIEW_AUTH_STORE_PATH || DEFAULT_AUTH_STORE,
     memoryBudgetChars: Number(process.env.COMPANION_LONG_INTERVIEW_MEMORY_BUDGET_CHARS || 26_000),
+    memoryMaxCandidates: Number(process.env.COMPANION_LONG_INTERVIEW_MEMORY_MAX_CANDIDATES || 120),
+    memoryMaxResults: Number(process.env.COMPANION_LONG_INTERVIEW_MEMORY_MAX_RESULTS || 32),
     productionSafeArtifact: process.env.COMPANION_PRODUCTION_SAFE_ARTIFACT === '1',
     openaiResponsesWebSearch: false,
     isolateContext: false,
@@ -65,6 +67,8 @@ function parseArgs(argv) {
     else if (arg === '--memory-auth-token-file') options.memoryAuthTokenFile = next();
     else if (arg === '--auth-store-path') options.authStorePath = next();
     else if (arg === '--memory-budget-chars') options.memoryBudgetChars = Number(next());
+    else if (arg === '--memory-max-candidates') options.memoryMaxCandidates = Number(next());
+    else if (arg === '--memory-max-results') options.memoryMaxResults = Number(next());
     else if (arg === '--production-safe-artifact') options.productionSafeArtifact = true;
     else if (arg === '--web-search') options.openaiResponsesWebSearch = true;
     else if (arg === '--isolate-context') options.isolateContext = true;
@@ -87,6 +91,8 @@ function parseArgs(argv) {
   options.turns = Math.max(1, Math.floor(options.turns || 1));
   options.fillerChars = Math.max(0, Math.floor(options.fillerChars || 0));
   options.memoryBudgetChars = Math.max(4_000, Math.floor(options.memoryBudgetChars || 26_000));
+  options.memoryMaxCandidates = Math.max(1, Math.floor(options.memoryMaxCandidates || 120));
+  options.memoryMaxResults = Math.max(1, Math.floor(options.memoryMaxResults || 32));
   options.answerCheckMode = ['literal', 'semantic'].includes(options.answerCheckMode)
     ? options.answerCheckMode
     : 'literal';
@@ -122,6 +128,8 @@ Useful flags:
   --memory-auth-token <token>  Raw bearer token for backend memory API.
   --memory-auth-token-file <p> Raw token or auth_store.json.
   --auth-store-path <path>     Native auth store, default ~/Library/Application Support/HackInterview/auth_store.json.
+  --memory-max-candidates <n>  Max backend candidates for broad memory verification, default 120.
+  --memory-max-results <n>     Max backend results for broad memory verification, default 32.
   --expect-memory-status <s>   Expected companion memory status after each answer, default ok.
   --allow-ai-miss              Keep exit code 0 when answer checks miss.
   --web-search                 Enable OpenAI Responses web search.
@@ -717,15 +725,10 @@ function buildScenarioTurns(runId, count, scenario) {
 function scenarioMemoryRequiredTerms(runId, scenario) {
   if (scenario === 'multi-topic') {
     return [
-      marker(runId, 'LRU_TTL_EVICTION'),
-      marker(runId, 'SQL_LEFT_JOIN_WINDOW'),
-      marker(runId, 'REACT_STALE_CLOSURE_MEMO'),
-      marker(runId, 'IDEMPOTENCY_RETRY_BACKOFF'),
       'Полярная станция',
       'LRU',
       'TTL',
       'LEFT JOIN',
-      'row_number',
       'stale closure',
       'idempotency key',
       'bounded exponential backoff',
@@ -740,6 +743,72 @@ function scenarioMemoryRequiredTerms(runId, scenario) {
     'debounceSearch',
     'очередь',
     'линей',
+  ];
+}
+
+function scenarioMemoryCheckPhases(runId, scenario) {
+  if (scenario !== 'multi-topic') {
+    return [
+      {
+        label: 'single-task broad recall',
+        queryText: scenarioMemoryQueryText(scenario),
+        requiredTerms: scenarioMemoryRequiredTerms(runId, scenario),
+      },
+    ];
+  }
+
+  const topicOptions = {
+    budgetMaxChars: 50_000,
+    maxMemoryCandidates: 300,
+    maxMemoryResults: 64,
+  };
+
+  return [
+    {
+      label: 'multi-topic broad recall',
+      queryText: scenarioMemoryQueryText(scenario),
+      requiredTerms: scenarioMemoryRequiredTerms(runId, scenario),
+    },
+    {
+      label: 'multi-topic cache exact recall',
+      queryText: [
+        'Найди точный early cache контекст интервью.',
+        'Нужны проект Полярная станция, LRU cache, TTL eviction и контрольный код LRU_TTL_EVICTION.',
+      ].join(' '),
+      requiredTerms: [marker(runId, 'LRU_TTL_EVICTION'), 'Полярная станция', 'LRU', 'TTL'],
+      ...topicOptions,
+    },
+    {
+      label: 'multi-topic sql exact recall',
+      queryText: [
+        'Найди точный SQL контекст интервью.',
+        'Нужны LEFT JOIN, row_number/window function и контрольный код SQL_LEFT_JOIN_WINDOW.',
+      ].join(' '),
+      requiredTerms: [marker(runId, 'SQL_LEFT_JOIN_WINDOW'), 'LEFT JOIN', 'row_number'],
+      ...topicOptions,
+    },
+    {
+      label: 'multi-topic react exact recall',
+      queryText: [
+        'Найди точный React контекст интервью.',
+        'Нужны stale closure, useCallback dependencies и контрольный код REACT_STALE_CLOSURE_MEMO.',
+      ].join(' '),
+      requiredTerms: [marker(runId, 'REACT_STALE_CLOSURE_MEMO'), 'stale closure', 'useCallback'],
+      ...topicOptions,
+    },
+    {
+      label: 'multi-topic idempotency exact recall',
+      queryText: [
+        'Найди точный distributed systems контекст интервью.',
+        'Нужны idempotency key, bounded exponential backoff и контрольный код IDEMPOTENCY_RETRY_BACKOFF.',
+      ].join(' '),
+      requiredTerms: [
+        marker(runId, 'IDEMPOTENCY_RETRY_BACKOFF'),
+        'idempotency key',
+        'bounded exponential backoff',
+      ],
+      ...topicOptions,
+    },
   ];
 }
 
@@ -916,7 +985,7 @@ function retrievedMemoryText(contextText) {
   return nextSectionIndex >= 0 ? rest.slice(0, nextSectionIndex) : rest;
 }
 
-async function fetchMemoryContextOnce(options, runId, sessionId, requiredTerms) {
+async function fetchMemoryContextOnce(options, runId, sessionId, phase) {
   if (!options.memoryApiUrl) throw new Error('Memory verification needs --memory-api-url');
   const authToken = await readMemoryAuthToken(options);
   if (!authToken) {
@@ -936,12 +1005,12 @@ async function fetchMemoryContextOnce(options, runId, sessionId, requiredTerms) 
       session_id: sessionId,
       current_request: {
         id: `long-interview-memory-${runId}-${Date.now()}`,
-        label: 'long_interview_final_recall',
-        text: scenarioMemoryQueryText(options.scenario),
+        label: phase.label || 'long_interview_final_recall',
+        text: phase.queryText,
       },
-      budget_max_chars: options.memoryBudgetChars,
-      max_memory_candidates: 120,
-      max_memory_results: 32,
+      budget_max_chars: phase.budgetMaxChars || options.memoryBudgetChars,
+      max_memory_candidates: phase.maxMemoryCandidates || options.memoryMaxCandidates,
+      max_memory_results: phase.maxMemoryResults || options.memoryMaxResults,
     }),
   });
   const latencyMs = Math.round(performance.now() - startedAt);
@@ -958,7 +1027,7 @@ async function fetchMemoryContextOnce(options, runId, sessionId, requiredTerms) 
 
   const context = payload.data?.text || '';
   const retrieved = normalizedText(retrievedMemoryText(context));
-  const checks = requiredTerms.map((term) => ({
+  const checks = phase.requiredTerms.map((term) => ({
     term,
     ok: retrieved.includes(normalizedText(term)),
   }));
@@ -968,6 +1037,8 @@ async function fetchMemoryContextOnce(options, runId, sessionId, requiredTerms) 
     sessionId,
     latencyMs,
     checks,
+    label: phase.label,
+    queryText: phase.queryText,
     budgetUsed: payload.data?.artifact?.budget_used,
     budgetTotal: payload.data?.artifact?.budget_total,
     includedChunks: payload.data?.artifact?.included_chunks?.length ?? 0,
@@ -976,18 +1047,38 @@ async function fetchMemoryContextOnce(options, runId, sessionId, requiredTerms) 
   };
 }
 
-async function runMemoryContextPhase(options, runId, sessionId, requiredTerms) {
+async function runMemoryContextPhase(options, runId, sessionId, phase) {
   const startedAt = Date.now();
   let lastResult = null;
   let attempt = 0;
   while (Date.now() - startedAt < 45_000) {
     attempt += 1;
-    lastResult = await fetchMemoryContextOnce(options, runId, sessionId, requiredTerms);
+    lastResult = await fetchMemoryContextOnce(options, runId, sessionId, phase);
     lastResult.attempts = attempt;
     if (lastResult.ok) return lastResult;
     await sleep(2_500);
   }
   return lastResult;
+}
+
+async function runMemoryChecks(options, runId, sessionId) {
+  const phases = scenarioMemoryCheckPhases(runId, options.scenario);
+  const results = [];
+  for (const phase of phases) {
+    const result = await runMemoryContextPhase(options, runId, sessionId, phase);
+    results.push(result);
+  }
+  return {
+    ok: results.every((result) => result?.ok),
+    sessionId,
+    phases: results,
+    checks: results.flatMap((result) =>
+      (result?.checks || []).map((check) => ({
+        ...check,
+        phase: result?.label,
+      })),
+    ),
+  };
 }
 
 function redactText(value) {
@@ -1023,6 +1114,19 @@ function productionSafeTurnResult(result) {
   };
 }
 
+function productionSafeMemoryResult(result) {
+  if (!result || typeof result !== 'object') return result;
+  return {
+    ...result,
+    phases: Array.isArray(result.phases)
+      ? result.phases.map((phase) => ({
+          ...phase,
+          queryText: redactText(phase.queryText),
+        }))
+      : result.phases,
+  };
+}
+
 function buildArtifact(options, data) {
   const artifact = {
     createdAt: new Date().toISOString(),
@@ -1035,6 +1139,8 @@ function buildArtifact(options, data) {
       memoryApiUrl: options.memoryApiUrl,
       expectedMemoryStatus: options.expectedMemoryStatus,
       memoryBudgetChars: options.memoryBudgetChars,
+      memoryMaxCandidates: options.memoryMaxCandidates,
+      memoryMaxResults: options.memoryMaxResults,
       openaiResponsesWebSearch: options.openaiResponsesWebSearch,
       productionSafeArtifact: options.productionSafeArtifact,
       isolateContext: options.isolateContext,
@@ -1055,6 +1161,7 @@ function buildArtifact(options, data) {
       characterCount: item.characterCount,
     })),
     turnResults: artifact.turnResults.map(productionSafeTurnResult),
+    memoryResult: productionSafeMemoryResult(artifact.memoryResult),
     final: {
       ...artifact.final,
       tail: artifact.final.tail.map(redactMessage),
@@ -1136,9 +1243,17 @@ function runSelfTest() {
   );
   const multiTopicRequiredTerms = scenarioMemoryRequiredTerms(runId, 'multi-topic');
   assertSelfTest(
-    multiTopicRequiredTerms.includes(marker(runId, 'LRU_TTL_EVICTION')) &&
-      multiTopicRequiredTerms.includes(marker(runId, 'IDEMPOTENCY_RETRY_BACKOFF')),
-    'multi-topic memory verification should require early and late source markers',
+    multiTopicRequiredTerms.includes('LEFT JOIN') &&
+      multiTopicRequiredTerms.includes('bounded exponential backoff') &&
+      !multiTopicRequiredTerms.includes(marker(runId, 'SQL_LEFT_JOIN_WINDOW')),
+    'multi-topic broad memory verification should focus on semantic recall',
+  );
+  const multiTopicPhases = scenarioMemoryCheckPhases(runId, 'multi-topic');
+  assertSelfTest(multiTopicPhases.length === 5, 'multi-topic memory verification should use broad and exact phases');
+  assertSelfTest(
+    multiTopicPhases.some((phase) => phase.requiredTerms.includes(marker(runId, 'SQL_LEFT_JOIN_WINDOW'))) &&
+      multiTopicPhases.some((phase) => phase.requiredTerms.includes(marker(runId, 'REACT_STALE_CLOSURE_MEMO'))),
+    'multi-topic exact phases should verify source markers separately',
   );
   console.log('[long-interview] self-test ok');
 }
@@ -1225,13 +1340,14 @@ async function main() {
   let memoryResult = null;
   if (options.verifyMemory) {
     const state = await getState(options);
-    const requiredTerms = scenarioMemoryRequiredTerms(runId, options.scenario);
     console.log('[long-interview] verifying backend memory retrieval');
-    memoryResult = await runMemoryContextPhase(options, runId, state.memory?.sessionId, requiredTerms);
-    const icon = memoryResult.ok ? '✅' : '❌';
-    console.log(
-      `${icon} memory: ${memoryResult.checks.map((check) => `${check.term}=${check.ok ? 'ok' : 'miss'}`).join(', ')}`,
-    );
+    memoryResult = await runMemoryChecks(options, runId, state.memory?.sessionId);
+    for (const phase of memoryResult.phases) {
+      const icon = phase.ok ? '✅' : '❌';
+      console.log(
+        `${icon} memory ${phase.label}: ${phase.checks.map((check) => `${check.term}=${check.ok ? 'ok' : 'miss'}`).join(', ')}`,
+      );
+    }
   }
 
   const final = await getState(options);
