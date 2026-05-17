@@ -2952,6 +2952,26 @@ pub async fn get_output_audio_devices() -> Result<Vec<String>, String> {
     Ok(devices)
 }
 
+const INTERVIEW_ANSWER_STYLE_GUARD: &str = r#"Правила стиля ответа:
+- Начинай сразу с ответа. Не повторяй вопрос пользователя и не пиши заголовки "Вопрос:"/"Ответ:".
+- Запрещено начинать с "Вопрос", "Ответ", заголовка # Ответ, "**Вопрос:**" или краткого пересказа вопроса.
+- Первая строка должна быть содержательным тезисом или буллетом ответа.
+- Не начинай с фраз вроде "Понял", "Конечно", "Хорошо" - сразу давай содержательный ответ."#;
+
+fn with_interview_answer_style_guard(system_prompt: String) -> String {
+    if system_prompt.contains("Не повторяй вопрос пользователя")
+        || system_prompt.contains("Не повторяй \"ЗАПРОС:\"")
+    {
+        system_prompt
+    } else {
+        format!(
+            "{}\n\n{}",
+            system_prompt.trim_end(),
+            INTERVIEW_ANSWER_STYLE_GUARD
+        )
+    }
+}
+
 /// Запускает стриминг-ответ Haiku (Anthropic) по текущему тексту.
 ///
 /// Возвращает `request_id`, а прогресс стриминга приходит через события:
@@ -3053,6 +3073,10 @@ pub async fn start_haiku_stream(
 4) Возможно в вопросах не будет "?". Ты должен понимать где вопросы.
 
 Формат ответа:
+- Начинай сразу с ответа. Не повторяй вопрос пользователя и не пиши заголовки "Вопрос:"/"Ответ:".
+- Запрещено начинать с "Вопрос", "Ответ", заголовка # Ответ, "**Вопрос:**" или краткого пересказа вопроса.
+- Первая строка должна быть содержательным тезисом или буллетом ответа.
+- Не начинай с фраз вроде "Понял", "Конечно", "Хорошо" - сразу давай содержательный ответ.
 - Сначала 3–7 буллетов с ответом (каждый пункт начинай с "- ").
 - Затем (если нужно) короткий пример кода.
 - Не пересказывай весь контекст и не цитируй теги "ОС:"/"МИКРОФОН:"/"ПОМОЩНИК:".
@@ -3090,6 +3114,7 @@ pub async fn start_haiku_stream(
             }
         })
         .unwrap_or_else(|| default_system_prompt.to_string());
+    let system_prompt = with_interview_answer_style_guard(system_prompt);
 
     let model = match provider {
         crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_MODEL")
@@ -3696,7 +3721,9 @@ fn build_anthropic_chat_user_content(text: &str, images: &[LlmImageInput]) -> se
 
 #[cfg(test)]
 mod ai_prompt_payload_tests {
-    use super::{build_anthropic_chat_user_content, LlmImageInput};
+    use super::{
+        build_anthropic_chat_user_content, with_interview_answer_style_guard, LlmImageInput,
+    };
 
     fn image(media_type: &str, data_base64: &str) -> LlmImageInput {
         LlmImageInput {
@@ -3731,6 +3758,35 @@ mod ai_prompt_payload_tests {
         );
 
         assert_eq!(payload, serde_json::json!("ЗАПРОС: explain"));
+    }
+
+    #[test]
+    fn interview_answer_style_guard_appends_to_custom_prompts() {
+        let prompt = with_interview_answer_style_guard("custom interview prompt".to_string());
+
+        assert!(prompt.contains("custom interview prompt"));
+        assert!(prompt.contains("Начинай сразу с ответа"));
+        assert!(prompt.contains("Не повторяй вопрос пользователя"));
+        assert!(prompt.contains("\"Вопрос:\"/\"Ответ:\""));
+        assert!(prompt.contains("Запрещено начинать с \"Вопрос\""));
+    }
+
+    #[test]
+    fn interview_answer_style_guard_does_not_duplicate_existing_rule() {
+        let prompt = with_interview_answer_style_guard(
+            "custom\nНе повторяй вопрос пользователя и отвечай кратко".to_string(),
+        );
+
+        assert_eq!(prompt.matches("Не повторяй вопрос пользователя").count(), 1);
+    }
+
+    #[test]
+    fn interview_answer_style_guard_accepts_chat_request_rule() {
+        let prompt =
+            with_interview_answer_style_guard("custom\nНе повторяй \"ЗАПРОС:\"".to_string());
+
+        assert_eq!(prompt.matches("Не повторяй \"ЗАПРОС:\"").count(), 1);
+        assert!(!prompt.contains("Правила стиля ответа"));
     }
 }
 
@@ -3853,6 +3909,10 @@ pub async fn start_haiku_chat_stream(
 3) Если данных недостаточно — задай 1 уточняющий вопрос.
 
 Формат ответа:
+- Начинай сразу с ответа. Не повторяй "ЗАПРОС:" и не пиши заголовки "Вопрос:"/"Ответ:".
+- Запрещено начинать с "Вопрос", "Ответ", заголовка # Ответ, "**Вопрос:**" или краткого пересказа вопроса.
+- Первая строка должна быть содержательным тезисом или буллетом ответа.
+- Не начинай с фраз вроде "Понял", "Конечно", "Хорошо" - сразу давай содержательный ответ.
 - Сначала 3–7 буллетов с ответом (каждый пункт начинай с "- ").
 - Затем (если нужно) короткий пример кода.
 
@@ -3884,6 +3944,7 @@ pub async fn start_haiku_chat_stream(
             }
         })
         .unwrap_or_else(|| default_system_prompt.to_string());
+    let system_prompt = with_interview_answer_style_guard(system_prompt);
 
     let model = match provider {
         crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_MODEL")
@@ -4656,6 +4717,7 @@ pub async fn start_code_explain_stream(
         .filter(|v| !v.is_empty())
         .or_else(|| std::env::var("LLM_CODE_EXPLAIN_SYSTEM_PROMPT").ok())
         .unwrap_or_else(|| default_system_prompt.to_string());
+    let system_prompt = with_interview_answer_style_guard(system_prompt);
 
     let model = match provider {
         crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_MODEL")
