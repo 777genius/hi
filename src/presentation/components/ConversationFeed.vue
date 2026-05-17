@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, useSlots, wa
 import type { ConversationFeedMessage } from '../conversationFeed';
 import { renderMarkdownToSafeHtml } from '@/utils/markdown';
 import { highlightMessage, highlightRawCodeBlock, messageHasCode } from '@/utils/codeHighlight';
-import { toggleCodeBlockCollapseFromTarget } from '../feedCodeBlocks';
+import { isCodeBlockExpandedFromTarget, toggleCodeBlockCollapseFromTarget } from '../feedCodeBlocks';
 
 type HighlightEntry = { sourceText: string; html: string; expanded: boolean };
 type HighlightCandidate = { id: string; text: string; forceCode: boolean; expanded: boolean };
@@ -292,6 +292,10 @@ function onScrollClickCapture(event: MouseEvent): void {
   }
 
   if (toggleCodeBlockCollapseFromTarget(event.target)) {
+    const message = messageFromTarget(event.target);
+    if (message && isCodeBlockExpandedFromTarget(event.target)) {
+      expandMessage(message);
+    }
     event.preventDefault();
     event.stopPropagation();
     void nextTick(() => {
@@ -1085,6 +1089,12 @@ onUnmounted(() => {
   -webkit-overflow-scrolling: touch;
 }
 
+.chat-markdown :deep(.code-block-collapsible:not(.collapsed)),
+.chat-text-highlighted :deep(.code-block-collapsible:not(.collapsed)) {
+  max-height: none;
+  overflow: visible;
+}
+
 .chat-markdown :deep(.code-block-collapsible pre),
 .chat-text-highlighted :deep(.code-block-collapsible .shiki) {
   padding-bottom: 44px;
@@ -1107,6 +1117,10 @@ onUnmounted(() => {
   position: sticky;
   bottom: 0;
   z-index: 2;
+}
+
+.chat-markdown :deep(.code-block-collapsible:not(.collapsed) .code-block-toggle) {
+  bottom: var(--chat-sticky-footer-bottom);
 }
 
 .chat-markdown :deep(.code-block-toggle:hover) {
@@ -1200,28 +1214,14 @@ onUnmounted(() => {
   z-index: 2;
 }
 
-.chat-row.focus-copy .chat-text-highlighted :deep(.code-block-collapsible:not(.collapsed) .code-block-toggle) {
+.chat-text-highlighted :deep(.code-block-collapsible:not(.collapsed) .code-block-toggle) {
   bottom: var(--chat-sticky-footer-bottom);
-  left: 0;
-  width: 42px;
-  height: 42px;
-  min-height: 42px;
-  padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 999px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
 }
 
 .chat-row.focus-copy .chat-text-highlighted :deep(.code-block-collapsible.collapsed .code-block-toggle) {
   position: static;
   bottom: auto;
   left: auto;
-}
-
-.chat-row.focus-copy .chat-text-highlighted :deep(.code-block-collapsible:not(.collapsed) .code-block-toggle::before) {
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
 }
 
 .chat-text-highlighted :deep(.code-block-toggle:hover) {
@@ -1240,11 +1240,6 @@ onUnmounted(() => {
 :global(.theme-light) .chat-text-highlighted :deep(.code-block-toggle:hover) {
   background: rgba(241, 245, 249, 0.96);
   color: rgba(15, 23, 42, 0.88);
-}
-
-:global(.theme-light) .chat-row.focus-copy .chat-text-highlighted :deep(.code-block-collapsible:not(.collapsed) .code-block-toggle) {
-  border-color: rgba(15, 23, 42, 0.14);
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
 }
 
 .chat-text-highlighted :deep(.collapsed .code-block-toggle::before) {

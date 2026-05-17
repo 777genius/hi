@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it } from 'vitest';
-import { toggleCodeBlockCollapseFromTarget } from './feedCodeBlocks';
+import { isCodeBlockExpandedFromTarget, toggleCodeBlockCollapseFromTarget } from './feedCodeBlocks';
 
 describe('toggleCodeBlockCollapseFromTarget', () => {
   it('toggles collapsed state from a code-block toggle button', () => {
@@ -17,11 +17,13 @@ describe('toggleCodeBlockCollapseFromTarget', () => {
     expect(inner).toBeTruthy();
     expect(block).toBeTruthy();
     expect(block?.classList.contains('collapsed')).toBe(true);
+    expect(isCodeBlockExpandedFromTarget(inner)).toBe(false);
 
     const handled = toggleCodeBlockCollapseFromTarget(inner);
 
     expect(handled).toBe(true);
     expect(block?.classList.contains('collapsed')).toBe(false);
+    expect(isCodeBlockExpandedFromTarget(inner)).toBe(true);
   });
 
   it('returns false for unrelated targets', () => {

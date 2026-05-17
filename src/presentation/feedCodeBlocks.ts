@@ -17,14 +17,23 @@ function resolveElementTarget(target: EventTarget | null): Element | null {
   return null;
 }
 
-export function toggleCodeBlockCollapseFromTarget(target: EventTarget | null): boolean {
+function codeBlockFromTarget(target: EventTarget | null): Element | null {
   const element = resolveElementTarget(target);
-  if (!element) return false;
+  if (!element) return null;
 
   const toggle = element.closest('.code-block-toggle');
-  if (!toggle) return false;
+  if (!toggle) return null;
 
-  const block = toggle.closest('.code-block-collapsible');
+  return toggle.closest('.code-block-collapsible');
+}
+
+export function isCodeBlockExpandedFromTarget(target: EventTarget | null): boolean {
+  const block = codeBlockFromTarget(target);
+  return !!block && !block.classList.contains('collapsed');
+}
+
+export function toggleCodeBlockCollapseFromTarget(target: EventTarget | null): boolean {
+  const block = codeBlockFromTarget(target);
   if (!block) return false;
 
   block.classList.toggle('collapsed');
