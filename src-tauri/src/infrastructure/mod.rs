@@ -8,8 +8,10 @@ pub mod embedded_keys; // API ключи встроенные в build
 pub mod factory;
 pub mod focus_copy_helper;
 pub mod hotkey; // Нормализация/миграция хоткеев
+pub mod interview_memory_session_store;
 pub mod llm;
 pub mod llm_factory;
+pub mod local_interview_memory;
 pub mod microphone_mute;
 pub mod models;
 /// Infrastructure layer - contains concrete implementations of domain interfaces
@@ -21,4 +23,7 @@ pub use auth_store::{AuthSession, AuthStore, AuthStoreData, AuthUser};
 pub use clipboard::copy_to_clipboard;
 pub use config_store::ConfigStore;
 pub use factory::*;
+pub use interview_memory_session_store::{
+    ActiveInterviewMemorySession, InterviewMemorySessionStore,
+};
 pub use llm_factory::DefaultLlmProviderFactory;

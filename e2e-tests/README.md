@@ -87,13 +87,33 @@ VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voic
 
 `INTERVIEW_MEMORY_MODE=active_context` and `INTERVIEW_MEMORY_ENABLED=1` are explicit equivalents of the default. Lower modes are available for canaries: `shadow_ingest` stores chunks without prompt impact, `shadow_retrieve` enables retrieval checks without prompt impact, and `INTERVIEW_MEMORY_FORCE_DISABLED=true` is the emergency kill switch. `INTERVIEW_MEMORY_MODE=disabled`, `INTERVIEW_MEMORY_ENABLED=false` or `INTERVIEW_MEMORY_ACTIVE_CONTEXT=false` disable the default. The Settings switch writes `AppConfig.interview_memory_enabled=false`, which also resolves the desktop bridge to `disabled` at runtime without restart. `INTERVIEW_MEMORY_FORCE_LOCAL_ONLY=true` avoids backend memory calls and keeps only the minimal local prompt fallback.
 
-Для local memory backend canary, когда STT остаётся на production websocket, а `/api/v1/interview-memory/*` идёт в локальный backend:
+Для local Memory Platform canary, когда STT остаётся на production websocket, а память идёт в новый локальный memory server:
 
 ```bash
-INTERVIEW_MEMORY_AUTH_TOKEN="<local-user-jwt>" INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080 VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+cd /Users/belief/dev/projects/ai/memory-platform
+docker compose up -d memory_postgres memory_qdrant memory_neo4j
+MEMORY_AUTO_CREATE_SCHEMA=true MEMORY_SERVICE_TOKEN=local-dev-token .venv/bin/python -m memory_server.main
+
+cd /Users/belief/dev/projects/HackInterview
+INTERVIEW_MEMORY_API_VARIANT=platform INTERVIEW_MEMORY_AUTH_TOKEN="local-dev-token" INTERVIEW_MEMORY_API_URL=http://127.0.0.1:7788 VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
 ```
 
-`INTERVIEW_MEMORY_AUTH_TOKEN` намеренно имеет приоритет только для memory bridge. Это позволяет гонять local backend memory E2E без замены основного app auth/provider flow.
+То же самое через штатные scripts:
+
+```bash
+pnpm memory-platform:up
+pnpm memory-platform:server
+pnpm copy-helper:brave:restart-cdp
+pnpm tauri:dev:memory-platform
+```
+
+`INTERVIEW_MEMORY_API_VARIANT=platform` форсирует новый `/v1` контракт (`/v1/episodes`, `/v1/context`). `INTERVIEW_MEMORY_AUTH_TOKEN` намеренно имеет приоритет только для memory bridge. Это позволяет гонять Memory Platform E2E без замены основного app auth/provider flow.
+
+Старый compatibility backend всё ещё можно проверить явно:
+
+```bash
+INTERVIEW_MEMORY_API_VARIANT=legacy INTERVIEW_MEMORY_AUTH_TOKEN="<local-user-jwt>" INTERVIEW_MEMORY_API_URL=http://127.0.0.1:8080 VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site FOCUS_COPY_ENABLE_BROWSER_CDP=1 pnpm tauri dev
+```
 
 Для полного local canary, где auth, STT websocket и memory routes идут в локальный backend, сначала залогинь desktop app в local backend или положи валидную native-сессию в `~/Library/Application Support/HackInterview/auth_store.json`, затем запускай:
 
@@ -135,7 +155,59 @@ Production/staging canary для уже задеплоенного backend memor
 pnpm e2e:memory-canary -- --api-url https://api.voicetext.site
 ```
 
-Canary берёт JWT из `INTERVIEW_MEMORY_AUTH_TOKEN`, `--auth-token-file` или native `~/Library/Application Support/HackInterview/auth_store.json`, создаёт отдельную synthetic session, проверяет ingest/context/duplicate/delete/status и пишет production-safe artifact в `.e2e-artifacts/interview-memory-canary/`. Raw transcript/code/prompt text в artifact не сохраняется, а скрипт падает, если видит утечку контрольных raw-фрагментов.
+Для нового Memory Platform API:
+
+```bash
+INTERVIEW_MEMORY_API_VARIANT=platform pnpm e2e:memory-canary -- --api-url http://127.0.0.1:7788 --auth-token local-dev-token
+```
+
+Или короче:
+
+```bash
+pnpm e2e:memory-canary:platform
+```
+
+Canary берёт JWT или service token из `INTERVIEW_MEMORY_AUTH_TOKEN`, `--auth-token-file` или native `~/Library/Application Support/HackInterview/auth_store.json`, создаёт отдельную synthetic session, проверяет ingest/context/duplicate/delete/status и пишет production-safe artifact в `.e2e-artifacts/interview-memory-canary/`. Raw transcript/code/prompt text в artifact не сохраняется, а скрипт падает, если видит утечку контрольных raw-фрагментов.
+
+Импорт большого текстового документа в текущую память desktop companion:
+
+```bash
+pnpm memory:import-document -- --file ./profile.txt --use-companion-session
+```
+
+Для импорта в известную session:
+
+```bash
+pnpm memory:import-document -- --file ./profile.txt --session-id <memory-session-uuid>
+```
+
+Скрипт режет документ на memory events, по умолчанию ставит `metadata.pinned=true` и пишет через `/api/v1/interview-memory/ingest`. Без `--use-companion-session`, `--session-id` или `--new-session` он не стартует, чтобы случайно не импортировать факты в session, которую desktop app потом не будет читать.
+
+Проверка, что большой документ действительно вспоминается через backend retrieval:
+
+```bash
+pnpm e2e:memory-document-recall
+```
+
+По умолчанию тест генерирует большой synthetic document, импортирует его в isolated session, делает несколько topic-specific `/api/v1/interview-memory/context` запросов и проверяет exact control terms из ранних/средних/поздних частей документа. Для реального документа нужен checks-файл:
+
+```bash
+pnpm e2e:memory-document-recall -- --document-file ./profile.txt --checks-file ./profile.checks.json
+```
+
+Формат `profile.checks.json`:
+
+```json
+[
+  {
+    "label": "style",
+    "query": "Какие правила ответа указаны в документе?",
+    "requiredTerms": ["коротко", "по-русски"]
+  }
+]
+```
+
+Важно: E2E не доказывает каждую строку произвольного документа автоматически. Он доказывает все явно заданные `requiredTerms`; для реального профиля добавляй checks на ключевые факты/правила.
 
 Что делает тест:
 

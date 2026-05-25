@@ -34,7 +34,15 @@
     "e2e:companion-voice-interview": "node e2e-tests/companion-voice-interview.mjs",
     "e2e:companion-long-interview": "node e2e-tests/companion-long-interview.mjs",
     "e2e:memory-canary": "node e2e-tests/interview-memory-canary.mjs",
-    "e2e:prepare-local-memory-auth": "node e2e-tests/prepare-local-memory-auth.mjs"
+    "e2e:prepare-local-memory-auth": "node e2e-tests/prepare-local-memory-auth.mjs",
+    "tauri:dev:memory-platform": "INTERVIEW_MEMORY_API_VARIANT=platform INTERVIEW_MEMORY_API_URL=${INTERVIEW_MEMORY_API_URL:-http://127.0.0.1:7788} INTERVIEW_MEMORY_AUTH_TOKEN=${INTERVIEW_MEMORY_AUTH_TOKEN:-local-dev-token} VITE_API_URL=${VITE_API_URL:-https://api.voicetext.site} VOICE_TO_TEXT_BACKEND_URL=${VOICE_TO_TEXT_BACKEND_URL:-wss://api.voicetext.site} FOCUS_COPY_ENABLE_BROWSER_CDP=1 tauri dev",
+    "memory-platform:up": "cd /Users/belief/dev/projects/ai/memory-platform && docker compose up -d memory_postgres memory_qdrant memory_neo4j",
+    "memory-platform:server": "cd /Users/belief/dev/projects/ai/memory-platform && MEMORY_AUTO_CREATE_SCHEMA=true MEMORY_SERVICE_TOKEN=${MEMORY_SERVICE_TOKEN:-local-dev-token} .venv/bin/python -m memory_server.main",
+    "e2e:memory-canary:platform": "INTERVIEW_MEMORY_API_VARIANT=platform node e2e-tests/interview-memory-canary.mjs --api-url ${INTERVIEW_MEMORY_API_URL:-http://127.0.0.1:7788} --auth-token ${INTERVIEW_MEMORY_AUTH_TOKEN:-local-dev-token}",
+    "e2e:memory-document-recall": "node e2e-tests/interview-memory-document-recall.mjs",
+    "e2e:memory-document-recall:platform": "INTERVIEW_MEMORY_API_VARIANT=platform node e2e-tests/interview-memory-document-recall.mjs --api-url ${INTERVIEW_MEMORY_API_URL:-http://127.0.0.1:7788} --auth-token ${INTERVIEW_MEMORY_AUTH_TOKEN:-local-dev-token}",
+    "memory:import-document": "node e2e-tests/import-memory-document.mjs",
+    "memory:import-document:platform": "INTERVIEW_MEMORY_API_VARIANT=platform node e2e-tests/import-memory-document.mjs --api-url ${INTERVIEW_MEMORY_API_URL:-http://127.0.0.1:7788} --auth-token ${INTERVIEW_MEMORY_AUTH_TOKEN:-local-dev-token}"
   },
   "dependencies": {
     "@mdi/font": "^7.4.47",

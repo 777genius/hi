@@ -33,6 +33,12 @@ function parseArgs(argv) {
     authStorePath:
       process.env.HACKINTERVIEW_AUTH_STORE_PATH ||
       join(homedir(), 'Library/Application Support/HackInterview/auth_store.json'),
+    apiVariant: process.env.INTERVIEW_MEMORY_API_VARIANT || 'legacy',
+    spaceSlug: process.env.INTERVIEW_MEMORY_SPACE_SLUG || 'hackinterview',
+    profileExternalRef:
+      process.env.INTERVIEW_MEMORY_PROFILE_EXTERNAL_REF ||
+      process.env.INTERVIEW_MEMORY_PROFILE_REF ||
+      'default',
     artifactsDir: '.e2e-artifacts/interview-memory-canary',
     keepSession: false,
     contextBudgetChars: Number(process.env.INTERVIEW_MEMORY_CANARY_BUDGET_CHARS || 18_000),
@@ -52,6 +58,9 @@ function parseArgs(argv) {
     else if (arg === '--auth-token') options.authToken = next();
     else if (arg === '--auth-token-file') options.authTokenFile = next();
     else if (arg === '--auth-store-path') options.authStorePath = next();
+    else if (arg === '--api-variant') options.apiVariant = next();
+    else if (arg === '--space-slug') options.spaceSlug = next();
+    else if (arg === '--profile-ref') options.profileExternalRef = next();
     else if (arg === '--artifacts-dir') options.artifactsDir = next();
     else if (arg === '--keep-session') options.keepSession = true;
     else if (arg === '--budget-chars') options.contextBudgetChars = Number(next());
@@ -64,6 +73,7 @@ function parseArgs(argv) {
   }
 
   options.apiUrl = normalizeBaseUrl(options.apiUrl);
+  options.apiVariant = normalizeApiVariant(options.apiVariant);
   options.contextBudgetChars = Math.max(1_000, Math.floor(options.contextBudgetChars || 18_000));
   return options;
 }
@@ -75,7 +85,7 @@ Usage:
   pnpm e2e:memory-canary -- --api-url https://api.voicetext.site
 
 What it checks:
-  - calls production/staging /api/v1/interview-memory/* with a real user JWT;
+  - calls legacy /api/v1/interview-memory/* or Memory Platform /v1/*;
   - creates an isolated synthetic memory session;
   - ingests deterministic code, voice question, constraint, filler, prompt and final AI-answer events;
   - verifies /context retrieves required early and late evidence under budget;
@@ -85,6 +95,9 @@ What it checks:
 
 Useful flags:
   --api-url <url>             Backend URL, default VITE_API_URL/INTERVIEW_MEMORY_API_URL/https://api.voicetext.site.
+  --api-variant <name>        legacy or platform, default INTERVIEW_MEMORY_API_VARIANT/legacy.
+  --space-slug <slug>         Memory Platform space slug, default hackinterview.
+  --profile-ref <ref>         Memory Platform profile external ref, default default.
   --auth-token <token>        Raw bearer token.
   --auth-token-file <path>    Raw token or auth_store.json.
   --auth-store-path <path>    Native Tauri auth store, default ~/Library/Application Support/HackInterview/auth_store.json.
@@ -97,6 +110,13 @@ Useful flags:
 function normalizeBaseUrl(rawUrl) {
   const url = new URL(rawUrl);
   return `${url.protocol}//${url.host}`;
+}
+
+function normalizeApiVariant(value) {
+  const normalized = String(value || 'legacy').trim().toLowerCase();
+  if (['platform', 'v1', 'memory_platform', 'memory-platform'].includes(normalized)) return 'platform';
+  if (['legacy', 'compat', 'compatibility'].includes(normalized)) return 'legacy';
+  throw new Error(`Unknown memory api variant: ${value}`);
 }
 
 async function readJsonIfExists(path) {
@@ -191,6 +211,88 @@ function memoryEvent(sessionId, event) {
       request_scoped: false,
     },
   };
+}
+
+function sourceToSpeaker(source) {
+  if (source === 'ai_response') return 'assistant';
+  if (source === 'system_audio' || source === 'signal') return 'interviewer';
+  if (source === 'microphone' || source === 'manual_prompt') return 'user';
+  return 'unknown';
+}
+
+function sourceToTrustLevel(source) {
+  if (source === 'ai_response') return 'low';
+  if (source === 'focus_copy' || source === 'manual_prompt') return 'high';
+  return 'medium';
+}
+
+function memoryScope(options, sessionId) {
+  return {
+    space_slug: options.spaceSlug,
+    profile_external_ref: options.profileExternalRef,
+    thread_external_ref: sessionId,
+  };
+}
+
+function ingestRequest(options, sessionId, event) {
+  const legacy = memoryEvent(sessionId, event);
+  if (options.apiVariant === 'legacy') return legacy;
+  const sourceExternalId = legacy.event_id || legacy.metadata?.source_event_id || sessionId;
+  return {
+    ...memoryScope(options, sessionId),
+    source_type: legacy.source,
+    source_external_id: sourceExternalId,
+    text: legacy.text,
+    occurred_at: legacy.occurred_at,
+    speaker: sourceToSpeaker(legacy.source),
+    trust_level: sourceToTrustLevel(legacy.source),
+    kind_hint: legacy.kind_hint,
+    language: legacy.language,
+    metadata: legacy.metadata,
+    idempotency_key: sourceExternalId,
+  };
+}
+
+function contextRequest(options, sessionId) {
+  const text = [
+    'Найди контекст интервью по проекту Северный мост.',
+    'Нужны debounceSearch, очередь FIFO не стек, линейная сложность и поздний маркер.',
+  ].join(' ');
+  if (options.apiVariant === 'legacy') {
+    return {
+      session_id: sessionId,
+      context_snapshot_id: `canary-${options.runId}`,
+      current_request: {
+        id: `${options.runId}:request`,
+        label: 'canary_request',
+        text,
+      },
+      budget_max_chars: options.contextBudgetChars,
+      max_memory_candidates: 200,
+      max_memory_results: 32,
+    };
+  }
+  return {
+    ...memoryScope(options, sessionId),
+    query: text,
+    token_budget: Math.max(64, Math.min(16_000, Math.floor(options.contextBudgetChars / 4))),
+    max_facts: 20,
+    max_chunks: 32,
+  };
+}
+
+function contextText(options, payload) {
+  return options.apiVariant === 'platform'
+    ? payload?.data?.rendered_text || ''
+    : payload?.data?.text || '';
+}
+
+function ingestPath(options) {
+  return options.apiVariant === 'platform' ? '/v1/episodes' : '/api/v1/interview-memory/ingest';
+}
+
+function contextPath(options) {
+  return options.apiVariant === 'platform' ? '/v1/context' : '/api/v1/interview-memory/context';
 }
 
 function buildEvents(runId) {
@@ -342,8 +444,8 @@ async function main() {
       const response = await authenticatedFetch(
         options,
         token,
-        '/api/v1/interview-memory/ingest',
-        memoryEvent(sessionId, event),
+        ingestPath(options),
+        ingestRequest(options, sessionId, event),
       );
       ingestResults.push({
         label: event.label,
@@ -361,8 +463,8 @@ async function main() {
     duplicateResult = await authenticatedFetch(
       options,
       token,
-      '/api/v1/interview-memory/ingest',
-      memoryEvent(sessionId, duplicateEvent),
+      ingestPath(options),
+      ingestRequest(options, sessionId, duplicateEvent),
     );
     if (!duplicateResult.ok) {
       throw new Error(`Duplicate ingest failed: ${duplicateResult.status} ${JSON.stringify(duplicateResult.payload)}`);
@@ -375,38 +477,37 @@ async function main() {
       );
     }
 
-    contextResult = await authenticatedFetch(options, token, '/api/v1/interview-memory/context', {
-      session_id: sessionId,
-      context_snapshot_id: `canary-${options.runId}`,
-      current_request: {
-        id: `${options.runId}:request`,
-        label: 'canary_request',
-        text: [
-          'Найди контекст интервью по проекту Северный мост.',
-          'Нужны debounceSearch, очередь FIFO не стек, линейная сложность и поздний маркер.',
-        ].join(' '),
-      },
-      budget_max_chars: options.contextBudgetChars,
-      max_memory_candidates: 200,
-      max_memory_results: 32,
-    });
+    contextResult = await authenticatedFetch(
+      options,
+      token,
+      contextPath(options),
+      contextRequest(options, sessionId),
+    );
     if (!contextResult.ok) {
       throw new Error(`Context failed: ${contextResult.status} ${JSON.stringify(contextResult.payload)}`);
     }
 
-    const checks = checkContext(contextResult.payload?.data?.text || '');
+    const checks = checkContext(contextText(options, contextResult.payload));
     const allChecksOk = checks.every((check) => check.ok);
     if (!allChecksOk) {
       throw new Error(`Context checks failed: ${checks.map((check) => `${check.label}=${check.ok}`).join(', ')}`);
     }
 
-    statusBeforeDelete = await authenticatedFetch(
-      options,
-      token,
-      `/api/v1/interview-memory/sessions/${sessionId}/status`,
-      undefined,
-      'GET',
-    );
+    statusBeforeDelete =
+      options.apiVariant === 'platform'
+        ? await authenticatedFetch(
+            options,
+            token,
+            '/v1/thread-memory/status',
+            memoryScope(options, sessionId),
+          )
+        : await authenticatedFetch(
+            options,
+            token,
+            `/api/v1/interview-memory/sessions/${sessionId}/status`,
+            undefined,
+            'GET',
+          );
     if (!statusBeforeDelete.ok) {
       throw new Error(`Status before delete failed: ${statusBeforeDelete.status}`);
     }
@@ -416,24 +517,41 @@ async function main() {
     }
 
     if (!options.keepSession) {
-      deleteResult = await authenticatedFetch(
-        options,
-        token,
-        `/api/v1/interview-memory/sessions/${sessionId}`,
-        undefined,
-        'DELETE',
-      );
+      deleteResult =
+        options.apiVariant === 'platform'
+          ? await authenticatedFetch(
+              options,
+              token,
+              '/v1/thread-memory',
+              memoryScope(options, sessionId),
+              'DELETE',
+            )
+          : await authenticatedFetch(
+              options,
+              token,
+              `/api/v1/interview-memory/sessions/${sessionId}`,
+              undefined,
+              'DELETE',
+            );
       if (!deleteResult.ok) {
         throw new Error(`Delete failed: ${deleteResult.status}`);
       }
 
-      statusAfterDelete = await authenticatedFetch(
-        options,
-        token,
-        `/api/v1/interview-memory/sessions/${sessionId}/status`,
-        undefined,
-        'GET',
-      );
+      statusAfterDelete =
+        options.apiVariant === 'platform'
+          ? await authenticatedFetch(
+              options,
+              token,
+              '/v1/thread-memory/status',
+              memoryScope(options, sessionId),
+            )
+          : await authenticatedFetch(
+              options,
+              token,
+              `/api/v1/interview-memory/sessions/${sessionId}/status`,
+              undefined,
+              'GET',
+            );
       if (!statusAfterDelete.ok) {
         throw new Error(`Status after delete failed: ${statusAfterDelete.status}`);
       }
@@ -455,6 +573,7 @@ async function main() {
       createdAt: new Date().toISOString(),
       startedAt,
       apiHost: new URL(options.apiUrl).host,
+      apiVariant: options.apiVariant,
       runId: options.runId,
       sessionId,
       keptSession: options.keepSession,
@@ -473,12 +592,14 @@ async function main() {
       context: {
         ...responseSummary(contextResult),
         checks,
-        budgetUsed: contextResult.payload?.data?.artifact?.budget_used,
-        budgetTotal: contextResult.payload?.data?.artifact?.budget_total,
-        criticalBudgetPressure: contextResult.payload?.data?.artifact?.critical_budget_pressure,
-        sectionCount: contextResult.payload?.data?.artifact?.sections?.length ?? 0,
-        includedChunks: contextResult.payload?.data?.artifact?.included_chunks?.length ?? 0,
-        droppedChunks: contextResult.payload?.data?.artifact?.dropped_chunks?.length ?? 0,
+        itemCount: contextResult.payload?.data?.items?.length ?? null,
+        budgetUsed: contextResult.payload?.data?.artifact?.budget_used ?? null,
+        budgetTotal: contextResult.payload?.data?.artifact?.budget_total ?? null,
+        criticalBudgetPressure:
+          contextResult.payload?.data?.artifact?.critical_budget_pressure ?? null,
+        sectionCount: contextResult.payload?.data?.artifact?.sections?.length ?? null,
+        includedChunks: contextResult.payload?.data?.artifact?.included_chunks?.length ?? null,
+        droppedChunks: contextResult.payload?.data?.artifact?.dropped_chunks?.length ?? null,
       },
       statusBeforeDelete: statusBeforeDelete
         ? {
@@ -527,13 +648,23 @@ async function main() {
     );
   } catch (error) {
     if (!options.keepSession) {
-      await authenticatedFetch(
-        options,
-        token,
-        `/api/v1/interview-memory/sessions/${sessionId}`,
-        undefined,
-        'DELETE',
-      ).catch(() => {});
+      const cleanup =
+        options.apiVariant === 'platform'
+          ? authenticatedFetch(
+              options,
+              token,
+              '/v1/thread-memory',
+              memoryScope(options, sessionId),
+              'DELETE',
+            )
+          : authenticatedFetch(
+              options,
+              token,
+              `/api/v1/interview-memory/sessions/${sessionId}`,
+              undefined,
+              'DELETE',
+            );
+      await cleanup.catch(() => {});
     }
     throw error;
   }

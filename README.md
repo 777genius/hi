@@ -34,6 +34,24 @@ pnpm install
 pnpm tauri:dev
 ```
 
+### Запуск с новой Memory Platform
+
+Основной локальный сценарий для persistent memory:
+
+```bash
+pnpm memory-platform:up
+pnpm memory-platform:server
+```
+
+В другом терминале:
+
+```bash
+pnpm copy-helper:brave:restart-cdp
+pnpm tauri:dev:memory-platform
+```
+
+В этом режиме STT остаётся на production backend, а память идёт в Memory Platform по `/v1/episodes` и `/v1/context`.
+
 ### Запуск с продовым backend на Render и Brave CDP
 
 Для проверки desktop frontend на продовом backend с включённым real Brave/CDP focus-copy:

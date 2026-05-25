@@ -1,0 +1,21 @@
+services:
+  memory-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: hackinterview-memory-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hackinterview_memory
+      POSTGRES_USER: hackinterview
+      POSTGRES_PASSWORD: hackinterview
+    ports:
+      - "54329:5432"
+    volumes:
+      - hackinterview_memory_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hackinterview -d hackinterview_memory"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  hackinterview_memory_pgdata:

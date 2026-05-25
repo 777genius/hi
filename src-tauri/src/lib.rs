@@ -403,6 +403,15 @@ pub fn run() {
                             log::warn!("Failed to load auth store: {}", e);
                         }
                     }
+
+                    if let Err(e) =
+                        crate::presentation::interview_memory_bridge::initialize_persistent_session(
+                            state.inner(),
+                        )
+                        .await
+                    {
+                        log::warn!("Failed to initialize persistent interview memory session: {}", e);
+                    }
                 });
             }
 

@@ -149,7 +149,7 @@ pub struct AppState {
     /// Generation для invalidation старых AI / clear semantics.
     pub companion_conversation_generation: Arc<AtomicU64>,
 
-    /// Backend interview memory session. Reset on context/history clear so cleared context does not return.
+    /// Backend interview memory session. Loaded from persistent profile storage on startup.
     pub companion_memory_session_id: Arc<RwLock<uuid::Uuid>>,
 
     /// Last interview memory bridge diagnostics for companion/E2E observability.
