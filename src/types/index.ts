@@ -95,6 +95,15 @@ export interface MicrophoneMuteStatePayload {
   detail?: string;
 }
 
+export interface SignalMessagePayload {
+  id: string;
+  platform: 'signal';
+  sender: string;
+  conversationId?: string | null;
+  text: string;
+  timestamp: number;
+}
+
 export interface HaikuDeltaPayload {
   request_id: string;
   delta: string;
@@ -149,6 +158,7 @@ export const EVENT_TRANSCRIPTION_FINAL = 'transcription:final';
 export const EVENT_RECORDING_STATUS = 'recording:status';
 export const EVENT_TRANSCRIPTION_ERROR = 'transcription:error';
 export const EVENT_CONNECTION_QUALITY = 'connection:quality';
+export const EVENT_SIGNAL_MESSAGE = 'signal:message';
 export const EVENT_HAIKU_DELTA = 'haiku:delta';
 export const EVENT_HAIKU_DONE = 'haiku:done';
 export const EVENT_HAIKU_ERROR = 'haiku:error';

@@ -8,6 +8,7 @@ import {
 } from '@/windowing/stateSync';
 import type { RevisionSyncHandle } from '@/windowing/stateSync';
 import type { AppConfigSnapshotData, TauriSnapshotEnvelope } from '@/windowing/stateSync';
+import type { AnswerAudience, AnswerImperfectionLevel, AnswerLanguage } from '@/features/settings/domain/types';
 
 export const useAppConfigStore = defineStore('appConfig', () => {
   const revision = ref('0');
@@ -21,6 +22,10 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const selectedAudioDevice = ref('');
   const selectedOutputAudioDevice = ref('');
   const interviewMemoryEnabled = ref(true);
+  const answerLanguage = ref<AnswerLanguage>('ru');
+  const answerAudience = ref<AnswerAudience>('internal');
+  const naturalAnswerStyleEnabled = ref(false);
+  const answerImperfectionLevel = ref<AnswerImperfectionLevel>('off');
 
   let syncHandle: RevisionSyncHandle | null = null;
 
@@ -34,6 +39,10 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     selectedAudioDevice.value = data.selected_audio_device ?? '';
     selectedOutputAudioDevice.value = data.selected_output_audio_device ?? '';
     interviewMemoryEnabled.value = data.interview_memory_enabled ?? true;
+    answerLanguage.value = data.answer_language ?? 'ru';
+    answerAudience.value = data.answer_audience ?? 'internal';
+    naturalAnswerStyleEnabled.value = data.natural_answer_style_enabled ?? false;
+    answerImperfectionLevel.value = data.answer_imperfection_level ?? 'off';
     isLoaded.value = true;
   }
 
@@ -89,6 +98,10 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     selectedAudioDevice,
     selectedOutputAudioDevice,
     interviewMemoryEnabled,
+    answerLanguage,
+    answerAudience,
+    naturalAnswerStyleEnabled,
+    answerImperfectionLevel,
 
     hasSelectedAudioDevice: computed(() => Boolean(selectedAudioDevice.value)),
     hasSelectedOutputAudioDevice: computed(() => Boolean(selectedOutputAudioDevice.value)),

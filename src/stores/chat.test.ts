@@ -305,6 +305,52 @@ describe('chat store (selection + context)', () => {
     );
   });
 
+  it('Signal messages are treated as incoming interviewer context', async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    const store = useChatStore();
+    await store.initialize();
+
+    const signalCb = listenMock.mock.calls.find((call) => call[0] === 'signal:message')?.[1] as
+      | ((event: any) => void)
+      | undefined;
+
+    signalCb?.({
+      payload: {
+        id: 'signal:abc',
+        platform: 'signal',
+        sender: '+111',
+        conversationId: '+111',
+        text: 'Signal question',
+        timestamp: 1_234,
+      },
+    });
+
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue('r-signal');
+
+    await store.requestHaikuFromAnchor();
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      'start_haiku_stream',
+      expect.objectContaining({
+        text: 'ОС: Signal question',
+        companionMeta: expect.objectContaining({
+          insertAfterId: 'signal:abc',
+        }),
+        memoryContextEvidence: expect.objectContaining({
+          recentTimeline: [
+            expect.objectContaining({
+              id: 'signal:abc',
+              label: 'signal',
+              text: 'Signal question',
+            }),
+          ],
+        }),
+      })
+    );
+  });
+
   it('forwards OpenAI Responses web search toggle to assistant requests', async () => {
     transcriptionProxy.finalUtterances.push({ id: 'stt:1:1:hi', sessionId: 1, text: 'hi', timestamp: 1 });
     invokeMock.mockResolvedValueOnce('r-web-1').mockResolvedValueOnce('r-web-2');
@@ -631,6 +677,55 @@ describe('chat store (selection + context)', () => {
       text: 'hello world',
     });
     expect(store.haikuMessages[0]?.candidates).toBeUndefined();
+  });
+
+  it('keeps cancelled haiku request ignored after companion snapshot hydration', async () => {
+    const store = useChatStore();
+    await store.initialize();
+
+    const startCb = listenMock.mock.calls.find((call) => call[0] === 'haiku:candidate-start')?.[1] as
+      | ((event: any) => void)
+      | undefined;
+    const deltaCb = listenMock.mock.calls.find((call) => call[0] === 'haiku:delta')?.[1] as
+      | ((event: any) => void)
+      | undefined;
+    const doneCb = listenMock.mock.calls.find((call) => call[0] === 'haiku:done')?.[1] as
+      | ((event: any) => void)
+      | undefined;
+
+    startCb?.({
+      payload: {
+        request_id: 'haiku:cancelled',
+        candidate_id: 'openai_responses',
+        candidate_label: 'OpenAI',
+        provider: 'openai_responses',
+        model: 'gpt-test',
+      },
+    });
+    deltaCb?.({
+      payload: {
+        request_id: 'haiku:cancelled',
+        candidate_id: 'openai_responses',
+        delta: 'partial',
+      },
+    });
+    expect(store.haikuMessages[0]?.text).toBe('partial');
+    expect(store.isHaikuStreaming).toBe(true);
+
+    store.cancelActiveHaikuStreams();
+    store.hydrateFromCompanionSnapshot(companionSnapshot([]));
+
+    deltaCb?.({
+      payload: {
+        request_id: 'haiku:cancelled',
+        candidate_id: 'openai_responses',
+        delta: ' late',
+      },
+    });
+    doneCb?.({ payload: { request_id: 'haiku:cancelled', candidate_id: 'openai_responses' } });
+
+    expect(store.haikuMessages).toHaveLength(0);
+    expect(store.isHaikuStreaming).toBe(false);
   });
 
   it('uses selected assistant candidate text in subsequent context', async () => {

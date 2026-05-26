@@ -16,7 +16,14 @@ import {
   invokeUpdateSttConfig,
 } from '@/windowing/stateSync';
 import { normalizeUiLocale, normalizeUiTheme } from '@/i18n.locales';
-import type { AppTheme, SaveStatus, SettingsState } from '../domain/types';
+import type {
+  AnswerImperfectionLevel,
+  AnswerAudience,
+  AnswerLanguage,
+  AppTheme,
+  SaveStatus,
+  SettingsState,
+} from '../domain/types';
 
 function trimKeyterms(input: string, maxTerms: number): string {
   const terms = input.split(',').map((t) => t.trim()).filter(Boolean);
@@ -43,6 +50,10 @@ export const useSettingsStore = defineStore('settings', () => {
   const autoCopyToClipboard = ref(false);
   const autoPasteText = ref(false);
   const interviewMemoryEnabled = ref(true);
+  const answerLanguage = ref<AnswerLanguage>('ru');
+  const answerAudience = ref<AnswerAudience>('internal');
+  const naturalAnswerStyleEnabled = ref(false);
+  const answerImperfectionLevel = ref<AnswerImperfectionLevel>('off');
   const deepgramKeyterms = ref('');
 
   // Debounce для автосохранения чувствительности (иначе будем спамить invoke при перетаскивании слайдера)
@@ -96,6 +107,10 @@ export const useSettingsStore = defineStore('settings', () => {
     autoCopyToClipboard: autoCopyToClipboard.value,
     autoPasteText: autoPasteText.value,
     interviewMemoryEnabled: interviewMemoryEnabled.value,
+    answerLanguage: answerLanguage.value,
+    answerAudience: answerAudience.value,
+    naturalAnswerStyleEnabled: naturalAnswerStyleEnabled.value,
+    answerImperfectionLevel: answerImperfectionLevel.value,
     deepgramKeyterms: deepgramKeyterms.value,
   }));
 
@@ -311,6 +326,22 @@ export const useSettingsStore = defineStore('settings', () => {
     interviewMemoryEnabled.value = Boolean(value);
   }
 
+  function setAnswerLanguage(value: AnswerLanguage) {
+    answerLanguage.value = value === 'auto' || value === 'ru' ? value : 'en';
+  }
+
+  function setAnswerAudience(value: AnswerAudience) {
+    answerAudience.value = value === 'internal' || value === 'client' ? value : 'auto';
+  }
+
+  function setNaturalAnswerStyleEnabled(value: boolean) {
+    naturalAnswerStyleEnabled.value = Boolean(value);
+  }
+
+  function setAnswerImperfectionLevel(value: AnswerImperfectionLevel) {
+    answerImperfectionLevel.value = value === 'off' ? 'off' : 'light';
+  }
+
   function setAvailableAudioDevices(devices: string[]) {
     availableAudioDevices.value = devices;
   }
@@ -368,6 +399,14 @@ export const useSettingsStore = defineStore('settings', () => {
       setDeepgramKeyterms(state.deepgramKeyterms);
     if (state.interviewMemoryEnabled !== undefined)
       setInterviewMemoryEnabled(state.interviewMemoryEnabled);
+    if (state.answerLanguage !== undefined)
+      setAnswerLanguage(state.answerLanguage);
+    if (state.answerAudience !== undefined)
+      setAnswerAudience(state.answerAudience);
+    if (state.naturalAnswerStyleEnabled !== undefined)
+      setNaturalAnswerStyleEnabled(state.naturalAnswerStyleEnabled);
+    if (state.answerImperfectionLevel !== undefined)
+      setAnswerImperfectionLevel(state.answerImperfectionLevel);
     // auto-copy/auto-paste принудительно выключены
     autoCopyToClipboard.value = false;
     autoPasteText.value = false;
@@ -389,6 +428,10 @@ export const useSettingsStore = defineStore('settings', () => {
     autoCopyToClipboard,
     autoPasteText,
     interviewMemoryEnabled,
+    answerLanguage,
+    answerAudience,
+    naturalAnswerStyleEnabled,
+    answerImperfectionLevel,
     deepgramKeyterms,
     availableAudioDevices,
     availableOutputAudioDevices,
@@ -421,6 +464,10 @@ export const useSettingsStore = defineStore('settings', () => {
     setAutoCopyToClipboard,
     setAutoPasteText,
     setInterviewMemoryEnabled,
+    setAnswerLanguage,
+    setAnswerAudience,
+    setNaturalAnswerStyleEnabled,
+    setAnswerImperfectionLevel,
     setAvailableAudioDevices,
     setAvailableOutputAudioDevices,
     setAccessibilityPermission,

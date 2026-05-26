@@ -21,6 +21,10 @@ export type UpdateAppConfigInvokeArgs = Partial<{
   selectedAudioDevice: string | null;
   selectedOutputAudioDevice: string | null;
   interviewMemoryEnabled: boolean;
+  answerLanguage: 'auto' | 'en' | 'ru';
+  answerAudience: 'auto' | 'internal' | 'client';
+  naturalAnswerStyleEnabled: boolean;
+  answerImperfectionLevel: 'off' | 'light';
 }>;
 
 const ALLOWED_KEYS = new Set([
@@ -31,6 +35,10 @@ const ALLOWED_KEYS = new Set([
   'selectedAudioDevice',
   'selectedOutputAudioDevice',
   'interviewMemoryEnabled',
+  'answerLanguage',
+  'answerAudience',
+  'naturalAnswerStyleEnabled',
+  'answerImperfectionLevel',
 ]);
 
 function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
@@ -61,8 +69,24 @@ function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
       case 'autoCopyToClipboard':
       case 'autoPasteText':
       case 'interviewMemoryEnabled':
+      case 'naturalAnswerStyleEnabled':
         if (typeof v !== 'boolean') {
           throw new Error(`[update_app_config] "${k}" должен быть boolean, получили: ${String(v)}`);
+        }
+        break;
+      case 'answerLanguage':
+        if (!['auto', 'en', 'ru'].includes(String(v))) {
+          throw new Error(`[update_app_config] "${k}" должен быть auto|en|ru, получили: ${String(v)}`);
+        }
+        break;
+      case 'answerAudience':
+        if (!['auto', 'internal', 'client'].includes(String(v))) {
+          throw new Error(`[update_app_config] "${k}" должен быть auto|internal|client, получили: ${String(v)}`);
+        }
+        break;
+      case 'answerImperfectionLevel':
+        if (!['off', 'light'].includes(String(v))) {
+          throw new Error(`[update_app_config] "${k}" должен быть off|light, получили: ${String(v)}`);
         }
         break;
       case 'selectedAudioDevice':

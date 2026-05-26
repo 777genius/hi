@@ -1,0 +1,20 @@
+services:
+  signal-api:
+    image: bbernhard/signal-cli-rest-api:0.99
+    container_name: hackinterview-signal-api
+    restart: unless-stopped
+    environment:
+      MODE: json-rpc-native
+    ports:
+      - "8081:8080"
+    volumes:
+      - hackinterview_signal_cli_data:/home/.local/share/signal-cli
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/v1/about"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  hackinterview_signal_cli_data:

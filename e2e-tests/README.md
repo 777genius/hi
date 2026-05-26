@@ -320,10 +320,53 @@ pnpm e2e:companion-long-interview -- --turns 8 --filler-chars 120000 --verify-me
 pnpm e2e:companion-long-interview -- --self-test
 ```
 
+## Signal -> companion live E2E
+
+На macOS удобнее проверять Signal не через Tauri WebDriver, а через реальный desktop runtime + companion HTTP/SSE API.
+
+1) Подними Signal API контейнеры и desktop app:
+
+```bash
+docker compose -f docker-compose.signal.yml up -d
+SIGNAL_ENABLED=true \
+SIGNAL_API_BASE_URL=http://localhost:8081 \
+SIGNAL_ACCOUNT_NUMBER="<primary-signal-number>" \
+SIGNAL_MESSAGE_REQUEST_AUTO_ACCEPT=true \
+SIGNAL_MESSAGE_REQUEST_DOCKER_CONTAINER=hackinterview-signal-api \
+pnpm tauri dev
+```
+
+2) В отдельном терминале запусти live smoke:
+
+```bash
+SIGNAL_E2E_PRIMARY="<primary-signal-number>" \
+SIGNAL_E2E_PEER="<peer-signal-number>" \
+SIGNAL_E2E_PEER_API_URL=http://localhost:8082 \
+pnpm e2e:signal-companion
+```
+
+Что проверяет:
+
+- оба `signal-cli-rest-api` аккаунта доступны;
+- companion server включён и не требует auth;
+- peer Signal аккаунт отправляет реальное сообщение в primary;
+- desktop Signal receiver добавляет сообщение в companion timeline как `kind: "signal"`;
+- backend memory ingest завершает обработку статусом `ok`.
+
+Для production backend, где memory временно недоступна или отключена, можно сузить проверку до timeline:
+
+```bash
+pnpm e2e:signal-companion -- --skip-memory
+```
+
 ## Важно про macOS
 
 По текущей документации Tauri v2 WebDriver **не поддерживается на macOS** (нет WKWebView driver).
-Поэтому локально на macOS эти тесты не запускаются — их нужно гонять в CI на Linux/Windows.
+Поэтому локально на macOS `pnpm e2e:tauri` штатно делает skip. Практичный разрез такой:
+
+- macOS local: `pnpm test:run`, `pnpm typecheck`, `cargo test --lib`, `pnpm e2e:signal-companion`, browser smoke для `http://localhost:1425/` и `http://127.0.0.1:43821/companion.html?token=...`;
+- Linux/Windows CI: `pnpm e2e:tauri` через `tauri-driver`, чтобы покрывать реальные Tauri windows;
+- web companion UI: локально проверяется обычным браузером, потому что это HTTP/SSE страница поверх companion server.
 
 ## Как запустить (Linux)
 

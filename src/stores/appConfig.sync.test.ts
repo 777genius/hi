@@ -24,6 +24,10 @@ describe('useAppConfigStore sync', () => {
       selected_audio_device: null,
       selected_output_audio_device: null,
       interview_memory_enabled: true,
+      answer_language: 'en' as const,
+      answer_audience: 'internal' as const,
+      natural_answer_style_enabled: true,
+      answer_imperfection_level: 'light' as const,
       ...overrides,
     };
   }
@@ -48,6 +52,10 @@ describe('useAppConfigStore sync', () => {
         selected_audio_device: 'Mic A',
         selected_output_audio_device: 'Speakers A',
         interview_memory_enabled: false,
+        answer_language: 'ru',
+        answer_audience: 'client',
+        natural_answer_style_enabled: false,
+        answer_imperfection_level: 'off',
       }),
     });
 
@@ -66,6 +74,10 @@ describe('useAppConfigStore sync', () => {
     expect(store.selectedAudioDevice).toBe('Mic A');
     expect(store.selectedOutputAudioDevice).toBe('Speakers A');
     expect(store.interviewMemoryEnabled).toBe(false);
+    expect(store.answerLanguage).toBe('ru');
+    expect(store.answerAudience).toBe('client');
+    expect(store.naturalAnswerStyleEnabled).toBe(false);
+    expect(store.answerImperfectionLevel).toBe('off');
   });
 
   it('applySnapshot обновляет значения из SnapshotEnvelope', () => {
@@ -80,6 +92,10 @@ describe('useAppConfigStore sync', () => {
         selected_audio_device: 'Mic B',
         selected_output_audio_device: 'Speakers B',
         interview_memory_enabled: false,
+        answer_language: 'auto',
+        answer_audience: 'internal',
+        natural_answer_style_enabled: true,
+        answer_imperfection_level: 'light',
       },
       '42',
     );
@@ -92,6 +108,10 @@ describe('useAppConfigStore sync', () => {
     expect(store.selectedAudioDevice).toBe('Mic B');
     expect(store.selectedOutputAudioDevice).toBe('Speakers B');
     expect(store.interviewMemoryEnabled).toBe(false);
+    expect(store.answerLanguage).toBe('auto');
+    expect(store.answerAudience).toBe('internal');
+    expect(store.naturalAnswerStyleEnabled).toBe(true);
+    expect(store.answerImperfectionLevel).toBe('light');
     expect(store.isLoaded).toBe(true);
   });
 

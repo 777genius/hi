@@ -14,6 +14,7 @@ pub const EVENT_SYSTEM_AUDIO_TEST_LEVEL: &str = "system_audio_test:level";
 pub const EVENT_MICROPHONE_AUDIO_LEVEL: &str = "microphone:level";
 pub const EVENT_MICROPHONE_MUTE_STATE: &str = "microphone:mute-state";
 pub const EVENT_COMPANION_SNAPSHOT: &str = "companion:snapshot";
+pub const EVENT_SIGNAL_MESSAGE: &str = "signal:message";
 
 pub const EVENT_TRANSCRIPTION_ERROR: &str = "transcription:error";
 pub const EVENT_CONNECTION_QUALITY: &str = "connection:quality";
@@ -156,6 +157,19 @@ pub struct MicrophoneMuteStatePayload {
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalMessagePayload {
+    pub id: String,
+    pub platform: String,
+    pub sender: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    pub text: String,
+    /// Unix timestamp in milliseconds (epoch ms).
+    pub timestamp: i64,
 }
 
 /// Payload for transcription error event

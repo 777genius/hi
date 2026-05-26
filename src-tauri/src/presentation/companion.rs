@@ -100,6 +100,8 @@ pub struct CompanionLiveState {
 #[serde(rename_all = "camelCase")]
 pub struct CompanionMemoryState {
     pub mode: String,
+    pub api_variant: String,
+    pub api_base_url: String,
     pub backend_ingest_enabled: bool,
     pub backend_prompt_context_enabled: bool,
     pub minimal_local_prompt_context_enabled: bool,
@@ -138,12 +140,45 @@ pub struct CompanionLlmCandidate {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompanionMessageKind {
+    #[default]
+    Stt,
+    Mic,
+    Signal,
+    Prompt,
+    Haiku,
+    Context,
+}
+
+impl CompanionMessageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stt => "stt",
+            Self::Mic => "mic",
+            Self::Signal => "signal",
+            Self::Prompt => "prompt",
+            Self::Haiku => "haiku",
+            Self::Context => "context",
+        }
+    }
+}
+
+impl serde::Serialize for CompanionMessageKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanionMessage {
     pub id: String,
     pub seq: u64,
-    pub kind: String,
+    pub kind: CompanionMessageKind,
     pub role: String,
     pub status: String,
     pub text: String,
@@ -708,6 +743,10 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
         },
         memory: CompanionMemoryState {
             mode: memory_mode.as_str().to_string(),
+            api_variant: crate::presentation::interview_memory_bridge::resolved_api_variant_label()
+                .to_string(),
+            api_base_url:
+                crate::presentation::interview_memory_bridge::resolved_primary_api_base_url(),
             backend_ingest_enabled: memory_mode.backend_ingest_enabled(),
             backend_prompt_context_enabled: memory_mode.backend_prompt_context_enabled(),
             minimal_local_prompt_context_enabled: memory_mode

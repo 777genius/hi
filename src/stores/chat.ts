@@ -11,6 +11,7 @@ import {
   EVENT_HAIKU_DONE,
   EVENT_HAIKU_ERROR,
   EVENT_MICROPHONE_MUTE_STATE,
+  EVENT_SIGNAL_MESSAGE,
   EVENT_TRANSCRIPTION_FINAL,
   EVENT_TRANSCRIPTION_PARTIAL,
   type FinalTranscriptionPayload,
@@ -20,6 +21,7 @@ import {
   type HaikuErrorPayload,
   type MicrophoneMuteStatePayload,
   type PartialTranscriptionPayload,
+  type SignalMessagePayload,
 } from '../types';
 import { appendTranscriptText, mergeTranscriptText } from '../utils/transcriptionText';
 import {
@@ -28,7 +30,7 @@ import {
 } from '@/presentation/contextRetention';
 import { useTranscriptionStore } from './transcription';
 
-type ChatMessageKind = 'stt' | 'haiku' | 'mic' | 'prompt';
+type ChatMessageKind = 'stt' | 'haiku' | 'mic' | 'prompt' | 'signal';
 type ChatMessageRole = 'incoming' | 'outgoing';
 type ChatMessageStatus = 'final' | 'streaming' | 'error';
 
@@ -185,6 +187,7 @@ export const useChatStore = defineStore('chat', () => {
   const microphoneEnabled = ref<boolean>(true);
   const micMessages = ref<ChatMessage[]>([]);
   const promptMessages = ref<ChatMessage[]>([]);
+  const signalMessages = ref<ChatMessage[]>([]);
   const micPartialText = ref<string>('');
   const micAccumulatedText = ref<string>('');
   const micCurrentUtteranceStart = ref<number>(-1);
@@ -269,7 +272,12 @@ export const useChatStore = defineStore('chat', () => {
   );
 
   const messages = computed<ChatMessage[]>(() => {
-    const base = [...sttMessages.value, ...micMessages.value, ...promptMessages.value];
+    const base = [
+      ...sttMessages.value,
+      ...micMessages.value,
+      ...signalMessages.value,
+      ...promptMessages.value,
+    ];
     if (liveSttMessage.value) base.push(liveSttMessage.value);
     if (liveMicMessage.value) base.push(liveMicMessage.value);
     base.sort((a, b) => (a.createdAtMs - b.createdAtMs) || (a.seq - b.seq));
@@ -353,10 +361,20 @@ export const useChatStore = defineStore('chat', () => {
   });
 
   const hasAnySttText = computed(
-    () => (transcription.finalUtterances?.length ?? 0) > 0 || livePartialText.value.length > 0
+    () =>
+      (transcription.finalUtterances?.length ?? 0) > 0 ||
+      signalMessages.value.some((message) => !message.deleted && !!message.text.trim()) ||
+      livePartialText.value.length > 0
   );
   const hasContextToClear = computed(
-    () => contextFloorSttIndex.value < (transcription.finalUtterances?.length ?? 0)
+    () =>
+      contextFloorSttIndex.value < (transcription.finalUtterances?.length ?? 0) ||
+      [...micMessages.value, ...signalMessages.value, ...promptMessages.value]
+        .some((message) =>
+          !message.deleted &&
+          message.status === 'final' &&
+          message.createdAtMs > contextClearedAtMs.value
+        )
   );
   const selectedCount = computed(() => selectedMessageIds.value.length);
   const hasSelection = computed(() => selectedCount.value > 0);
@@ -395,7 +413,7 @@ export const useChatStore = defineStore('chat', () => {
     if (!text) return '';
     if (message.kind === 'mic') return `МИКРОФОН: ${text}`;
     if (message.kind === 'prompt') return `ЗАПРОС: ${text}`;
-    if (message.kind === 'stt') return `ОС: ${text}`;
+    if (message.kind === 'stt' || message.kind === 'signal') return `ОС: ${text}`;
     if (message.kind === 'haiku') return `ПОМОЩНИК: ${text}`;
     return text;
   }
@@ -403,6 +421,7 @@ export const useChatStore = defineStore('chat', () => {
   function memoryLabelForMessageKind(kind: ChatMessageKind): string {
     if (kind === 'stt') return 'system_audio';
     if (kind === 'mic') return 'microphone';
+    if (kind === 'signal') return 'signal';
     if (kind === 'prompt') return 'manual_prompt';
     if (kind === 'haiku') return 'assistant';
     return 'recent_timeline';
@@ -584,6 +603,13 @@ export const useChatStore = defineStore('chat', () => {
       return;
     }
 
+    // SIGNAL: отдельный внешний входящий источник, но в контексте ведёт себя как ОС.
+    const signalIdx = signalMessages.value.findIndex((m) => m.id === messageId);
+    if (signalIdx >= 0) {
+      signalMessages.value[signalIdx] = { ...signalMessages.value[signalIdx], text: t };
+      return;
+    }
+
     // PROMPT: редактируем локальный список.
     const pIdx = promptMessages.value.findIndex((m) => m.id === messageId);
     if (pIdx >= 0) {
@@ -612,6 +638,16 @@ export const useChatStore = defineStore('chat', () => {
     const micIdx = micMessages.value.findIndex((m) => m.id === messageId);
     if (micIdx >= 0) {
       micMessages.value.splice(micIdx, 1);
+      haikuMessages.value = haikuMessages.value.map((h) =>
+        h.insertAfterId === messageId ? { ...h, insertAfterId: prevBaseId } : h
+      );
+      return;
+    }
+
+    // SIGNAL
+    const signalIdx = signalMessages.value.findIndex((m) => m.id === messageId);
+    if (signalIdx >= 0) {
+      signalMessages.value.splice(signalIdx, 1);
       haikuMessages.value = haikuMessages.value.map((h) =>
         h.insertAfterId === messageId ? { ...h, insertAfterId: prevBaseId } : h
       );
@@ -899,6 +935,40 @@ export const useChatStore = defineStore('chat', () => {
       seq: patch.seq ?? (2_000_000 + haikuMessages.value.length),
       insertAfterId: patch.insertAfterId,
     });
+  }
+
+  function preserveStreamingTextFromLocalState(next: ChatMessage): ChatMessage {
+    const current = haikuMessages.value.find((message) => message.id === next.id);
+    if (!current) return next;
+    if (current.status === 'final' && next.status === 'streaming') return current;
+
+    const merged: ChatMessage = { ...next };
+    if (
+      current.status === 'streaming'
+      && next.status === 'streaming'
+      && current.text.length > next.text.length
+      && current.text.startsWith(next.text)
+    ) {
+      merged.text = current.text;
+    }
+
+    if (next.candidates?.length && current.candidates?.length) {
+      merged.candidates = next.candidates.map((candidate) => {
+        const existing = current.candidates?.find((item) => item.id === candidate.id);
+        if (
+          existing
+          && existing.status === 'streaming'
+          && candidate.status === 'streaming'
+          && existing.text.length > candidate.text.length
+          && existing.text.startsWith(candidate.text)
+        ) {
+          return { ...candidate, text: existing.text };
+        }
+        return candidate;
+      });
+    }
+
+    return merged;
   }
 
   function normalizeCandidateStatus(status: string | null | undefined): ChatMessageStatus {
@@ -1221,6 +1291,7 @@ export const useChatStore = defineStore('chat', () => {
 
     // После отмены разрешаем повторный триггер без задержки (hover всё равно будет "разоружён" в UI).
     lastHoverTriggerAtMs.value = 0;
+
   }
 
   function clearLiveMicBuffers(): void {
@@ -1286,6 +1357,7 @@ export const useChatStore = defineStore('chat', () => {
   let unlistenSystemLevel: UnlistenFn | null = null;
   let unlistenMicLevel: UnlistenFn | null = null;
   let unlistenMicMuteState: UnlistenFn | null = null;
+  let unlistenSignalMessage: UnlistenFn | null = null;
 
   function applyMicrophoneMuteState(payload: MicrophoneMuteStatePayload | null | undefined): void {
     const muted = !!payload?.muted;
@@ -1309,6 +1381,36 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  function upsertSignalMessage(payload: SignalMessagePayload | null | undefined): void {
+    const text = String(payload?.text ?? '').trim();
+    const id = String(payload?.id ?? '').trim();
+    if (!id || !text) return;
+
+    const timestamp = Number(payload?.timestamp);
+    const createdAtMs = Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now();
+    const existingIndex = signalMessages.value.findIndex((message) => message.id === id);
+    const next: ChatMessage = {
+      id,
+      kind: 'signal',
+      role: 'incoming',
+      status: 'final',
+      text,
+      createdAtMs,
+      seq: 1_250_000 + (existingIndex >= 0 ? existingIndex : signalMessages.value.length),
+    };
+
+    if (existingIndex >= 0) {
+      signalMessages.value[existingIndex] = {
+        ...signalMessages.value[existingIndex],
+        ...next,
+        seq: signalMessages.value[existingIndex].seq,
+      };
+      return;
+    }
+
+    signalMessages.value.push(next);
+  }
+
   async function initialize(): Promise<void> {
     if (!isTauriAvailable()) return;
     if (
@@ -1320,7 +1422,8 @@ export const useChatStore = defineStore('chat', () => {
       unlistenMicFinal ||
       unlistenSystemLevel ||
       unlistenMicLevel ||
-      unlistenMicMuteState
+      unlistenMicMuteState ||
+      unlistenSignalMessage
     ) {
       return;
     }
@@ -1348,6 +1451,10 @@ export const useChatStore = defineStore('chat', () => {
 
     unlistenMicMuteState = await listen<MicrophoneMuteStatePayload>(EVENT_MICROPHONE_MUTE_STATE, (event) => {
       applyMicrophoneMuteState(event.payload);
+    });
+
+    unlistenSignalMessage = await listen<SignalMessagePayload>(EVENT_SIGNAL_MESSAGE, (event) => {
+      upsertSignalMessage(event.payload);
     });
 
     unlistenCandidateStart = await listen<HaikuCandidateStartPayload>(
@@ -1554,6 +1661,7 @@ export const useChatStore = defineStore('chat', () => {
     if (unlistenSystemLevel) unlistenSystemLevel();
     if (unlistenMicLevel) unlistenMicLevel();
     if (unlistenMicMuteState) unlistenMicMuteState();
+    if (unlistenSignalMessage) unlistenSignalMessage();
     unlistenDelta = null;
     unlistenDone = null;
     unlistenError = null;
@@ -1563,6 +1671,7 @@ export const useChatStore = defineStore('chat', () => {
     unlistenSystemLevel = null;
     unlistenMicLevel = null;
     unlistenMicMuteState = null;
+    unlistenSignalMessage = null;
   }
 
   function clearChatOutgoing(): void {
@@ -1588,6 +1697,7 @@ export const useChatStore = defineStore('chat', () => {
 
     micMessages.value = [];
     promptMessages.value = [];
+    signalMessages.value = [];
     clearLiveMicBuffers();
     systemAudioLevel.value = 0;
     liveSttSinceMs.value = 0;
@@ -1647,6 +1757,19 @@ export const useChatStore = defineStore('chat', () => {
         attachments: toAttachments(message.attachments),
       }));
 
+    signalMessages.value = timeline
+      .filter((message) => message.kind === 'signal')
+      .map((message) => ({
+        id: message.id,
+        kind: 'signal' as const,
+        role: (message.role as ChatMessageRole) || 'incoming',
+        status: (message.status as ChatMessageStatus) || 'final',
+        text: message.text,
+        createdAtMs: message.createdAtMs,
+        seq: message.seq,
+        attachments: toAttachments(message.attachments),
+      }));
+
     haikuMessages.value = timeline
       .filter((message) => message.kind === 'haiku')
       .map((message) => ({
@@ -1661,14 +1784,14 @@ export const useChatStore = defineStore('chat', () => {
         attachments: toAttachments(message.attachments),
         candidates: toCandidates(message.candidates),
         activeCandidateId: message.activeCandidateId ?? undefined,
-      }));
+      }))
+      .map(preserveStreamingTextFromLocalState);
 
     activeHaikuRequests.value = Object.fromEntries(
       haikuMessages.value
         .filter((message) => message.status === 'streaming')
         .map((message) => [message.id, true] as const)
     );
-    ignoredHaikuRequestIds.value = {};
 
     microphoneEnabled.value = !!snapshot.microphone.enabled;
     microphoneMuteSupported.value = !!snapshot.microphone.supported;
@@ -1690,6 +1813,7 @@ export const useChatStore = defineStore('chat', () => {
   return {
     messages,
     sttMessages,
+    signalMessages,
     haikuMessages,
     microphoneEnabled,
     microphoneMuteSupported,

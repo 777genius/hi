@@ -121,6 +121,83 @@ impl SttConfig {
     }
 }
 
+/// Language preference for generated AI answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnswerLanguage {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "ru")]
+    Russian,
+}
+
+impl Default for AnswerLanguage {
+    fn default() -> Self {
+        Self::Russian
+    }
+}
+
+/// Optional chat-like roughness for generated AI answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnswerImperfectionLevel {
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "light")]
+    Light,
+}
+
+impl Default for AnswerImperfectionLevel {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+/// Target audience for generated AI answer drafts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnswerAudience {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "internal")]
+    Internal,
+    #[serde(rename = "client")]
+    Client,
+}
+
+impl Default for AnswerAudience {
+    fn default() -> Self {
+        Self::Internal
+    }
+}
+
+/// User-facing style settings for generated AI answers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerStyleConfig {
+    #[serde(default)]
+    pub language: AnswerLanguage,
+    #[serde(default)]
+    pub audience: AnswerAudience,
+    #[serde(default = "default_natural_answer_style_enabled")]
+    pub natural_answer_style_enabled: bool,
+    #[serde(default)]
+    pub imperfection_level: AnswerImperfectionLevel,
+}
+
+fn default_natural_answer_style_enabled() -> bool {
+    false
+}
+
+impl Default for AnswerStyleConfig {
+    fn default() -> Self {
+        Self {
+            language: AnswerLanguage::default(),
+            audience: AnswerAudience::default(),
+            natural_answer_style_enabled: default_natural_answer_style_enabled(),
+            imperfection_level: AnswerImperfectionLevel::default(),
+        }
+    }
+}
+
 /// Application-wide configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -167,6 +244,10 @@ pub struct AppConfig {
     #[serde(default = "default_interview_memory_enabled")]
     pub interview_memory_enabled: bool,
 
+    /// Style settings for generated AI answers.
+    #[serde(default)]
+    pub answer_style: AnswerStyleConfig,
+
     /// Stable token for companion phone link.
     /// Keeps `/c/<token>` persistent across restarts and re-enabling companion mode.
     #[serde(default)]
@@ -201,6 +282,7 @@ impl Default for AppConfig {
             selected_audio_device: None, // По умолчанию используем системное устройство
             selected_output_audio_device: None,
             interview_memory_enabled: default_interview_memory_enabled(),
+            answer_style: AnswerStyleConfig::default(),
             companion_access_token: None,
             keep_history: true,
             max_history_items: Self::DEFAULT_MAX_HISTORY_ITEMS,
@@ -293,6 +375,13 @@ mod tests {
         assert_eq!(config.vad_silence_timeout_ms, 3000);
         assert_eq!(config.microphone_sensitivity, 95);
         assert!(config.interview_memory_enabled);
+        assert_eq!(config.answer_style.language, AnswerLanguage::Russian);
+        assert_eq!(config.answer_style.audience, AnswerAudience::Internal);
+        assert!(!config.answer_style.natural_answer_style_enabled);
+        assert_eq!(
+            config.answer_style.imperfection_level,
+            AnswerImperfectionLevel::Off
+        );
         assert!(config.keep_history);
         assert_eq!(
             config.max_history_items,
@@ -323,5 +412,41 @@ mod tests {
             config1.microphone_sensitivity,
             config2.microphone_sensitivity
         );
+    }
+
+    #[test]
+    fn test_app_config_deserializes_answer_style_defaults() {
+        let json = r#"{
+            "stt": {
+                "provider": "backend",
+                "language": "ru",
+                "auto_detect_language": false,
+                "enable_punctuation": true,
+                "filter_profanity": false,
+                "deepgram_api_key": null,
+                "assemblyai_api_key": null,
+                "model": null,
+                "backend_auth_token": null,
+                "backend_url": null,
+                "keep_connection_alive": false,
+                "deepgram_keyterms": null,
+                "keep_alive_ttl_secs": 300
+            },
+            "recording_hotkey": "CmdOrCtrl+Shift+X",
+            "auto_copy_to_clipboard": false,
+            "auto_paste_text": false,
+            "auto_close_window": false,
+            "vad_silence_timeout_ms": 3000,
+            "microphone_sensitivity": 95,
+            "selected_audio_device": null,
+            "selected_output_audio_device": null,
+            "interview_memory_enabled": true,
+            "companion_access_token": null,
+            "keep_history": true,
+            "max_history_items": 200
+        }"#;
+
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.answer_style, AnswerStyleConfig::default());
     }
 }

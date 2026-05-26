@@ -17,7 +17,7 @@ export type ConversationLlmCandidate = {
 
 export type ConversationFeedMessage = {
   id: string;
-  kind: 'stt' | 'mic' | 'haiku' | 'prompt';
+  kind: 'stt' | 'mic' | 'signal' | 'haiku' | 'prompt';
   role: 'incoming' | 'outgoing';
   status: 'final' | 'streaming' | 'error';
   text: string;

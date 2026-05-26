@@ -9,6 +9,7 @@
 import type { SttProviderType } from '@/types';
 import type { UiLocale, UiTheme } from '@/i18n.locales';
 import type { SnapshotEnvelope } from '@statesync/core';
+import type { AnswerAudience, AnswerImperfectionLevel, AnswerLanguage } from '@/features/settings/domain/types';
 
 /**
  * Публичный снапшот app-config, который можно безопасно раздавать во все окна.
@@ -22,6 +23,10 @@ export type AppConfigSnapshotData = {
   selected_audio_device: string | null;
   selected_output_audio_device: string | null;
   interview_memory_enabled: boolean;
+  answer_language: AnswerLanguage;
+  answer_audience: AnswerAudience;
+  natural_answer_style_enabled: boolean;
+  answer_imperfection_level: AnswerImperfectionLevel;
 };
 
 /**
@@ -143,6 +148,8 @@ export type CompanionSnapshotData = {
   };
   memory?: {
     mode: string;
+    apiVariant?: string;
+    apiBaseUrl?: string;
     backendIngestEnabled: boolean;
     backendPromptContextEnabled: boolean;
     minimalLocalPromptContextEnabled: boolean;

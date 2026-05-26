@@ -21,6 +21,7 @@ function parseArgs(argv) {
     turns: Number(process.env.COMPANION_LONG_INTERVIEW_TURNS || 8),
     fillerChars: Number(process.env.COMPANION_LONG_INTERVIEW_FILLER_CHARS || 120_000),
     aiTimeoutMs: Number(process.env.COMPANION_LONG_INTERVIEW_AI_TIMEOUT_MS || 180_000),
+    aiRetries: Number(process.env.COMPANION_LONG_INTERVIEW_AI_RETRIES || 2),
     settleMs: Number(process.env.COMPANION_LONG_INTERVIEW_SETTLE_MS || 800),
     artifactsDir: '.e2e-artifacts/companion-long-interview',
     expectedMemoryStatus: process.env.COMPANION_EXPECT_MEMORY_CONTEXT_STATUS || 'ok',
@@ -58,6 +59,7 @@ function parseArgs(argv) {
     else if (arg === '--turns') options.turns = Number(next());
     else if (arg === '--filler-chars') options.fillerChars = Number(next());
     else if (arg === '--ai-timeout-ms') options.aiTimeoutMs = Number(next());
+    else if (arg === '--ai-retries') options.aiRetries = Number(next());
     else if (arg === '--settle-ms') options.settleMs = Number(next());
     else if (arg === '--artifacts-dir') options.artifactsDir = next();
     else if (arg === '--expect-memory-status') options.expectedMemoryStatus = next();
@@ -92,6 +94,7 @@ function parseArgs(argv) {
   if (options.memoryApiUrl) options.memoryApiUrl = normalizeBaseUrl(options.memoryApiUrl);
   options.turns = Math.max(1, Math.floor(options.turns || 1));
   options.fillerChars = Math.max(0, Math.floor(options.fillerChars || 0));
+  options.aiRetries = Math.max(0, Math.floor(options.aiRetries || 0));
   options.memoryBudgetChars = Math.max(4_000, Math.floor(options.memoryBudgetChars || 26_000));
   options.memoryMaxCandidates = Math.max(1, Math.floor(options.memoryMaxCandidates || 120));
   options.memoryMaxResults = Math.max(1, Math.floor(options.memoryMaxResults || 32));
@@ -102,7 +105,7 @@ function parseArgs(argv) {
   options.finalRecallMode = ['literal', 'semantic'].includes(options.finalRecallMode)
     ? options.finalRecallMode
     : 'literal';
-  options.scenario = ['single-task', 'multi-topic'].includes(options.scenario)
+  options.scenario = ['single-task', 'multi-topic', 'natural-multi-topic'].includes(options.scenario)
     ? options.scenario
     : 'single-task';
   if (!options.token) options.token = extractTokenFromUrl(process.env.COMPANION_URL || options.baseUrl) || '';
@@ -126,6 +129,7 @@ What it checks:
 Useful flags:
   --turns <n>                  Number of AI turns, default 8.
   --filler-chars <n>           Total long filler chars spread across turns, default 120000.
+  --ai-retries <n>             Retry transient AI overload/rate errors through implicit AI request, default 2.
   --verify-memory              Verify backend memory retrieval for the active companion session.
   --memory-api-url <url>       Backend URL, default VITE_API_URL/INTERVIEW_MEMORY_API_URL/prod.
   --memory-auth-token <token>  Raw bearer token for backend memory API.
@@ -138,7 +142,7 @@ Useful flags:
   --allow-ai-miss              Keep exit code 0 when answer checks miss.
   --web-search                 Enable OpenAI Responses web search.
   --isolate-context            Clear active context and start a fresh memory session before the run.
-  --scenario <name>            single-task or multi-topic, default single-task.
+  --scenario <name>            single-task, multi-topic or natural-multi-topic, default single-task.
   --answer-check-mode <mode>   literal or semantic, default semantic.
   --semantic-answer-checks     Alias for --answer-check-mode semantic.
   --final-recall-mode <mode>   literal or semantic, default semantic.
@@ -438,17 +442,33 @@ function buildIdempotencyAnchor(runId) {
   ].join('\n');
 }
 
+function withNaturalAnswerTolerance(turns) {
+  return turns.map((turn) => ({
+    ...turn,
+    minExpectedHits:
+      turn.minExpectedHits ??
+      Math.min(
+        turn.expected.length,
+        Math.max(2, Math.round(turn.expected.length * 0.7)),
+      ),
+  }));
+}
+
 function buildFiller(runId, turnIndex, targetChars) {
   if (targetChars <= 0) return '';
-  const line = [
-    `Организационная пауза интервью, блок ${turnIndex}.`,
-    'Собеседник обсуждает расписание встречи, формат ответа, звук, связь, заметки, планы релиза, стиль объяснения, ожидания команды, демонстрацию решения и общие детали созвона.',
-  ].join(' ');
+  const lines = [
+    'Пока участники собирают мысли, они коротко сверяют формат ответа, качество связи, заметки и порядок демонстрации решения.',
+    'В разговоре мелькают детали про продуктовую команду, расписание созвона, примеры из прошлых задач и ожидания по глубине объяснения.',
+    'Интервьюер просит держать ответы компактными, проговаривать trade-off и возвращаться к коду, когда это помогает доказать идею.',
+    'Кандидат уточняет, что будет сначала объяснять инвариант, затем крайние случаи, потом коротко показывать вариант реализации.',
+    'Пауза занимает несколько фраз про окружение, звук, экран, заметки, темп интервью и то, как фиксировать важные решения.',
+    `Разговор продолжается в спокойном темпе, переход ${turnIndex}, участники держат фокус на технических темах и контексте задачи.`,
+  ];
   const parts = [];
   let chars = 0;
   let index = 1;
   while (chars < targetChars) {
-    const next = `${line} filler-line-${index}.`;
+    const next = lines[(index - 1) % lines.length];
     parts.push(next);
     chars += next.length + 1;
     index += 1;
@@ -722,12 +742,167 @@ function buildMultiTopicTurns(runId, count) {
   return turns;
 }
 
+function naturalMultiTopicTurns(runId) {
+  return withNaturalAnswerTolerance([
+    {
+      label: 'natural cache initial question',
+      contextBefore: buildLruAnchor(runId),
+      languageId: 'typescript',
+      question: [
+        'Давай начнём с кэша в продуктовой системе.',
+        'У нас есть LRU с TTL, часть записей стареет по времени, а часть приходится убирать из-за размера.',
+        'Как бы ты объяснил порядок проверок и какие инварианты держал бы в голове?',
+      ].join(' '),
+      expected: ['lru', 'ttl', ['evict', 'удал', 'вытесн'], ['инвариант', 'порядок']],
+      allowRunMarkers: false,
+    },
+    {
+      label: 'natural cache race follow-up',
+      question: [
+        'Представим, что два запроса почти одновременно читают один и тот же ключ.',
+        'Один видит значение ещё живым, другой уже попадает на границу TTL.',
+        'Что здесь может пойти не так и как бы ты сделал поведение предсказуемым?',
+      ].join(' '),
+      expected: ['ttl', ['race', 'гонк', 'конкур'], ['устар', 'предсказ']],
+      allowRunMarkers: false,
+    },
+    {
+      label: 'natural sql join question',
+      contextBefore: buildSqlAnchor(runId),
+      languageId: 'sql',
+      question: [
+        'Теперь перейдём к отчёту в SQL.',
+        'Есть пользователи и заказы, часть пользователей пока ничего не покупала.',
+        'Почему тут нужен left join, а не inner join, и где пригодится оконная нумерация строк?',
+      ].join(' '),
+      expected: [['left join', 'лев'], ['inner join', 'inner'], ['row_number', 'окон', 'нумерац'], ['без заказ', 'пуст']],
+      allowRunMarkers: false,
+    },
+    {
+      label: 'natural react stale closure question',
+      contextBefore: buildReactAnchor(runId),
+      languageId: 'tsx',
+      question: [
+        'Окей, переключимся на React.',
+        'В компоненте есть callback, который использует текущее значение строки поиска.',
+        'Как бы ты объяснил stale closure и почему нельзя просто убрать зависимость ради меньшего числа перерендеров?',
+      ].join(' '),
+      expected: [['stale', 'устаревш'], ['closure', 'замыкан'], ['dependency', 'зависим'], ['rerender', 'перерендер']],
+      allowRunMarkers: false,
+    },
+    {
+      label: 'natural idempotency retry question',
+      contextBefore: buildIdempotencyAnchor(runId),
+      contextRoute: 'system',
+      languageId: 'text',
+      question: [
+        'Теперь вопрос про платежи.',
+        'Клиент отправил оплату, получил timeout и повторил запрос.',
+        'Как спроектировать retry, чтобы не получить двойное списание и при этом пережить временную ошибку сервиса?',
+      ].join(' '),
+      expected: [['idempotency', 'идемпот'], ['retry', 'повтор'], ['timeout', 'таймаут'], 'backoff'],
+      allowRunMarkers: false,
+    },
+    {
+      label: 'natural backpressure synthesis',
+      question: [
+        'Добавим нагрузку.',
+        'Очередь запросов растёт, downstream отвечает медленно, а нам всё равно нужно держать пользовательский опыт нормальным.',
+        'Как бы ты связал backpressure, retry и ограничение параллелизма?',
+      ].join(' '),
+      expected: [['backpressure', 'нагруз'], ['retry', 'повтор'], ['параллел', 'лимит'], ['очеред', 'queue']],
+      allowRunMarkers: false,
+    },
+    {
+      label: 'natural cross-topic follow-up',
+      question: [
+        'Сравни несколько тем, чтобы проверить, что мы не смешали причины.',
+        'В кэше мы боремся с устареванием, в SQL с потерей строк, в React с устаревшим замыканием, а в платежах с повторным эффектом.',
+        'Как бы ты коротко развёл эти случаи в ответе?',
+      ].join(' '),
+      expected: ['ttl', ['left join', 'sql'], ['stale', 'устаревш'], ['idempotency', 'идемпот'], ['разн', 'отлич']],
+      allowRunMarkers: false,
+    },
+    {
+      label: 'natural final recall',
+      question: [
+        'Давай в конце соберём картину целиком.',
+        'Мы обсуждали кэш с TTL и LRU, SQL-отчёт с left join и оконной функцией, React callback, платежный retry и backpressure.',
+        'Коротко пройдись по каждой теме и назови главную идею, которую важно сказать на интервью.',
+      ].join(' '),
+      expected: [
+        ['lru', 'ttl', 'кэш'],
+        ['left join', 'sql'],
+        ['row_number', 'окон'],
+        ['stale', 'замыкан', 'closure'],
+        ['idempotency', 'идемпот', 'платеж'],
+        ['backpressure', 'нагруз', 'параллел'],
+      ],
+      allowRunMarkers: false,
+      recall: true,
+    },
+  ]);
+}
+
+function buildNaturalMultiTopicTurns(runId, count) {
+  const coreTurns = naturalMultiTopicTurns(runId);
+  if (count <= coreTurns.length) return coreTurns.slice(0, count);
+
+  const finalRecallTurn = coreTurns.at(-1);
+  const turns = coreTurns.slice(0, -1);
+  const followUps = [
+    {
+      label: 'natural extra cache sql',
+      expected: ['ttl', ['left join', 'sql'], ['данн', 'строк']],
+      question: [
+        'Вернёмся на минуту к сравнению.',
+        'Чем отличается проблема устаревших значений в кэше от проблемы потерянных строк в SQL-отчёте?',
+        'Ответ нужен короткий, как будто это быстрый follow-up на интервью.',
+      ].join(' '),
+    },
+    {
+      label: 'natural extra react payment',
+      expected: [['stale', 'устаревш', 'замыкан'], ['idempotency', 'идемпот'], ['effect', 'эффект', 'списан']],
+      question: [
+        'Теперь сравни React callback и повтор платежного запроса.',
+        'В обоих местах есть повторное действие, но риск разный.',
+        'Как бы ты объяснил отличие через состояние и side effect?',
+      ].join(' '),
+    },
+    {
+      label: 'natural extra backpressure',
+      expected: [['backpressure', 'нагруз'], ['очеред', 'queue'], ['retry', 'повтор'], ['лимит', 'параллел']],
+      question: [
+        'Представим, что сервис начал тормозить.',
+        'Где провести границу между retry, очередью и backpressure, чтобы система не усиливала проблему сама?',
+        'Ответь несколькими предложениями без ухода в большой код.',
+      ].join(' '),
+    },
+  ];
+
+  for (let index = turns.length + 1; index < count; index += 1) {
+    const followUp = followUps[index % followUps.length];
+    turns.push({
+      label: `${followUp.label} ${index}`,
+      question: followUp.question,
+      expected: followUp.expected,
+      allowRunMarkers: false,
+      minExpectedHits: Math.min(followUp.expected.length, Math.max(2, Math.round(followUp.expected.length * 0.7))),
+    });
+  }
+
+  turns.push(finalRecallTurn);
+  return turns;
+}
+
 function buildScenarioTurns(runId, count, scenario) {
-  return scenario === 'multi-topic' ? buildMultiTopicTurns(runId, count) : buildTurns(runId, count);
+  if (scenario === 'multi-topic') return buildMultiTopicTurns(runId, count);
+  if (scenario === 'natural-multi-topic') return buildNaturalMultiTopicTurns(runId, count);
+  return buildTurns(runId, count);
 }
 
 function scenarioMemoryRequiredTerms(runId, scenario) {
-  if (scenario === 'multi-topic') {
+  if (scenario === 'multi-topic' || scenario === 'natural-multi-topic') {
     return [
       'LRU',
       'TTL',
@@ -749,7 +924,7 @@ function scenarioMemoryRequiredTerms(runId, scenario) {
 }
 
 function scenarioMemoryCheckPhases(runId, scenario) {
-  if (scenario !== 'multi-topic') {
+  if (scenario !== 'multi-topic' && scenario !== 'natural-multi-topic') {
     return [
       {
         label: 'single-task broad recall',
@@ -815,7 +990,7 @@ function scenarioMemoryCheckPhases(runId, scenario) {
 }
 
 function scenarioMarkers(runId, scenario) {
-  if (scenario === 'multi-topic') {
+  if (scenario === 'multi-topic' || scenario === 'natural-multi-topic') {
     return {
       lru: marker(runId, 'LRU_TTL_EVICTION'),
       sql: marker(runId, 'SQL_LEFT_JOIN_WINDOW'),
@@ -834,7 +1009,7 @@ function scenarioMarkers(runId, scenario) {
 }
 
 function scenarioMemoryQueryText(scenario) {
-  if (scenario === 'multi-topic') {
+  if (scenario === 'multi-topic' || scenario === 'natural-multi-topic') {
     return [
       'Финальный контроль памяти: нужно достать факты по проекту Полярная станция и нескольким темам интервью.',
       'Нужны ранняя cache-задача LRU cache с TTL eviction, SQL LEFT JOIN с row_number/window function, React stale closure/useCallback dependencies и платежный idempotency retry с bounded exponential backoff.',
@@ -906,6 +1081,28 @@ function isLiteralFormattingCheck(check) {
   return normalizedText(check.term) === 'typescript';
 }
 
+function startsWithQuestionAnswerHeading(value) {
+  return /^(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?\s*(?:вопрос|ответ)(?![а-яёa-z])\s*(?:\*\*)?\s*(?=[:：]|\r?\n|$|(?:о|про)(?![а-яёa-z]))/iu.test(
+    String(value || '').trimStart(),
+  );
+}
+
+function runMarkersInText(text, runId) {
+  const markerPattern = /LONG_INTERVIEW_E2E_([A-Z0-9]+)_[A-Z0-9_]+/g;
+  return [...String(text || '').matchAll(markerPattern)]
+    .map((match) => match[0])
+    .filter((value) => value.startsWith(`LONG_INTERVIEW_E2E_${runId}_`));
+}
+
+function scoreNoCurrentRunMarkers(text, runId) {
+  const leakedMarkers = [...new Set(runMarkersInText(text, runId))].slice(0, 8);
+  return {
+    term: 'no_current_run_markers',
+    ok: leakedMarkers.length === 0,
+    leakedMarkers,
+  };
+}
+
 function scoreNoForeignRunMarkers(text, runId) {
   const markerPattern = /LONG_INTERVIEW_E2E_([A-Z0-9]+)_[A-Z0-9_]+/g;
   const foreignMarkers = [...String(text || '').matchAll(markerPattern)]
@@ -918,24 +1115,20 @@ function scoreNoForeignRunMarkers(text, runId) {
   };
 }
 
-async function runAiTurn(options, turn, turnIndex, baselineSeq) {
-  const before = await getState(options);
-  const promptSeq = maxSeq(before);
+function isTransientAiError(text) {
+  return /overload|rate|429|503|temporar|timeout|timed out|try again|unavailable/i.test(String(text || ''));
+}
 
-  await postAction(options, '/api/prompt/send', {
-    text: turn.question,
-    images: [],
-    openaiResponsesWebSearch: options.openaiResponsesWebSearch,
-  });
-
+async function waitForAiTurnAnswer(options, turn, turnIndex, baselineSeq, attempt = 0) {
   const finalHaiku = await waitFor(`AI final answer for turn ${turnIndex}`, options.aiTimeoutMs, async () => {
     const state = await getState(options);
-    const messages = messagesAfter(state, promptSeq);
+    const messages = messagesAfter(state, baselineSeq);
     const candidates = messages.filter((message) => message.kind === 'haiku');
     const errored = [...candidates].reverse().find((message) => message.status === 'error');
     if (errored) {
-      throw new Error(
-        `AI stream failed for turn ${turnIndex}: ${JSON.stringify({
+      return {
+        ok: true,
+        value: {
           error: redactText(errored.text || errored.error || 'unknown error'),
           state: {
             recording: state.recording,
@@ -943,8 +1136,8 @@ async function runAiTurn(options, turn, turnIndex, baselineSeq) {
             timelineCount: state.timeline.length,
             maxSeq: maxSeq(state),
           },
-        })}`,
-      );
+        },
+      };
     }
     const final = [...candidates].reverse().find((message) => message.status === 'final' && message.text.trim());
     return {
@@ -962,6 +1155,32 @@ async function runAiTurn(options, turn, turnIndex, baselineSeq) {
     };
   });
 
+  if (finalHaiku.error) {
+    const rawError =
+      typeof finalHaiku.error === 'string'
+        ? finalHaiku.error
+        : JSON.stringify(finalHaiku.error);
+    if (attempt < options.aiRetries && isTransientAiError(rawError)) {
+      console.warn(
+        `[long-interview] transient AI error, retry ${attempt + 1}/${options.aiRetries}: ${rawError}`,
+      );
+      await sleep(1_500 + attempt * 1_000);
+      const retryState = await getState(options);
+      await postAction(options, '/api/ai/request', {
+        text: null,
+        openaiResponsesWebSearch: options.openaiResponsesWebSearch,
+      });
+      return waitForAiTurnAnswer(options, turn, turnIndex, maxSeq(retryState), attempt + 1);
+    }
+
+    throw new Error(
+      `AI stream failed for turn ${turnIndex}: ${JSON.stringify({
+        error: finalHaiku.error,
+        state: finalHaiku.state,
+      })}`,
+    );
+  }
+
   const answer = finalHaiku.final?.text || '';
   let answerChecks = scoreTerms(answer, turn.expected);
   if (options.answerCheckMode === 'semantic') {
@@ -972,16 +1191,35 @@ async function runAiTurn(options, turn, turnIndex, baselineSeq) {
   if (turn.recall && options.finalRecallMode === 'semantic') {
     answerChecks = answerChecks.filter((check) => !isSourceRecallMarkerCheck(check));
   }
-  answerChecks.push(scoreNoForeignRunMarkers(answer, turn.runId));
+  const expectedChecks = answerChecks;
+  const expectedHits = expectedChecks.filter((check) => check.ok).length;
+  const expectedMinHits = Number.isFinite(Number(turn.minExpectedHits))
+    ? Math.min(expectedChecks.length, Math.max(1, Number(turn.minExpectedHits)))
+    : expectedChecks.length;
+  const expectedOk = expectedHits >= expectedMinHits;
+  const safetyChecks = [
+    turn.allowRunMarkers === false
+      ? scoreNoCurrentRunMarkers(answer, turn.runId)
+      : scoreNoForeignRunMarkers(answer, turn.runId),
+    {
+      term: 'no_question_answer_preface',
+      ok: !startsWithQuestionAnswerHeading(answer),
+    },
+    {
+      term: `semantic_min_hits_${expectedHits}_of_${expectedChecks.length}_need_${expectedMinHits}`,
+      ok: expectedOk,
+    },
+  ];
+  answerChecks = [...expectedChecks, ...safetyChecks];
   const diagnosticChecks = scoreMemoryDiagnostics(finalHaiku.state.memory, options.expectedMemoryStatus);
-  const ok = answerChecks.every((check) => check.ok) && diagnosticChecks.every((check) => check.ok);
+  const ok = expectedOk && safetyChecks.every((check) => check.ok) && diagnosticChecks.every((check) => check.ok);
 
   return {
     index: turnIndex,
     label: turn.label,
     ok,
     recall: Boolean(turn.recall),
-    promptSeq,
+    promptSeq: baselineSeq,
     baselineSeq,
     question: turn.question,
     answer,
@@ -990,6 +1228,19 @@ async function runAiTurn(options, turn, turnIndex, baselineSeq) {
     finalMessage: finalHaiku.final,
     timelineState: finalHaiku.state,
   };
+}
+
+async function runAiTurn(options, turn, turnIndex, baselineSeq) {
+  const before = await getState(options);
+  const promptSeq = maxSeq(before);
+
+  await postAction(options, '/api/prompt/send', {
+    text: turn.question,
+    images: [],
+    openaiResponsesWebSearch: options.openaiResponsesWebSearch,
+  });
+
+  return waitForAiTurnAnswer(options, turn, turnIndex, promptSeq);
 }
 
 function retrievedMemoryText(contextText) {
@@ -1154,6 +1405,7 @@ function buildArtifact(options, data) {
       baseUrl: options.baseUrl,
       turns: options.turns,
       fillerChars: options.fillerChars,
+      aiRetries: options.aiRetries,
       verifyMemory: options.verifyMemory,
       memoryApiUrl: options.memoryApiUrl,
       expectedMemoryStatus: options.expectedMemoryStatus,
@@ -1323,6 +1575,39 @@ function runSelfTest() {
       multiTopicPhases.some((phase) => phase.requiredTerms.includes(marker(runId, 'REACT_STALE_CLOSURE_MEMO'))),
     'multi-topic exact phases should verify source markers separately',
   );
+
+  const naturalTurns = buildScenarioTurns(runId, 16, 'natural-multi-topic');
+  assertSelfTest(naturalTurns.length === 16, 'natural scenario turn count should match requested count');
+  assertSelfTest(naturalTurns.at(-1)?.recall === true, 'natural final recall should stay last');
+  const naturalQuestions = naturalTurns.map((turn) => turn.question).join('\n');
+  assertSelfTest(
+    !/(контрольный код|первой строкой|начни ответ|собеседник зада|собеседник спраш)/iu.test(naturalQuestions),
+    'natural scenario prompts should not expose test harness wording',
+  );
+  assertSelfTest(
+    naturalTurns.every((turn) => turn.allowRunMarkers === false),
+    'natural scenario should forbid AI leaking current run markers',
+  );
+  assertSelfTest(
+    naturalTurns.every((turn) => Number.isFinite(Number(turn.minExpectedHits)) && turn.minExpectedHits >= 2),
+    'natural scenario should use semantic minimum-hit checks',
+  );
+  assertSelfTest(
+    scenarioMemoryCheckPhases(runId, 'natural-multi-topic').length === 5,
+    'natural scenario should keep multi-phase backend memory verification',
+  );
+  assertSelfTest(
+    scoreNoCurrentRunMarkers(`answer ${marker(runId, 'LRU_TTL_EVICTION')}`, runId).ok === false,
+    'natural marker leak detector should catch current run markers',
+  );
+  for (const badAnswer of [
+    'Вопрос: почему нужен LEFT JOIN?\n\nОтвет: чтобы не потерять строки',
+    'Вопрос о том, почему нужен LEFT JOIN.\n\n- чтобы не потерять строки',
+    '**Вопрос:** почему нужен LEFT JOIN?\n\n**Ответ:** чтобы не потерять строки',
+    '# Ответ\n- чтобы не потерять строки',
+  ]) {
+    assertSelfTest(startsWithQuestionAnswerHeading(badAnswer), `answer heading detector missed: ${badAnswer}`);
+  }
 
   const fallbackOnlyTurn = {
     ok: false,

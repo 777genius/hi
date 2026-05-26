@@ -10,7 +10,7 @@ const LIVE_MIC_MESSAGE_ID = 'mic:live';
 const LIVE_STT_SEQ = 9_000_000;
 const LIVE_MIC_SEQ = 9_000_001;
 const LIVE_DUPLICATE_WINDOW_MS = 2_500;
-const FEED_KINDS = new Set<ConversationFeedMessage['kind']>(['stt', 'mic', 'haiku', 'prompt']);
+const FEED_KINDS = new Set<ConversationFeedMessage['kind']>(['stt', 'mic', 'signal', 'haiku', 'prompt']);
 const FEED_ROLES = new Set<ConversationFeedMessage['role']>(['incoming', 'outgoing']);
 const FEED_STATUSES = new Set<ConversationFeedMessage['status']>(['final', 'streaming', 'error']);
 

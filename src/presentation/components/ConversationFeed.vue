@@ -4,10 +4,10 @@ import type { ConversationFeedMessage } from '../conversationFeed';
 import { renderMarkdownToSafeHtml } from '@/utils/markdown';
 import { highlightMessage, highlightRawCodeBlock, messageHasCode } from '@/utils/codeHighlight';
 import { isCodeBlockExpandedFromTarget, toggleCodeBlockCollapseFromTarget } from '../feedCodeBlocks';
+import { DEFAULT_SCROLL_BOTTOM_THRESHOLD_PX, isNearScrollBottom, scrollElementToBottom } from '../feedScroll';
 
 type HighlightEntry = { sourceText: string; html: string; expanded: boolean };
 type HighlightCandidate = { id: string; text: string; forceCode: boolean; expanded: boolean };
-const SCROLL_BOTTOM_THRESHOLD_PX = 72;
 const COLLAPSIBLE_MESSAGE_MAX_VISIBLE_LINES = 5;
 const COLLAPSIBLE_MESSAGE_ESTIMATED_CHARS_PER_LINE = 64;
 
@@ -48,6 +48,8 @@ const expandedMessageIds = reactive(new Set<string>());
 const collapsedMessageIds = reactive(new Set<string>());
 const activeCandidateByMessageId = reactive<Record<string, string>>({});
 let scrollStateFrame: number | null = null;
+let shouldStickToBottomAfterRender = false;
+let stickToBottomScheduled = false;
 
 defineExpose({
   scrollEl,
@@ -103,6 +105,7 @@ watch(
       void highlighted
         .then((html) => {
           if (!hasCurrentHighlightCandidate(item.id, item.text)) return;
+          rememberStickToBottomIfCurrentlyPinned();
           highlightedById[item.id] = { sourceText: item.text, html, expanded: item.expanded };
           void nextTick(() => {
             scheduleScrollStateUpdate();
@@ -236,6 +239,7 @@ function rowClasses(message: ConversationFeedMessage): Record<string, boolean> {
     'assistant-response': message.kind === 'haiku',
     partial: status === 'streaming',
     prompt: message.kind === 'prompt',
+    signal: message.kind === 'signal',
     anchor:
       props.anchorMode === 'fixed' &&
       message.kind === 'stt' &&
@@ -307,8 +311,7 @@ function onScrollClickCapture(event: MouseEvent): void {
 }
 
 function isNearBottom(element: HTMLElement): boolean {
-  const remaining = element.scrollHeight - (element.scrollTop + element.clientHeight);
-  return remaining <= SCROLL_BOTTOM_THRESHOLD_PX;
+  return isNearScrollBottom(element, DEFAULT_SCROLL_BOTTOM_THRESHOLD_PX);
 }
 
 function updateScrollToBottomVisibility(): void {
@@ -359,6 +362,28 @@ function scrollToBottom(behavior: ScrollBehavior = 'smooth'): void {
   scheduleScrollStateUpdate();
 }
 
+function rememberStickToBottomIfCurrentlyPinned(): void {
+  const element = scrollEl.value;
+  if (!element || !isNearBottom(element)) return;
+  shouldStickToBottomAfterRender = true;
+  scheduleStickToBottomAfterRender();
+}
+
+function scheduleStickToBottomAfterRender(): void {
+  if (stickToBottomScheduled) return;
+  stickToBottomScheduled = true;
+  void nextTick(() => {
+    stickToBottomScheduled = false;
+    if (!shouldStickToBottomAfterRender) return;
+    shouldStickToBottomAfterRender = false;
+
+    const element = scrollEl.value;
+    if (!element) return;
+    scrollElementToBottom(element);
+    scheduleScrollStateUpdate();
+  });
+}
+
 watch(
   scrollEl,
   (element, previous) => {
@@ -367,6 +392,14 @@ watch(
     scheduleScrollStateUpdate();
   },
   { immediate: true }
+);
+
+watch(
+  () => [props.messages, props.emptyText],
+  () => {
+    rememberStickToBottomIfCurrentlyPinned();
+  },
+  { deep: true, flush: 'pre' }
 );
 
 watch(
@@ -438,6 +471,7 @@ onUnmounted(() => {
           </template>
           <template v-else>
             <span v-if="msg.kind === 'mic'" class="chat-icon mdi mdi-microphone" />
+            <span v-if="msg.kind === 'signal'" class="chat-icon mdi mdi-message-text-outline" />
 
             <template v-if="editingMessageId === msg.id">
               <span

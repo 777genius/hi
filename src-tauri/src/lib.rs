@@ -127,6 +127,7 @@ pub fn run() {
             commands::companion_clear_history,
             commands::companion_request_ai,
             commands::companion_send_prompt,
+            commands::cancel_haiku_streams,
             commands::companion_set_desktop_blackout,
             commands::set_companion_system_prompt,
             commands::update_ui_preferences,
@@ -666,6 +667,8 @@ pub fn run() {
                     "Companion runtime initialized - listener stays disabled until enable_companion_mode"
                 );
             }
+
+            presentation::signal_bridge::start_signal_receiver(app.handle().clone());
 
             // Запускаем фоновую проверку обновлений (каждые 6 часов)
             log::info!("Starting background update checker");

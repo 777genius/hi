@@ -2,8 +2,10 @@ use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::RecordingStatus;
+use crate::infrastructure::signal::SignalIncomingMessage;
 use crate::presentation::companion::{
-    CompanionAttachment, CompanionLlmCandidate, CompanionMessage, LIVE_STT_MESSAGE_ID,
+    CompanionAttachment, CompanionLlmCandidate, CompanionMessage, CompanionMessageKind,
+    LIVE_STT_MESSAGE_ID,
 };
 use crate::presentation::events::{FinalTranscriptionPayload, PartialTranscriptionPayload};
 use crate::presentation::interview_memory_bridge::{
@@ -24,7 +26,7 @@ const MAX_SELECTED_MESSAGE_IDS: usize = 200;
 #[derive(Debug, Clone)]
 struct ContextPart {
     id: String,
-    kind: String,
+    kind: CompanionMessageKind,
     line: String,
 }
 
@@ -435,7 +437,7 @@ async fn is_system_text_duplicate_of_mic(
     let timeline = state.companion_timeline.read().await;
     let mut recent_checked = 0usize;
     for message in timeline.iter().rev() {
-        if message.kind != "mic" || message.status != "final" {
+        if message.kind != CompanionMessageKind::Mic || message.status != "final" {
             continue;
         }
         recent_checked += 1;
@@ -472,7 +474,7 @@ async fn is_mic_text_duplicate_of_system(state: &AppState, text: &str, now: i64)
     let timeline = state.companion_timeline.read().await;
     let mut recent_checked = 0usize;
     for message in timeline.iter().rev() {
-        if message.kind != "stt" || message.status != "final" {
+        if message.kind != CompanionMessageKind::Stt || message.status != "final" {
             continue;
         }
         recent_checked += 1;
@@ -673,7 +675,7 @@ pub async fn append_system_final(
     timeline.push(CompanionMessage {
         id: message_id.clone(),
         seq,
-        kind: "stt".to_string(),
+        kind: CompanionMessageKind::Stt,
         role: "incoming".to_string(),
         status: "final".to_string(),
         text: transcription.text.clone(),
@@ -690,7 +692,9 @@ pub async fn append_system_final(
     });
 
     for item in timeline.iter_mut() {
-        if item.kind == "haiku" && item.insert_after_id.as_deref() == Some(LIVE_STT_MESSAGE_ID) {
+        if item.kind == CompanionMessageKind::Haiku
+            && item.insert_after_id.as_deref() == Some(LIVE_STT_MESSAGE_ID)
+        {
             item.insert_after_id = Some(message_id.clone());
         }
     }
@@ -742,7 +746,7 @@ pub async fn append_focus_copy_system_final(
     timeline.push(CompanionMessage {
         id: message_id.clone(),
         seq,
-        kind: "stt".to_string(),
+        kind: CompanionMessageKind::Stt,
         role: "incoming".to_string(),
         status: "final".to_string(),
         text,
@@ -759,7 +763,9 @@ pub async fn append_focus_copy_system_final(
     });
 
     for item in timeline.iter_mut() {
-        if item.kind == "haiku" && item.insert_after_id.as_deref() == Some(LIVE_STT_MESSAGE_ID) {
+        if item.kind == CompanionMessageKind::Haiku
+            && item.insert_after_id.as_deref() == Some(LIVE_STT_MESSAGE_ID)
+        {
             item.insert_after_id = Some(message_id.clone());
         }
     }
@@ -787,6 +793,67 @@ pub async fn append_focus_copy_system_final(
     Some(message_id)
 }
 
+pub async fn append_signal_message(
+    state: &AppState,
+    incoming: &SignalIncomingMessage,
+) -> Option<String> {
+    let text = incoming.text.trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+
+    let message_id = incoming.id.trim().to_string();
+    if message_id.is_empty() {
+        return None;
+    }
+
+    let mut timeline = state.companion_timeline.write().await;
+    if timeline.iter().any(|message| message.id == message_id) {
+        return None;
+    }
+
+    let seq = next_seq(state);
+    let generation = state
+        .companion_conversation_generation
+        .load(Ordering::Relaxed);
+    timeline.push(CompanionMessage {
+        id: message_id.clone(),
+        seq,
+        kind: CompanionMessageKind::Signal,
+        role: "incoming".to_string(),
+        status: "final".to_string(),
+        text: text.clone(),
+        created_at_ms: incoming.timestamp_ms,
+        session_id: None,
+        request_id: None,
+        generation: Some(generation),
+        insert_after_id: None,
+        stt_index: None,
+        deleted: false,
+        attachments: None,
+        candidates: None,
+        active_candidate_id: None,
+    });
+    drop(timeline);
+
+    crate::presentation::interview_memory_bridge::spawn_ingest_timeline_event(
+        state,
+        crate::presentation::interview_memory_bridge::MemoryTimelineEvent {
+            source: crate::presentation::interview_memory_bridge::MemoryTimelineSource::Signal,
+            event_id: message_id.clone(),
+            text,
+            created_at_ms: incoming.timestamp_ms,
+            seq: Some(seq),
+            attached_to_prompt: false,
+            final_answer: false,
+        },
+    )
+    .await;
+
+    prune_timeline(state).await;
+    Some(message_id)
+}
+
 pub async fn append_prompt_message(state: &AppState, prompt: CompanionPromptDraft) {
     if prompt.id.trim().is_empty() {
         return;
@@ -806,7 +873,7 @@ pub async fn append_prompt_message(state: &AppState, prompt: CompanionPromptDraf
         .push(CompanionMessage {
             id: prompt.id,
             seq,
-            kind: "prompt".to_string(),
+            kind: CompanionMessageKind::Prompt,
             role: "outgoing".to_string(),
             status: "final".to_string(),
             text: prompt.text,
@@ -856,7 +923,7 @@ pub async fn begin_haiku_message(state: &AppState, request: CompanionHaikuStart)
         .push(CompanionMessage {
             id: request.request_id.clone(),
             seq,
-            kind: "haiku".to_string(),
+            kind: CompanionMessageKind::Haiku,
             role: "outgoing".to_string(),
             status: "streaming".to_string(),
             text: String::new(),
@@ -884,7 +951,7 @@ pub async fn settle_active_haiku_generation(state: &AppState) -> bool {
     {
         let mut timeline = state.companion_timeline.write().await;
         for message in timeline.iter_mut() {
-            if message.kind != "haiku"
+            if message.kind != CompanionMessageKind::Haiku
                 || message.status != "streaming"
                 || message.generation != Some(current_generation)
             {
@@ -918,6 +985,53 @@ pub async fn settle_active_haiku_generation(state: &AppState) -> bool {
         .retain(|request_id, generation| {
             *generation != current_generation
                 || !settled_request_ids.iter().any(|id| id == request_id)
+        });
+
+    true
+}
+
+pub async fn cancel_active_haiku_generation(state: &AppState) -> bool {
+    let current_generation = state
+        .companion_conversation_generation
+        .load(Ordering::Relaxed);
+    let mut cancelled_request_ids = Vec::new();
+    let mut changed = false;
+
+    {
+        let mut timeline = state.companion_timeline.write().await;
+        for message in timeline.iter_mut() {
+            if message.kind != CompanionMessageKind::Haiku
+                || message.status != "streaming"
+                || message.generation != Some(current_generation)
+            {
+                continue;
+            }
+
+            cancelled_request_ids.push(message.id.clone());
+            message.status = "final".to_string();
+            message.deleted = true;
+            if let Some(candidates) = message.candidates.as_mut() {
+                for candidate in candidates.iter_mut() {
+                    if candidate.status == "streaming" {
+                        candidate.status = "final".to_string();
+                    }
+                }
+            }
+            changed = true;
+        }
+    }
+
+    if cancelled_request_ids.is_empty() {
+        return changed;
+    }
+
+    state
+        .companion_request_generations
+        .write()
+        .await
+        .retain(|request_id, generation| {
+            *generation != current_generation
+                || !cancelled_request_ids.iter().any(|id| id == request_id)
         });
 
     true
@@ -992,13 +1106,30 @@ pub async fn append_haiku_candidate_delta(
 }
 
 pub async fn finalize_haiku_message(state: &AppState, request_id: &str) {
-    finalize_haiku_candidate(state, request_id, None).await;
+    finalize_haiku_candidate_with_normalizer(state, request_id, None, None).await;
+}
+
+pub async fn finalize_haiku_message_with_normalizer(
+    state: &AppState,
+    request_id: &str,
+    normalizer: Option<fn(&str) -> String>,
+) {
+    finalize_haiku_candidate_with_normalizer(state, request_id, None, normalizer).await;
 }
 
 pub async fn finalize_haiku_candidate(
     state: &AppState,
     request_id: &str,
     candidate_id: Option<&str>,
+) {
+    finalize_haiku_candidate_with_normalizer(state, request_id, candidate_id, None).await;
+}
+
+pub async fn finalize_haiku_candidate_with_normalizer(
+    state: &AppState,
+    request_id: &str,
+    candidate_id: Option<&str>,
+    normalizer: Option<fn(&str) -> String>,
 ) {
     if request_id.trim().is_empty() {
         return;
@@ -1045,6 +1176,9 @@ pub async fn finalize_haiku_candidate(
                 .as_mut()
                 .and_then(|candidates| candidates.iter_mut().find(|item| item.id == candidate_id))
             {
+                if let Some(normalizer) = normalizer {
+                    candidate.text = normalizer(&candidate.text);
+                }
                 candidate.status = "final".to_string();
                 if active_candidate_id.as_deref() == Some(candidate_id) {
                     message.text = candidate.text.clone();
@@ -1061,6 +1195,9 @@ pub async fn finalize_haiku_candidate(
                 ));
             }
         } else {
+            if let Some(normalizer) = normalizer {
+                message.text = normalizer(&message.text);
+            }
             message.status = "final".to_string();
             if !message.text.trim().is_empty() {
                 final_answer_to_ingest = Some((
@@ -1333,7 +1470,7 @@ async fn append_microphone_message(
         .push(CompanionMessage {
             id: format!("mic:{}:{}", session_id, seq),
             seq,
-            kind: "mic".to_string(),
+            kind: CompanionMessageKind::Mic,
             role: "outgoing".to_string(),
             status: "final".to_string(),
             text: text.to_string(),
@@ -1481,17 +1618,17 @@ async fn collect_context_parts(state: &AppState, include_full_history: bool) -> 
         if message.deleted {
             continue;
         }
-        if message.kind == "haiku" && message.status != "final" {
+        if message.kind == CompanionMessageKind::Haiku && message.status != "final" {
             continue;
         }
         if !include_full_history && message.seq <= context_floor_seq {
             continue;
         }
-        let line = format_context_line(message.kind.as_str(), &message.text);
+        let line = format_context_line(message.kind, &message.text);
         if !line.is_empty() {
             parts.push(ContextPart {
                 id: message.id.clone(),
-                kind: message.kind.clone(),
+                kind: message.kind,
                 line,
             });
         }
@@ -1500,14 +1637,14 @@ async fn collect_context_parts(state: &AppState, include_full_history: bool) -> 
     if let Some(text) = live_system {
         parts.push(ContextPart {
             id: LIVE_STT_MESSAGE_ID.to_string(),
-            kind: "stt".to_string(),
+            kind: CompanionMessageKind::Stt,
             line: format!("ОС: {}", text),
         });
     }
     if let Some(text) = live_mic {
         parts.push(ContextPart {
             id: "mic:live".to_string(),
-            kind: "mic".to_string(),
+            kind: CompanionMessageKind::Mic,
             line: format!("МИКРОФОН: {}", text),
         });
     }
@@ -1546,17 +1683,17 @@ fn select_context_parts_by_ids(parts: &[ContextPart], selected_ids: &[String]) -
         .collect()
 }
 
-fn format_context_line(kind: &str, text: &str) -> String {
+fn format_context_line(kind: CompanionMessageKind, text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return String::new();
     }
     match kind {
-        "stt" => format!("ОС: {}", trimmed),
-        "mic" => format!("МИКРОФОН: {}", trimmed),
-        "prompt" => format!("ЗАПРОС: {}", trimmed),
-        "haiku" => format!("ПОМОЩНИК: {}", trimmed),
-        _ => trimmed.to_string(),
+        CompanionMessageKind::Stt | CompanionMessageKind::Signal => format!("ОС: {}", trimmed),
+        CompanionMessageKind::Mic => format!("МИКРОФОН: {}", trimmed),
+        CompanionMessageKind::Prompt => format!("ЗАПРОС: {}", trimmed),
+        CompanionMessageKind::Haiku => format!("ПОМОЩНИК: {}", trimmed),
+        CompanionMessageKind::Context => trimmed.to_string(),
     }
 }
 
@@ -1669,7 +1806,7 @@ fn add_anchor_candidate(
         index,
         ContextPart {
             id: part.id.clone(),
-            kind: part.kind.clone(),
+            kind: part.kind,
             line,
         },
     ));
@@ -1681,10 +1818,10 @@ fn trim_context_anchor_line(line: &str) -> String {
 }
 
 fn is_important_older_context_part(part: &ContextPart) -> bool {
-    if part.kind == "prompt" {
+    if part.kind == CompanionMessageKind::Prompt {
         return true;
     }
-    if part.kind == "haiku" {
+    if part.kind == CompanionMessageKind::Haiku {
         return false;
     }
 
@@ -1773,14 +1910,14 @@ fn is_important_pruned_old_message(message: &CompanionMessage) -> bool {
     if message.deleted {
         return false;
     }
-    if message.kind == "haiku" {
+    if message.kind == CompanionMessageKind::Haiku {
         return false;
     }
 
-    let line = format_context_line(message.kind.as_str(), &message.text);
+    let line = format_context_line(message.kind, &message.text);
     is_important_older_context_part(&ContextPart {
         id: message.id.clone(),
-        kind: message.kind.clone(),
+        kind: message.kind,
         line,
     })
 }
@@ -1828,7 +1965,7 @@ fn select_context_parts(raw_parts: &[ContextPart]) -> Vec<ContextPart> {
             } else {
                 Some(ContextPart {
                     id: part.id.clone(),
-                    kind: part.kind.clone(),
+                    kind: part.kind,
                     line: line.to_string(),
                 })
             }
@@ -1854,7 +1991,7 @@ fn select_context_parts(raw_parts: &[ContextPart]) -> Vec<ContextPart> {
                 0,
                 ContextPart {
                     id: part.id.clone(),
-                    kind: part.kind.clone(),
+                    kind: part.kind,
                     line: trim_context_text_to(&part.line, recent_limit),
                 },
             );
@@ -1919,7 +2056,7 @@ fn select_context_parts(raw_parts: &[ContextPart]) -> Vec<ContextPart> {
         }
         return vec![ContextPart {
             id: "context:trimmed".to_string(),
-            kind: "context".to_string(),
+            kind: CompanionMessageKind::Context,
             line,
         }];
     }
@@ -2002,12 +2139,13 @@ fn selected_memory_context_label(part: &ContextPart) -> &'static str {
 }
 
 fn memory_context_label(part: &ContextPart) -> &'static str {
-    match part.kind.as_str() {
-        "stt" => "system_audio",
-        "mic" => "microphone",
-        "prompt" => "manual_prompt",
-        "haiku" => "assistant",
-        _ => "recent_timeline",
+    match part.kind {
+        CompanionMessageKind::Stt => "system_audio",
+        CompanionMessageKind::Mic => "microphone",
+        CompanionMessageKind::Signal => "signal",
+        CompanionMessageKind::Prompt => "manual_prompt",
+        CompanionMessageKind::Haiku => "assistant",
+        CompanionMessageKind::Context => "recent_timeline",
     }
 }
 
@@ -2028,7 +2166,7 @@ pub async fn resolve_insert_after_id(state: &AppState) -> Option<String> {
 
     let mut last_base_id: Option<String> = None;
     for message in state.companion_timeline.read().await.iter() {
-        if message.deleted || message.kind == "haiku" {
+        if message.deleted || message.kind == CompanionMessageKind::Haiku {
             continue;
         }
         last_base_id = Some(message.id.clone());
@@ -2067,6 +2205,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signal_message_enters_context_as_interviewer_text() {
+        let state = AppState::default();
+
+        let message_id = append_signal_message(
+            &state,
+            &SignalIncomingMessage {
+                id: "signal:abc".to_string(),
+                sender: "+111".to_string(),
+                conversation_id: Some("+111".to_string()),
+                timestamp_ms: 123,
+                text: "Signal question".to_string(),
+            },
+        )
+        .await
+        .expect("signal message id");
+
+        assert_eq!(message_id, "signal:abc");
+        assert_eq!(
+            build_context_text(&state, false).await,
+            "ОС: Signal question"
+        );
+        assert_eq!(
+            resolve_insert_after_id(&state).await.as_deref(),
+            Some("signal:abc")
+        );
+    }
+
+    #[tokio::test]
     async fn system_final_reanchors_live_haiku_insert_after_id() {
         let state = AppState::default();
 
@@ -2087,7 +2253,7 @@ mod tests {
         let timeline = state.companion_timeline.read().await;
         let stt = timeline
             .iter()
-            .find(|message| message.kind == "stt")
+            .find(|message| message.kind == CompanionMessageKind::Stt)
             .expect("stt message");
         let haiku = timeline
             .iter()
@@ -2116,7 +2282,7 @@ mod tests {
             .find(|message| message.id == message_id)
             .expect("focus copy message");
 
-        assert_eq!(message.kind, "stt");
+        assert_eq!(message.kind, CompanionMessageKind::Stt);
         assert_eq!(message.role, "incoming");
         assert_eq!(message.status, "final");
         assert_eq!(message.session_id, None);
@@ -2151,7 +2317,7 @@ mod tests {
         let timeline = state.companion_timeline.read().await;
         let stt = timeline
             .iter()
-            .find(|message| message.kind == "stt")
+            .find(|message| message.kind == CompanionMessageKind::Stt)
             .expect("stt message");
 
         assert_eq!(stt.text, "my number is two two two two three");
@@ -2243,7 +2409,7 @@ mod tests {
         let timeline = state.companion_timeline.read().await;
         let stt = timeline
             .iter()
-            .find(|message| message.kind == "stt")
+            .find(|message| message.kind == CompanionMessageKind::Stt)
             .expect("stt message");
         assert_eq!(stt.text, "stable segment");
     }
@@ -2322,7 +2488,7 @@ mod tests {
         let timeline = state.companion_timeline.read().await;
         let mic = timeline
             .iter()
-            .find(|message| message.kind == "mic")
+            .find(|message| message.kind == CompanionMessageKind::Mic)
             .expect("mic message");
         assert_eq!(mic.text, "stable microphone");
     }
@@ -2761,7 +2927,7 @@ mod tests {
         for idx in 0..24 {
             parts.push(ContextPart {
                 id: format!("stt:old:{idx}"),
-                kind: "stt".to_string(),
+                kind: CompanionMessageKind::Stt,
                 line: format!(
                     "ОС: CODE-OLD-{idx:02} function sample{idx}() {{ return {idx}; }} {}",
                     "x".repeat(1_200)
@@ -2770,13 +2936,13 @@ mod tests {
         }
         parts.push(ContextPart {
             id: "haiku:old-noise".to_string(),
-            kind: "haiku".to_string(),
+            kind: CompanionMessageKind::Haiku,
             line: format!("ПОМОЩНИК: ASSISTANT-OLD-NOISE-001 {}", "y".repeat(12_000)),
         });
         for idx in 0..180 {
             parts.push(ContextPart {
                 id: format!("stt:recent:{idx}"),
-                kind: "stt".to_string(),
+                kind: CompanionMessageKind::Stt,
                 line: format!("ОС: RECENT-HOUR-{idx:03} {}", "z".repeat(220)),
             });
         }
@@ -2795,7 +2961,7 @@ mod tests {
         let parts = vec![
             ContextPart {
                 id: "stt:code-alpha".to_string(),
-                kind: "stt".to_string(),
+                kind: CompanionMessageKind::Stt,
                 line: format!(
                     "ОС: CODE_CTX_E2E_ALPHA function debounceSearch() {{ return true; }} {}",
                     "x".repeat(900)
@@ -2803,25 +2969,25 @@ mod tests {
             },
             ContextPart {
                 id: "stt:fact-one".to_string(),
-                kind: "stt".to_string(),
+                kind: CompanionMessageKind::Stt,
                 line: "ОС: Контрольный голосовой факт номер один. Проект называется Северный мост."
                     .to_string(),
             },
             ContextPart {
                 id: "stt:fact-two".to_string(),
-                kind: "stt".to_string(),
+                kind: CompanionMessageKind::Stt,
                 line: "ОС: Контрольный голосовой факт номер два. Для очереди событий нужно использовать очередь, а не стек."
                     .to_string(),
             },
             ContextPart {
                 id: "stt:fact-three".to_string(),
-                kind: "stt".to_string(),
+                kind: CompanionMessageKind::Stt,
                 line: "ОС: Контрольный голосовой факт номер три. Сложность решения должна быть линейная."
                     .to_string(),
             },
             ContextPart {
                 id: "stt:filler".to_string(),
-                kind: "stt".to_string(),
+                kind: CompanionMessageKind::Stt,
                 line: format!(
                     "ОС: длинный filler без контрольных фактов {}",
                     "y".repeat(65_000)
@@ -2829,7 +2995,7 @@ mod tests {
             },
             ContextPart {
                 id: "stt:late".to_string(),
-                kind: "stt".to_string(),
+                kind: CompanionMessageKind::Stt,
                 line: "ОС: Поздний маркер LATE_CTX_E2E_OMEGA.".to_string(),
             },
         ];
@@ -2897,7 +3063,7 @@ mod tests {
             let mut timeline = state.companion_timeline.write().await;
             let question = timeline
                 .iter_mut()
-                .find(|message| message.kind == "stt")
+                .find(|message| message.kind == CompanionMessageKind::Stt)
                 .expect("stt message");
             question.deleted = true;
         }
@@ -2941,6 +3107,43 @@ mod tests {
             .read()
             .await
             .contains_key("haiku:req-final"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_active_haiku_is_deleted_and_ignores_late_deltas() {
+        let state = AppState::default();
+
+        begin_haiku_message(
+            &state,
+            CompanionHaikuStart {
+                request_id: "haiku:req-cancel".to_string(),
+                insert_after_id: None,
+                created_at_ms: 300,
+                candidates: Vec::new(),
+                active_candidate_id: None,
+            },
+        )
+        .await;
+        append_haiku_delta(&state, "haiku:req-cancel", "partial answer").await;
+
+        assert!(cancel_active_haiku_generation(&state).await);
+        append_haiku_delta(&state, "haiku:req-cancel", " late delta").await;
+        finalize_haiku_message(&state, "haiku:req-cancel").await;
+
+        let timeline = state.companion_timeline.read().await;
+        let haiku = timeline
+            .iter()
+            .find(|message| message.id == "haiku:req-cancel")
+            .expect("haiku message");
+
+        assert_eq!(haiku.status, "final");
+        assert!(haiku.deleted);
+        assert_eq!(haiku.text, "partial answer");
+        assert!(!state
+            .companion_request_generations
+            .read()
+            .await
+            .contains_key("haiku:req-cancel"));
     }
 
     #[tokio::test]

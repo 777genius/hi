@@ -39,6 +39,7 @@ import {
   CMD_COMPANION_REQUEST_AI,
   CMD_COMPANION_SET_DESKTOP_BLACKOUT,
   CMD_COMPANION_SEND_PROMPT,
+  CMD_CANCEL_HAIKU_STREAMS,
   CMD_ENABLE_COMPANION_MODE,
   CMD_GET_COMPANION_SERVER_STATUS,
   CMD_GET_COMPANION_SNAPSHOT,
@@ -1394,10 +1395,17 @@ const onHaikuPointerLeave = () => {
   haikuHoverArmed.value = true;
 };
 
-const onHaikuClick = () => {
-  if (chatStore.companionModeEnabled) return;
+const onHaikuClick = async () => {
   if (!chatStore.isHaikuStreaming) return;
   chatStore.cancelActiveHaikuStreams();
+  try {
+    const response = await invoke<CompanionActionResponse>(CMD_CANCEL_HAIKU_STREAMS);
+    if (response.snapshot) {
+      applyCompanionSnapshot(response.snapshot);
+    }
+  } catch (err) {
+    console.error('Failed to cancel companion AI stream:', err);
+  }
   // Требуем реальный выход курсора, чтобы следующий запуск был только "снаружи".
   haikuHoverArmed.value = false;
 };
@@ -1427,7 +1435,7 @@ const onChatRowMouseMove = (e: MouseEvent) => {
 
 const onMessageClick = (
   e: MouseEvent,
-  message: { id: string; kind: 'stt' | 'mic' | 'haiku' | 'prompt'; status: 'final' | 'streaming' | 'error'; deleted?: boolean },
+  message: { id: string; kind: 'stt' | 'mic' | 'signal' | 'haiku' | 'prompt'; status: 'final' | 'streaming' | 'error'; deleted?: boolean },
 ) => {
   if (editingMessageId.value) return;
   if (message.kind === 'haiku' || message.deleted || message.status !== 'final') return;
@@ -1448,7 +1456,7 @@ const onFeedRowMouseMove = (e: MouseEvent) => {
 
 const onFeedMessageClick = (
   e: MouseEvent,
-  msg: { id: string; kind: 'stt' | 'mic' | 'haiku' | 'prompt'; status: 'final' | 'streaming' | 'error'; deleted?: boolean },
+  msg: { id: string; kind: 'stt' | 'mic' | 'signal' | 'haiku' | 'prompt'; status: 'final' | 'streaming' | 'error'; deleted?: boolean },
 ) => {
   onMessageClick(e, msg);
 };
@@ -2030,15 +2038,18 @@ const onChatMouseDown = (e: MouseEvent) => {
               </button>
             </template>
           </v-tooltip>
-          <v-tooltip :text="chatStore.isHaikuStreaming ? (chatStore.companionModeEnabled ? 'Генерация идёт на backend' : 'Отменить генерацию') : 'Отправить в AI'" location="top">
+          <v-tooltip :text="chatStore.isHaikuStreaming ? 'Отменить генерацию' : 'Отправить в AI'" location="top">
             <template #activator="{ props: tp }">
               <button
                 v-bind="tp"
                 class="haiku-button no-drag"
                 :class="{ loading: chatStore.isHaikuStreaming }"
-                :disabled="(!chatStore.canRequestHaiku && !chatStore.isHaikuStreaming) || (chatStore.companionModeEnabled && chatStore.isHaikuStreaming)"
+                :disabled="!chatStore.canRequestHaiku && !chatStore.isHaikuStreaming"
                 @pointerenter="onHaikuPointerEnter"
                 @pointerleave="onHaikuPointerLeave"
+                @mouseenter="onHaikuPointerEnter"
+                @mouseleave="onHaikuPointerLeave"
+                @mousemove="onHaikuPointerEnter"
                 @click="onHaikuClick"
               >
                 <span v-if="chatStore.isHaikuStreaming" class="haiku-spinner" />

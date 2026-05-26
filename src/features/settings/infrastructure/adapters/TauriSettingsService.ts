@@ -84,6 +84,22 @@ class TauriSettingsService {
     if (typeof config.interview_memory_enabled === 'boolean') {
       args.interviewMemoryEnabled = config.interview_memory_enabled;
     }
+    if (config.answer_language === 'auto' || config.answer_language === 'en' || config.answer_language === 'ru') {
+      args.answerLanguage = config.answer_language;
+    }
+    if (
+      config.answer_audience === 'auto' ||
+      config.answer_audience === 'internal' ||
+      config.answer_audience === 'client'
+    ) {
+      args.answerAudience = config.answer_audience;
+    }
+    if (typeof config.natural_answer_style_enabled === 'boolean') {
+      args.naturalAnswerStyleEnabled = config.natural_answer_style_enabled;
+    }
+    if (config.answer_imperfection_level === 'off' || config.answer_imperfection_level === 'light') {
+      args.answerImperfectionLevel = config.answer_imperfection_level;
+    }
 
     await invokeUpdateAppConfig(args);
   }

@@ -28,6 +28,7 @@ export const CMD_COMPANION_CLEAR_CONTEXT = 'companion_clear_context' as const;
 export const CMD_COMPANION_CLEAR_HISTORY = 'companion_clear_history' as const;
 export const CMD_COMPANION_REQUEST_AI = 'companion_request_ai' as const;
 export const CMD_COMPANION_SEND_PROMPT = 'companion_send_prompt' as const;
+export const CMD_CANCEL_HAIKU_STREAMS = 'cancel_haiku_streams' as const;
 export const CMD_COMPANION_SET_DESKTOP_BLACKOUT = 'companion_set_desktop_blackout' as const;
 export const CMD_SET_COMPANION_SYSTEM_PROMPT = 'set_companion_system_prompt' as const;
 

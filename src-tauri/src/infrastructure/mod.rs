@@ -14,6 +14,7 @@ pub mod llm_factory;
 pub mod local_interview_memory;
 pub mod microphone_mute;
 pub mod models;
+pub mod signal;
 /// Infrastructure layer - contains concrete implementations of domain interfaces
 /// This layer depends on domain layer but is independent of application layer
 pub mod stt;

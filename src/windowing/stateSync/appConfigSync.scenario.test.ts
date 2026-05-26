@@ -47,6 +47,10 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
       selected_audio_device: null,
       selected_output_audio_device: null,
       interview_memory_enabled: true,
+      answer_language: 'en' as const,
+      answer_audience: 'internal' as const,
+      natural_answer_style_enabled: true,
+      answer_imperfection_level: 'light' as const,
     };
 
     invokeMock.mockImplementation(async (commandName: string, args?: any) => {
@@ -61,6 +65,21 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
         }
         if (typeof args?.interviewMemoryEnabled === 'boolean') {
           currentData = { ...currentData, interview_memory_enabled: args.interviewMemoryEnabled };
+        }
+        if (typeof args?.answerLanguage === 'string') {
+          currentData = { ...currentData, answer_language: args.answerLanguage };
+        }
+        if (typeof args?.answerAudience === 'string') {
+          currentData = { ...currentData, answer_audience: args.answerAudience };
+        }
+        if (typeof args?.naturalAnswerStyleEnabled === 'boolean') {
+          currentData = {
+            ...currentData,
+            natural_answer_style_enabled: args.naturalAnswerStyleEnabled,
+          };
+        }
+        if (typeof args?.answerImperfectionLevel === 'string') {
+          currentData = { ...currentData, answer_imperfection_level: args.answerImperfectionLevel };
         }
         currentRevision = String(BigInt(currentRevision) + BigInt(1));
 
@@ -87,6 +106,8 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
     await appConfigMain.startSync();
     expect(appConfigMain.autoCopyToClipboard).toBe(false);
     expect(appConfigMain.interviewMemoryEnabled).toBe(true);
+    expect(appConfigMain.answerLanguage).toBe('en');
+    expect(appConfigMain.answerAudience).toBe('internal');
 
     // "Settings window" triggers a stale auto-copy update; app store keeps auto actions disabled.
     await invokeMock(CMD_UPDATE_APP_CONFIG, { autoCopyToClipboard: true });
@@ -99,6 +120,20 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
 
     await vi.waitFor(() => {
       expect(appConfigMain.interviewMemoryEnabled).toBe(false);
+    });
+
+    await invokeMock(CMD_UPDATE_APP_CONFIG, {
+      answerLanguage: 'ru',
+      answerAudience: 'client',
+      naturalAnswerStyleEnabled: false,
+      answerImperfectionLevel: 'off',
+    });
+
+    await vi.waitFor(() => {
+      expect(appConfigMain.answerLanguage).toBe('ru');
+      expect(appConfigMain.answerAudience).toBe('client');
+      expect(appConfigMain.naturalAnswerStyleEnabled).toBe(false);
+      expect(appConfigMain.answerImperfectionLevel).toBe('off');
     });
   });
 });

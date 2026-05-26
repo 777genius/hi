@@ -313,6 +313,19 @@ pub async fn ensure_history_cleared(
     success(state, app_handle, "cleared_history").await
 }
 
+pub async fn cancel_ai(
+    state: &AppState,
+    app_handle: &AppHandle,
+) -> Result<CompanionActionResponse, String> {
+    let changed =
+        crate::presentation::companion_timeline::cancel_active_haiku_generation(state).await;
+    if !changed {
+        return noop(app_handle, "noop").await;
+    }
+
+    success(state, app_handle, "cancelled_ai").await
+}
+
 pub async fn request_ai(
     state: &AppState,
     app_handle: &AppHandle,

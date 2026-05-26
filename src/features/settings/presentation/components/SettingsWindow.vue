@@ -24,6 +24,7 @@ import MicTestSection from './sections/MicTestSection.vue';
 import UpdatesSection from './sections/UpdatesSection.vue';
 import KeytermsSection from './sections/KeytermsSection.vue';
 import MemorySection from './sections/MemorySection.vue';
+import AnswerStyleSection from './sections/AnswerStyleSection.vue';
 
 const { t, locale } = useI18n();
 const { loadConfig, saveConfig, isSaving, isLoading, errorMessage, clearError } =
@@ -62,6 +63,10 @@ function snapshotSettingsState(): SettingsState {
     autoCopyToClipboard: settingsStore.autoCopyToClipboard,
     autoPasteText: settingsStore.autoPasteText,
     interviewMemoryEnabled: settingsStore.interviewMemoryEnabled,
+    answerLanguage: settingsStore.answerLanguage,
+    answerAudience: settingsStore.answerAudience,
+    naturalAnswerStyleEnabled: settingsStore.naturalAnswerStyleEnabled,
+    answerImperfectionLevel: settingsStore.answerImperfectionLevel,
     deepgramKeyterms: settingsStore.deepgramKeyterms,
   };
 }
@@ -214,6 +219,7 @@ watch(
         </div>
         <KeytermsSection />
         <MemorySection />
+        <AnswerStyleSection />
         <HotkeySection />
 
         <SystemAudioDeviceSection />

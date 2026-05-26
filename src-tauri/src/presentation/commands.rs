@@ -1237,7 +1237,7 @@ where
 #[cfg(test)]
 mod snapshot_contract_tests {
     use super::{AppConfigSnapshotData, SnapshotEnvelope, SttConfigSnapshotData};
-    use crate::domain::SttProviderType;
+    use crate::domain::{AnswerAudience, AnswerImperfectionLevel, AnswerLanguage, SttProviderType};
 
     fn assert_absent(json: &str, needles: &[&str]) {
         for needle in needles {
@@ -1262,6 +1262,10 @@ mod snapshot_contract_tests {
                 selected_audio_device: None,
                 selected_output_audio_device: None,
                 interview_memory_enabled: true,
+                answer_language: AnswerLanguage::English,
+                answer_audience: AnswerAudience::Internal,
+                natural_answer_style_enabled: true,
+                answer_imperfection_level: AnswerImperfectionLevel::Light,
             },
         };
 
@@ -1683,6 +1687,10 @@ pub struct AppConfigSnapshotData {
     pub selected_audio_device: Option<String>,
     pub selected_output_audio_device: Option<String>,
     pub interview_memory_enabled: bool,
+    pub answer_language: crate::domain::AnswerLanguage,
+    pub answer_audience: crate::domain::AnswerAudience,
+    pub natural_answer_style_enabled: bool,
+    pub answer_imperfection_level: crate::domain::AnswerImperfectionLevel,
 }
 
 /// Get current application configuration + revision (for cross-window sync)
@@ -1700,6 +1708,10 @@ pub async fn get_app_config_snapshot(
         selected_audio_device: config.selected_audio_device,
         selected_output_audio_device: config.selected_output_audio_device,
         interview_memory_enabled: config.interview_memory_enabled,
+        answer_language: config.answer_style.language,
+        answer_audience: config.answer_style.audience,
+        natural_answer_style_enabled: config.answer_style.natural_answer_style_enabled,
+        answer_imperfection_level: config.answer_style.imperfection_level,
     };
     let revision = state.app_config_revision.read().await.to_string();
     Ok(SnapshotEnvelope { revision, data })
@@ -1918,6 +1930,14 @@ pub async fn companion_send_prompt(
 }
 
 #[tauri::command]
+pub async fn cancel_haiku_streams(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<crate::presentation::companion_actions::CompanionActionResponse, String> {
+    crate::presentation::companion_actions::cancel_ai(state.inner(), &app_handle).await
+}
+
+#[tauri::command]
 pub async fn companion_set_desktop_blackout(
     state: State<'_, AppState>,
     app_handle: AppHandle,
@@ -2010,9 +2030,13 @@ pub async fn update_app_config(
     selected_audio_device: Option<String>,
     selected_output_audio_device: Option<String>,
     interview_memory_enabled: Option<bool>,
+    answer_language: Option<crate::domain::AnswerLanguage>,
+    answer_audience: Option<crate::domain::AnswerAudience>,
+    natural_answer_style_enabled: Option<bool>,
+    answer_imperfection_level: Option<crate::domain::AnswerImperfectionLevel>,
 ) -> Result<(), String> {
-    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, device: {:?}, memory_enabled: {:?}",
-        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, selected_audio_device, interview_memory_enabled);
+    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, device: {:?}, memory_enabled: {:?}, answer_language: {:?}, answer_audience: {:?}, natural_answer_style: {:?}, answer_imperfection: {:?}",
+        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, selected_audio_device, interview_memory_enabled, answer_language, answer_audience, natural_answer_style_enabled, answer_imperfection_level);
 
     // Защита от "тихих" провалов: если фронт случайно отправил snake_case ключи,
     // Tauri не сматчит аргументы, и сюда придут одни None.
@@ -2024,8 +2048,12 @@ pub async fn update_app_config(
         && selected_audio_device.is_none()
         && selected_output_audio_device.is_none()
         && interview_memory_enabled.is_none()
+        && answer_language.is_none()
+        && answer_audience.is_none()
+        && natural_answer_style_enabled.is_none()
+        && answer_imperfection_level.is_none()
     {
-        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, selectedAudioDevice, interviewMemoryEnabled).".to_string());
+        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, selectedAudioDevice, interviewMemoryEnabled, answerLanguage).".to_string());
     }
 
     let mut config = state.config.write().await;
@@ -2135,6 +2163,54 @@ pub async fn update_app_config(
             );
             config.interview_memory_enabled = enabled;
             interview_memory_changed = true;
+            any_changed = true;
+        }
+    }
+
+    if let Some(language) = answer_language {
+        if config.answer_style.language != language {
+            log::info!(
+                "Updating answer language: {:?} -> {:?}",
+                config.answer_style.language,
+                language
+            );
+            config.answer_style.language = language;
+            any_changed = true;
+        }
+    }
+
+    if let Some(audience) = answer_audience {
+        if config.answer_style.audience != audience {
+            log::info!(
+                "Updating answer audience: {:?} -> {:?}",
+                config.answer_style.audience,
+                audience
+            );
+            config.answer_style.audience = audience;
+            any_changed = true;
+        }
+    }
+
+    if let Some(enabled) = natural_answer_style_enabled {
+        if config.answer_style.natural_answer_style_enabled != enabled {
+            log::info!(
+                "Updating natural_answer_style_enabled: {} -> {}",
+                config.answer_style.natural_answer_style_enabled,
+                enabled
+            );
+            config.answer_style.natural_answer_style_enabled = enabled;
+            any_changed = true;
+        }
+    }
+
+    if let Some(level) = answer_imperfection_level {
+        if config.answer_style.imperfection_level != level {
+            log::info!(
+                "Updating answer imperfection level: {:?} -> {:?}",
+                config.answer_style.imperfection_level,
+                level
+            );
+            config.answer_style.imperfection_level = level;
             any_changed = true;
         }
     }
@@ -2955,13 +3031,22 @@ pub async fn get_output_audio_devices() -> Result<Vec<String>, String> {
 const INTERVIEW_ANSWER_STYLE_GUARD: &str = r#"Правила стиля ответа:
 - Начинай сразу с ответа. Не повторяй вопрос пользователя и не пиши заголовки "Вопрос:"/"Ответ:".
 - Запрещено начинать с "Вопрос", "Ответ", заголовка # Ответ, "**Вопрос:**" или краткого пересказа вопроса.
-- Первая строка должна быть содержательным тезисом или буллетом ответа.
-- Не начинай с фраз вроде "Понял", "Конечно", "Хорошо" - сразу давай содержательный ответ."#;
+- Первая строка должна быть содержательным тезисом ответа, без мета-комментариев.
+- Не начинай с фраз вроде "Понял", "Конечно", "Хорошо" - сразу давай содержательный ответ.
+- Если пользователь спрашивает "что сказать" или "как ответить", выдай сам готовый ответ от первого лица, а не инструкцию. Не начинай с "I'd say", "You can say", "Say:" или похожих фраз.
+- Если пользователь спрашивает про конкретную компанию, проект, библиотеку или инструмент и это релевантно, сохрани точное название в ответе.
+- Для technical interview/profile ответов сохраняй центральные идентификаторы из контекста точно, включая API names, struct names, field names, crate names, protocol names и snake_case/camelCase термины.
+- Для вопросов про проекты, навыки или опыт сохраняй самый сильный proof: точное название проекта/достижения плюс одну конкретную технологию или метрику, если они есть в контексте.
+- Если в контексте есть и feature description, и стек/бенчмарк проекта, сначала сохрани стек/бенчмарк, а низкоценные workflow-детали убери.
+- Лучше убери общие прилагательные, чем конкретные proof-факты вроде названия проекта, технологий, бенчмарка или измеримого результата.
+- В project summary не заменяй конкретные технологии или метрики общим описанием фич, если в памяти доступны оба типа фактов.
+- Не добавляй общую концовку с предложением продолжить, если пользователь прямо не попросил продолжение.
+- Не используй символы "—" или "–". Только обычный дефис "-" или запятую.
+- Если точных деталей реализации нет в контексте, ответь ровно одним предложением: назови известный результат и скажи, что точных внутренних деталей в контексте нет. После этого остановись.
+- Не перечисляй возможные методы, категории, причины или внутренние технические подходы, и не добавляй предложение продолжить."#;
 
 fn with_interview_answer_style_guard(system_prompt: String) -> String {
-    if system_prompt.contains("Не повторяй вопрос пользователя")
-        || system_prompt.contains("Не повторяй \"ЗАПРОС:\"")
-    {
+    if system_prompt.contains("Правила стиля ответа:") {
         system_prompt
     } else {
         format!(
@@ -3059,25 +3144,25 @@ pub async fn start_haiku_stream(
             crate::domain::LlmProviderType::Backend => 0.2,
         });
 
-    let default_system_prompt = r#"Ты — ассистент на техническом собеседовании. Отвечай по-русски.
+    let default_system_prompt = r#"Ты - ассистент на техническом собеседовании. Отвечай по-русски.
 
-Контекст ниже — транскрипция, возможны ошибки распознавания. В нём есть строки:
-- "ОС:" — то, что я слышу (обычно реплики собеседника/вопросы).
-- "МИКРОФОН:" — то, что говорю я (мои ответы/мысли/иногда могу повторить вопрос).
-- "ПОМОЩНИК:" — предыдущие ответы ассистента (можно использовать как контекст).
+Контекст ниже - транскрипция, возможны ошибки распознавания. В нём есть строки:
+- "ОС:" - то, что я слышу (обычно реплики собеседника/вопросы).
+- "МИКРОФОН:" - то, что говорю я (мои ответы/мысли/иногда могу повторить вопрос).
+- "ПОМОЩНИК:" - предыдущие ответы ассистента (можно использовать как контекст).
 
 Твоя задача:
-1) Найти последний явный или неявный вопрос/задачу: в первую очередь из строк "ОС:". Если строк "ОС:" нет — используй строки "МИКРОФОН:".
+1) Найти последний явный или неявный вопрос/задачу: в первую очередь из строк "ОС:". Если строк "ОС:" нет - используй строки "МИКРОФОН:".
 2) Дать лучший краткий ответ по делу (без воды), можно с короткими примерами/шагами.
-3) Если вопрос неясен из-за распознавания — задай 1 уточняющий вопрос и предложи 1-2 вероятные интерпретации.
+3) Если вопрос неясен из-за распознавания - задай 1 уточняющий вопрос и предложи 1-2 вероятные интерпретации.
 4) Возможно в вопросах не будет "?". Ты должен понимать где вопросы.
 
 Формат ответа:
 - Начинай сразу с ответа. Не повторяй вопрос пользователя и не пиши заголовки "Вопрос:"/"Ответ:".
 - Запрещено начинать с "Вопрос", "Ответ", заголовка # Ответ, "**Вопрос:**" или краткого пересказа вопроса.
-- Первая строка должна быть содержательным тезисом или буллетом ответа.
+- Первая строка должна быть содержательным тезисом ответа.
 - Не начинай с фраз вроде "Понял", "Конечно", "Хорошо" - сразу давай содержательный ответ.
-- Сначала 3–7 буллетов с ответом (каждый пункт начинай с "- ").
+- Сначала 3-7 буллетов с ответом (каждый пункт начинай с "- "), если пользователь не просит другой формат.
 - Затем (если нужно) короткий пример кода.
 - Не пересказывай весь контекст и не цитируй теги "ОС:"/"МИКРОФОН:"/"ПОМОЩНИК:".
 
@@ -3088,7 +3173,7 @@ pub async fn start_haiku_stream(
   ```
 - Вместо <language> подставляй реальный язык (например: dart, ts, js, python, go, rust, bash, sql).
 - Для упоминаний технических идентификаторов (имя переменной/класса/функции/пакета/файла/поля/метода) используй inline code в Markdown (одинарные обратные кавычки).
-- Если это именно код (даже короткий фрагмент/выражение) и важна подсветка — используй fenced-блок с языком.
+- Если это именно код (даже короткий фрагмент/выражение) и важна подсветка - используй fenced-блок с языком.
 - Код должен быть ровно отформатирован: без нумерации строк, с корректными отступами, без мусорных префиксов.
 - Старайся давать минимально‑самодостаточный пример, который иллюстрирует главную идею (как на собеседовании).
 - Если полный код слишком длинный, допускается сокращать только с помощью комментариев соответствующего языка (например `// ...`, `# ...`, `/* ... */`) и после блока 1 строкой объяснить, что именно опущено. Не вставляй голые "..." как код."#;
@@ -3115,6 +3200,18 @@ pub async fn start_haiku_stream(
         })
         .unwrap_or_else(|| default_system_prompt.to_string());
     let system_prompt = with_interview_answer_style_guard(system_prompt);
+    let answer_style = { state.config.read().await.answer_style.clone() };
+    let system_prompt = crate::presentation::answer_style_prompt::with_answer_style_policy(
+        system_prompt,
+        &answer_style,
+    );
+    let temperature = crate::presentation::answer_style_prompt::adjusted_answer_temperature(
+        temperature,
+        &answer_style,
+    );
+    let final_answer_normalizer = answer_style.natural_answer_style_enabled.then_some(
+        crate::presentation::answer_style_prompt::compact_final_chat_answer as fn(&str) -> String,
+    );
 
     let model = match provider {
         crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_MODEL")
@@ -3188,14 +3285,9 @@ pub async fn start_haiku_stream(
 
     if parallel_openai_enabled {
         let openai_mini_model = openai_responses_model();
-        let openai_web_model = openai_responses_web_model();
-        let openai_web_search_enabled = openai_responses_web_search.unwrap_or(true);
         let openai_runtime_cfg = openai_responses_runtime_config()?;
-        match (
-            llm_factory.create(&openai_runtime_cfg),
-            llm_factory.create(&openai_runtime_cfg),
-        ) {
-            (Ok(openai_mini_provider), Ok(openai_web_provider)) => {
+        match llm_factory.create(&openai_runtime_cfg) {
+            Ok(openai_mini_provider) => {
                 let anthropic_candidate = HaikuCandidateMeta {
                     id: "anthropic".to_string(),
                     label: "Anthropic".to_string(),
@@ -3207,17 +3299,6 @@ pub async fn start_haiku_stream(
                     label: "OpenAI 5.4 mini".to_string(),
                     provider: "openai_responses".to_string(),
                     model: openai_mini_model.clone(),
-                };
-                let openai_web_candidate = HaikuCandidateMeta {
-                    id: "openai_responses_web".to_string(),
-                    label: if openai_web_search_enabled {
-                        "OpenAI 5.5 web"
-                    } else {
-                        "OpenAI 5.5"
-                    }
-                    .to_string(),
-                    provider: "openai_responses".to_string(),
-                    model: openai_web_model.clone(),
                 };
 
                 crate::presentation::companion_timeline::begin_haiku_message(
@@ -3247,15 +3328,6 @@ pub async fn start_haiku_stream(
                                 text: String::new(),
                                 error: None,
                             },
-                            crate::presentation::companion::CompanionLlmCandidate {
-                                id: openai_web_candidate.id.clone(),
-                                label: openai_web_candidate.label.clone(),
-                                provider: openai_web_candidate.provider.clone(),
-                                model: openai_web_candidate.model.clone(),
-                                status: "streaming".to_string(),
-                                text: String::new(),
-                                error: None,
-                            },
                         ],
                         active_candidate_id: Some(anthropic_candidate.id.clone()),
                     },
@@ -3268,10 +3340,6 @@ pub async fn start_haiku_stream(
                 let _ = app_handle.emit(
                     EVENT_HAIKU_CANDIDATE_START,
                     candidate_start_payload(&request_id, &openai_mini_candidate),
-                );
-                let _ = app_handle.emit(
-                    EVENT_HAIKU_CANDIDATE_START,
-                    candidate_start_payload(&request_id, &openai_web_candidate),
                 );
                 let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
@@ -3288,7 +3356,6 @@ pub async fn start_haiku_stream(
                 let system_prompt_clone = system_prompt.clone();
                 let anthropic_candidate_clone = anthropic_candidate.clone();
                 let openai_mini_candidate_clone = openai_mini_candidate.clone();
-                let openai_web_candidate_clone = openai_web_candidate.clone();
 
                 tauri::async_runtime::spawn(async move {
                     let anthropic_writer = spawn_companion_delta_writer(
@@ -3300,11 +3367,6 @@ pub async fn start_haiku_stream(
                         app_handle_clone.clone(),
                         request_id_clone.clone(),
                         Some(openai_mini_candidate_clone.id.clone()),
-                    );
-                    let openai_web_writer = spawn_companion_delta_writer(
-                        app_handle_clone.clone(),
-                        request_id_clone.clone(),
-                        Some(openai_web_candidate_clone.id.clone()),
                     );
 
                     let anthropic_request = crate::domain::LlmStreamRequest::new(
@@ -3324,17 +3386,6 @@ pub async fn start_haiku_stream(
                         Some(false),
                         openai_responses_reasoning_effort(),
                         openai_responses_verbosity(),
-                    );
-                    let openai_web_request = build_openai_responses_request(
-                        openai_web_model,
-                        system_prompt_clone,
-                        user_text,
-                        max_tokens,
-                        temperature,
-                        Vec::new(),
-                        Some(openai_web_search_enabled),
-                        openai_responses_web_reasoning_effort(),
-                        openai_responses_web_verbosity(),
                     );
 
                     let anthropic_future = async {
@@ -3389,34 +3440,8 @@ pub async fn start_haiku_stream(
                         result
                     };
 
-                    let openai_web_future = async {
-                        let app_handle_delta = app_handle_clone.clone();
-                        let request_id_delta = request_id_clone.clone();
-                        let delta_meta = openai_web_candidate_clone.clone();
-                        let companion_delta_tx = openai_web_writer.tx.clone();
-                        let result = openai_web_provider
-                            .stream_text(
-                                &openai_web_request,
-                                Box::new(move |delta| {
-                                    let delta_text = delta.to_string();
-                                    let _ = app_handle_delta.emit(
-                                        EVENT_HAIKU_DELTA,
-                                        candidate_delta_payload(
-                                            &request_id_delta,
-                                            delta_text.clone(),
-                                            Some(&delta_meta),
-                                        ),
-                                    );
-                                    let _ = companion_delta_tx.send(delta_text);
-                                }),
-                            )
-                            .await;
-                        drain_companion_delta_writer(openai_web_writer).await;
-                        result
-                    };
-
-                    let (anthropic_result, openai_mini_result, openai_web_result) =
-                        tokio::join!(anthropic_future, openai_mini_future, openai_web_future);
+                    let (anthropic_result, openai_mini_result) =
+                        tokio::join!(anthropic_future, openai_mini_future);
                     let anthropic_ok = settle_parallel_candidate(
                         &app_handle_clone,
                         &request_id_clone,
@@ -3431,15 +3456,8 @@ pub async fn start_haiku_stream(
                         openai_mini_result,
                     )
                     .await;
-                    let openai_web_ok = settle_parallel_candidate(
-                        &app_handle_clone,
-                        &request_id_clone,
-                        &openai_web_candidate_clone,
-                        openai_web_result,
-                    )
-                    .await;
 
-                    if anthropic_ok || openai_mini_ok || openai_web_ok {
+                    if anthropic_ok || openai_mini_ok {
                         let _ = app_handle_clone.emit(
                             EVENT_HAIKU_DONE,
                             candidate_done_payload(&request_id_clone, None),
@@ -3458,7 +3476,7 @@ pub async fn start_haiku_stream(
 
                 return Ok(request_id);
             }
-            (Err(err), _) | (_, Err(err)) => {
+            Err(err) => {
                 log::warn!(
                     "Failed to create OpenAI Responses parallel provider, falling back to single provider: {}",
                     err
@@ -3542,9 +3560,10 @@ pub async fn start_haiku_stream(
         match result {
             Ok(()) => {
                 if let Some(state) = app_handle_clone.try_state::<AppState>() {
-                    crate::presentation::companion_timeline::finalize_haiku_message(
+                    crate::presentation::companion_timeline::finalize_haiku_message_with_normalizer(
                         state.inner(),
                         &request_id_clone,
+                        final_answer_normalizer,
                     )
                     .await;
                     let _ = crate::presentation::companion::publish_snapshot_sse_only(
@@ -3611,24 +3630,12 @@ fn openai_responses_model() -> String {
         .unwrap_or_else(|_| crate::domain::DEFAULT_OPENAI_RESPONSES_MODEL.to_string())
 }
 
-fn openai_responses_web_model() -> String {
-    std::env::var("OPENAI_RESPONSES_WEB_MODEL").unwrap_or_else(|_| "gpt-5.5".to_string())
-}
-
 fn openai_responses_reasoning_effort() -> String {
     std::env::var("OPENAI_RESPONSES_REASONING_EFFORT").unwrap_or_else(|_| "low".to_string())
 }
 
-fn openai_responses_web_reasoning_effort() -> String {
-    std::env::var("OPENAI_RESPONSES_WEB_REASONING_EFFORT").unwrap_or_else(|_| "medium".to_string())
-}
-
 fn openai_responses_verbosity() -> String {
     std::env::var("OPENAI_RESPONSES_VERBOSITY").unwrap_or_else(|_| "low".to_string())
-}
-
-fn openai_responses_web_verbosity() -> String {
-    std::env::var("OPENAI_RESPONSES_WEB_VERBOSITY").unwrap_or_else(|_| "low".to_string())
 }
 
 fn openai_responses_web_search(
@@ -3769,24 +3776,31 @@ mod ai_prompt_payload_tests {
         assert!(prompt.contains("Не повторяй вопрос пользователя"));
         assert!(prompt.contains("\"Вопрос:\"/\"Ответ:\""));
         assert!(prompt.contains("Запрещено начинать с \"Вопрос\""));
+        assert!(prompt.contains("выдай сам готовый ответ от первого лица"));
+        assert!(prompt.contains("Не начинай с \"I'd say\""));
+        assert!(prompt.contains("точное название"));
+        assert!(prompt.contains("самый сильный proof"));
+        assert!(prompt.contains("Не используй символы"));
+        assert!(prompt.contains("возможные методы"));
     }
 
     #[test]
-    fn interview_answer_style_guard_does_not_duplicate_existing_rule() {
+    fn interview_answer_style_guard_upgrades_old_existing_rule() {
         let prompt = with_interview_answer_style_guard(
             "custom\nНе повторяй вопрос пользователя и отвечай кратко".to_string(),
         );
 
-        assert_eq!(prompt.matches("Не повторяй вопрос пользователя").count(), 1);
+        assert!(prompt.contains("Правила стиля ответа:"));
+        assert!(prompt.contains("выдай сам готовый ответ от первого лица"));
     }
 
     #[test]
-    fn interview_answer_style_guard_accepts_chat_request_rule() {
-        let prompt =
-            with_interview_answer_style_guard("custom\nНе повторяй \"ЗАПРОС:\"".to_string());
+    fn interview_answer_style_guard_does_not_duplicate_current_marker() {
+        let prompt = with_interview_answer_style_guard(
+            "custom\nПравила стиля ответа:\n- Уже есть актуальный guard".to_string(),
+        );
 
-        assert_eq!(prompt.matches("Не повторяй \"ЗАПРОС:\"").count(), 1);
-        assert!(!prompt.contains("Правила стиля ответа"));
+        assert_eq!(prompt.matches("Правила стиля ответа:").count(), 1);
     }
 }
 
@@ -3895,13 +3909,13 @@ pub async fn start_haiku_chat_stream(
             crate::domain::LlmProviderType::Backend => 0.2,
         });
 
-    let default_system_prompt = r#"Ты — ассистент на техническом собеседовании. Отвечай по-русски.
+    let default_system_prompt = r#"Ты - ассистент на техническом собеседовании. Отвечай по-русски.
 
-Контекст ниже — транскрипция, возможны ошибки распознавания. В нём есть строки:
-- "ОС:" — то, что я слышу (обычно реплики собеседника/вопросы).
-- "МИКРОФОН:" — то, что говорю я (мои ответы/мысли/иногда могу повторить вопрос).
-- "ЗАПРОС:" — мой ручной вопрос/вставка.
-- "ПОМОЩНИК:" — предыдущие ответы ассистента (можно использовать как контекст).
+Контекст ниже - транскрипция, возможны ошибки распознавания. В нём есть строки:
+- "ОС:" - то, что я слышу (обычно реплики собеседника/вопросы).
+- "МИКРОФОН:" - то, что говорю я (мои ответы/мысли/иногда могу повторить вопрос).
+- "ЗАПРОС:" - мой ручной вопрос/вставка.
+- "ПОМОЩНИК:" - предыдущие ответы ассистента (можно использовать как контекст).
 
 Твоя задача:
 1) Ответить на "ЗАПРОС:" с учётом контекста выше.
@@ -3911,9 +3925,9 @@ pub async fn start_haiku_chat_stream(
 Формат ответа:
 - Начинай сразу с ответа. Не повторяй "ЗАПРОС:" и не пиши заголовки "Вопрос:"/"Ответ:".
 - Запрещено начинать с "Вопрос", "Ответ", заголовка # Ответ, "**Вопрос:**" или краткого пересказа вопроса.
-- Первая строка должна быть содержательным тезисом или буллетом ответа.
+- Первая строка должна быть содержательным тезисом ответа.
 - Не начинай с фраз вроде "Понял", "Конечно", "Хорошо" - сразу давай содержательный ответ.
-- Сначала 3–7 буллетов с ответом (каждый пункт начинай с "- ").
+- Сначала 3-7 буллетов с ответом (каждый пункт начинай с "- "), если пользователь не просит другой формат.
 - Затем (если нужно) короткий пример кода.
 
 Правила для кода:
@@ -3945,6 +3959,18 @@ pub async fn start_haiku_chat_stream(
         })
         .unwrap_or_else(|| default_system_prompt.to_string());
     let system_prompt = with_interview_answer_style_guard(system_prompt);
+    let answer_style = { state.config.read().await.answer_style.clone() };
+    let system_prompt = crate::presentation::answer_style_prompt::with_answer_style_policy(
+        system_prompt,
+        &answer_style,
+    );
+    let temperature = crate::presentation::answer_style_prompt::adjusted_answer_temperature(
+        temperature,
+        &answer_style,
+    );
+    let final_answer_normalizer = answer_style.natural_answer_style_enabled.then_some(
+        crate::presentation::answer_style_prompt::compact_final_chat_answer as fn(&str) -> String,
+    );
 
     let model = match provider {
         crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_MODEL")
@@ -4067,14 +4093,9 @@ pub async fn start_haiku_chat_stream(
 
     if parallel_openai_enabled {
         let openai_mini_model = openai_responses_model();
-        let openai_web_model = openai_responses_web_model();
-        let openai_web_search_enabled = openai_responses_web_search.unwrap_or(true);
         let openai_runtime_cfg = openai_responses_runtime_config()?;
-        match (
-            llm_factory.create(&openai_runtime_cfg),
-            llm_factory.create(&openai_runtime_cfg),
-        ) {
-            (Ok(openai_mini_provider), Ok(openai_web_provider)) => {
+        match llm_factory.create(&openai_runtime_cfg) {
+            Ok(openai_mini_provider) => {
                 let anthropic_candidate = HaikuCandidateMeta {
                     id: "anthropic".to_string(),
                     label: "Anthropic".to_string(),
@@ -4086,17 +4107,6 @@ pub async fn start_haiku_chat_stream(
                     label: "OpenAI 5.4 mini".to_string(),
                     provider: "openai_responses".to_string(),
                     model: openai_mini_model.clone(),
-                };
-                let openai_web_candidate = HaikuCandidateMeta {
-                    id: "openai_responses_web".to_string(),
-                    label: if openai_web_search_enabled {
-                        "OpenAI 5.5 web"
-                    } else {
-                        "OpenAI 5.5"
-                    }
-                    .to_string(),
-                    provider: "openai_responses".to_string(),
-                    model: openai_web_model.clone(),
                 };
 
                 crate::presentation::companion_timeline::begin_haiku_message(
@@ -4129,15 +4139,6 @@ pub async fn start_haiku_chat_stream(
                                 text: String::new(),
                                 error: None,
                             },
-                            crate::presentation::companion::CompanionLlmCandidate {
-                                id: openai_web_candidate.id.clone(),
-                                label: openai_web_candidate.label.clone(),
-                                provider: openai_web_candidate.provider.clone(),
-                                model: openai_web_candidate.model.clone(),
-                                status: "streaming".to_string(),
-                                text: String::new(),
-                                error: None,
-                            },
                         ],
                         active_candidate_id: Some(anthropic_candidate.id.clone()),
                     },
@@ -4150,10 +4151,6 @@ pub async fn start_haiku_chat_stream(
                 let _ = app_handle.emit(
                     EVENT_HAIKU_CANDIDATE_START,
                     candidate_start_payload(&request_id, &openai_mini_candidate),
-                );
-                let _ = app_handle.emit(
-                    EVENT_HAIKU_CANDIDATE_START,
-                    candidate_start_payload(&request_id, &openai_web_candidate),
                 );
                 let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
@@ -4175,7 +4172,6 @@ pub async fn start_haiku_chat_stream(
                 let api_key_clone = api_key.clone();
                 let anthropic_candidate_clone = anthropic_candidate.clone();
                 let openai_mini_candidate_clone = openai_mini_candidate.clone();
-                let openai_web_candidate_clone = openai_web_candidate.clone();
 
                 tauri::async_runtime::spawn(async move {
                     let combined_text = if context_clone.is_empty() {
@@ -4196,11 +4192,6 @@ pub async fn start_haiku_chat_stream(
                         request_id_clone.clone(),
                         Some(openai_mini_candidate_clone.id.clone()),
                     );
-                    let openai_web_writer = spawn_companion_delta_writer(
-                        app_handle_clone.clone(),
-                        request_id_clone.clone(),
-                        Some(openai_web_candidate_clone.id.clone()),
-                    );
 
                     let openai_mini_request = build_openai_responses_request(
                         openai_mini_model,
@@ -4212,17 +4203,6 @@ pub async fn start_haiku_chat_stream(
                         Some(false),
                         openai_responses_reasoning_effort(),
                         openai_responses_verbosity(),
-                    );
-                    let openai_web_request = build_openai_responses_request(
-                        openai_web_model,
-                        system_prompt_clone.clone(),
-                        combined_text.clone(),
-                        max_tokens,
-                        temperature,
-                        to_llm_image_content(&images_clone),
-                        Some(openai_web_search_enabled),
-                        openai_responses_web_reasoning_effort(),
-                        openai_responses_web_verbosity(),
                     );
 
                     let anthropic_future = async {
@@ -4316,34 +4296,8 @@ pub async fn start_haiku_chat_stream(
                         result
                     };
 
-                    let openai_web_future = async {
-                        let app_handle_delta = app_handle_clone.clone();
-                        let request_id_delta = request_id_clone.clone();
-                        let delta_meta = openai_web_candidate_clone.clone();
-                        let companion_delta_tx = openai_web_writer.tx.clone();
-                        let result = openai_web_provider
-                            .stream_text(
-                                &openai_web_request,
-                                Box::new(move |delta| {
-                                    let delta_text = delta.to_string();
-                                    let _ = app_handle_delta.emit(
-                                        EVENT_HAIKU_DELTA,
-                                        candidate_delta_payload(
-                                            &request_id_delta,
-                                            delta_text.clone(),
-                                            Some(&delta_meta),
-                                        ),
-                                    );
-                                    let _ = companion_delta_tx.send(delta_text);
-                                }),
-                            )
-                            .await;
-                        drain_companion_delta_writer(openai_web_writer).await;
-                        result
-                    };
-
-                    let (anthropic_result, openai_mini_result, openai_web_result) =
-                        tokio::join!(anthropic_future, openai_mini_future, openai_web_future);
+                    let (anthropic_result, openai_mini_result) =
+                        tokio::join!(anthropic_future, openai_mini_future);
                     let anthropic_ok = settle_parallel_candidate(
                         &app_handle_clone,
                         &request_id_clone,
@@ -4358,15 +4312,8 @@ pub async fn start_haiku_chat_stream(
                         openai_mini_result,
                     )
                     .await;
-                    let openai_web_ok = settle_parallel_candidate(
-                        &app_handle_clone,
-                        &request_id_clone,
-                        &openai_web_candidate_clone,
-                        openai_web_result,
-                    )
-                    .await;
 
-                    if anthropic_ok || openai_mini_ok || openai_web_ok {
+                    if anthropic_ok || openai_mini_ok {
                         let _ = app_handle_clone.emit(
                             EVENT_HAIKU_DONE,
                             candidate_done_payload(&request_id_clone, None),
@@ -4385,7 +4332,7 @@ pub async fn start_haiku_chat_stream(
 
                 return Ok(request_id);
             }
-            (Err(err), _) | (_, Err(err)) => {
+            Err(err) => {
                 log::warn!(
                     "Failed to create OpenAI Responses parallel provider, falling back to single provider: {}",
                     err
@@ -4565,9 +4512,10 @@ pub async fn start_haiku_chat_stream(
         match result {
             Ok(()) => {
                 if let Some(state) = app_handle_clone.try_state::<AppState>() {
-                    crate::presentation::companion_timeline::finalize_haiku_message(
+                    crate::presentation::companion_timeline::finalize_haiku_message_with_normalizer(
                         state.inner(),
                         &request_id_for_done,
+                        final_answer_normalizer,
                     )
                     .await;
                     let _ = crate::presentation::companion::publish_snapshot_sse_only(
@@ -4687,30 +4635,31 @@ pub async fn start_code_explain_stream(
             crate::domain::LlmProviderType::Backend => 0.2,
         });
 
-    let default_system_prompt = r#"Ты — ассистент на техническом собеседовании. Отвечай по-русски.
+    let default_system_prompt = r#"Ты - ассистент на техническом собеседовании. Отвечай по-русски.
 
 Тебе дают:
-- "Выделенный фрагмент" — текст или код, на который нужно ответить/объяснить.
-- "Контекст чата" — история сообщений ДО выбранного сообщения включительно.
+- "Выделенный фрагмент" - текст или код, на который нужно ответить/объяснить.
+- "Контекст чата" - история сообщений ДО выбранного сообщения включительно.
 
 В контексте чата есть строки:
-- "ОС:" — то, что я слышу (обычно реплики собеседника/вопросы).
-- "МИКРОФОН:" — то, что говорю я (мои ответы/мысли/иногда могу повторить вопрос).
-- "ПОМОЩНИК:" — предыдущие ответы ассистента.
+- "ОС:" - то, что я слышу (обычно реплики собеседника/вопросы).
+- "МИКРОФОН:" - то, что говорю я (мои ответы/мысли/иногда могу повторить вопрос).
+- "ПОМОЩНИК:" - предыдущие ответы ассистента.
 
 Твоя задача:
 1) Понять, что пользователь хочет про выделенный фрагмент: объяснить, исправить, улучшить, ответить на вопрос, или дать краткий разбор.
 2) Дать лучший краткий ответ по делу (без воды), используя контекст чата, но не пересказывая его целиком.
-3) Если запрос неясен из-за распознавания/обрывков — задай 1 уточняющий вопрос и предложи 1–2 вероятные интерпретации.
+3) Если запрос неясен из-за распознавания/обрывков - задай 1 уточняющий вопрос и предложи 1-2 вероятные интерпретации.
 
 Формат ответа:
-- Сначала 3–7 буллетов (каждый пункт начинай с "- ").
+- По умолчанию отвечай 1-2 короткими предложениями одним компактным абзацем.
+- Используй буллеты только если пользователь явно просит список, план, код или подробный разбор.
 - Затем (если нужно) короткий пример кода (в fenced-блоке).
 
 Правила для кода:
 - Для упоминаний технических идентификаторов используй inline code (одинарные обратные кавычки).
 - Для кода/выражений (даже коротких), если важна подсветка, используй fenced-блок с языком.
-- Код — без нумерации строк, с корректными отступами."#;
+- Код - без нумерации строк, с корректными отступами."#;
 
     let system_prompt = system_prompt
         .map(|v| v.trim().to_string())

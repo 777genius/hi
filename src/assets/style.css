@@ -128,3 +128,24 @@ code.hljs,
 .hljs {
     background: transparent !important;
 }
+
+.theme-light .chat-markdown .code-block,
+.theme-light .chat-text-highlighted .code-block {
+    background: #0f172a !important;
+    border-color: rgba(15, 23, 42, 0.72) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 24px rgba(15, 23, 42, 0.16);
+}
+
+.theme-light .chat-markdown .code-block pre,
+.theme-light .chat-markdown .code-block pre code,
+.theme-light .chat-markdown .code-block .hljs,
+.theme-light .chat-text-highlighted .shiki,
+.theme-light .chat-text-highlighted .shiki code {
+    color: #e2e8f0 !important;
+    background: transparent !important;
+}
+
+.theme-light .chat-markdown .hljs-comment,
+.theme-light .chat-markdown .hljs-quote {
+    color: #94a3b8 !important;
+}

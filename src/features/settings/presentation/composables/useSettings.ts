@@ -19,7 +19,7 @@ import { useSettingsStore } from '../../store/settingsStore';
 import { tauriSettingsService } from '../../infrastructure/adapters/TauriSettingsService';
 import { useAppConfigStore } from '@/stores/appConfig';
 import { useSttConfigStore } from '@/stores/sttConfig';
-import type { SttConfigData } from '../../domain/types';
+import type { AnswerAudience, AnswerImperfectionLevel, AnswerLanguage, SttConfigData } from '../../domain/types';
 
 // Кэшируем определение macOS - это не меняется во время работы
 const IS_MACOS = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
@@ -89,6 +89,26 @@ export function useSettings() {
     set: (value: boolean) => store.setInterviewMemoryEnabled(value),
   });
 
+  const answerLanguage = computed({
+    get: () => store.answerLanguage,
+    set: (value: AnswerLanguage) => store.setAnswerLanguage(value),
+  });
+
+  const answerAudience = computed({
+    get: () => store.answerAudience,
+    set: (value: AnswerAudience) => store.setAnswerAudience(value),
+  });
+
+  const naturalAnswerStyleEnabled = computed({
+    get: () => store.naturalAnswerStyleEnabled,
+    set: (value: boolean) => store.setNaturalAnswerStyleEnabled(value),
+  });
+
+  const answerImperfectionLevel = computed({
+    get: () => store.answerImperfectionLevel,
+    set: (value: AnswerImperfectionLevel) => store.setAnswerImperfectionLevel(value),
+  });
+
   const deepgramKeyterms = computed({
     get: () => store.deepgramKeyterms,
     set: (value: string) => store.setDeepgramKeyterms(value),
@@ -126,6 +146,10 @@ export function useSettings() {
           store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
           store.setSelectedOutputAudioDevice(appConfigStoreInstance.selectedOutputAudioDevice);
           store.setInterviewMemoryEnabled(appConfigStoreInstance.interviewMemoryEnabled);
+          store.setAnswerLanguage(appConfigStoreInstance.answerLanguage);
+          store.setAnswerAudience(appConfigStoreInstance.answerAudience);
+          store.setNaturalAnswerStyleEnabled(appConfigStoreInstance.naturalAnswerStyleEnabled);
+          store.setAnswerImperfectionLevel(appConfigStoreInstance.answerImperfectionLevel);
         } else {
           store.setMicrophoneSensitivity(95, { persist: false });
           store.setRecordingHotkey('CmdOrCtrl+Shift+X');
@@ -134,6 +158,10 @@ export function useSettings() {
           store.setSelectedAudioDevice('');
           store.setSelectedOutputAudioDevice('');
           store.setInterviewMemoryEnabled(true);
+          store.setAnswerLanguage('en');
+          store.setAnswerAudience('internal');
+          store.setNaturalAnswerStyleEnabled(false);
+          store.setAnswerImperfectionLevel('light');
         }
 
         // В web режиме аудио-устройства/permission недоступны
@@ -193,6 +221,10 @@ export function useSettings() {
         store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
         store.setSelectedOutputAudioDevice(appConfigStoreInstance.selectedOutputAudioDevice);
         store.setInterviewMemoryEnabled(appConfigStoreInstance.interviewMemoryEnabled);
+        store.setAnswerLanguage(appConfigStoreInstance.answerLanguage);
+        store.setAnswerAudience(appConfigStoreInstance.answerAudience);
+        store.setNaturalAnswerStyleEnabled(appConfigStoreInstance.naturalAnswerStyleEnabled);
+        store.setAnswerImperfectionLevel(appConfigStoreInstance.answerImperfectionLevel);
       } else {
         try {
           const appConfig = await tauriSettingsService.getAppConfig();
@@ -203,9 +235,17 @@ export function useSettings() {
           store.setSelectedAudioDevice(appConfig.selected_audio_device ?? '');
           store.setSelectedOutputAudioDevice(appConfig.selected_output_audio_device ?? '');
           store.setInterviewMemoryEnabled(appConfig.interview_memory_enabled ?? true);
+          store.setAnswerLanguage(appConfig.answer_language ?? 'ru');
+          store.setAnswerAudience(appConfig.answer_audience ?? 'internal');
+          store.setNaturalAnswerStyleEnabled(appConfig.natural_answer_style_enabled ?? false);
+          store.setAnswerImperfectionLevel(appConfig.answer_imperfection_level ?? 'off');
         } catch (err) {
           console.log('App config не загружен, используем значения по умолчанию');
           store.setInterviewMemoryEnabled(true);
+          store.setAnswerLanguage('en');
+          store.setAnswerAudience('internal');
+          store.setNaturalAnswerStyleEnabled(false);
+          store.setAnswerImperfectionLevel('light');
         }
       }
 
@@ -307,6 +347,10 @@ export function useSettings() {
         selected_audio_device: store.selectedAudioDevice,
         selected_output_audio_device: store.selectedOutputAudioDevice,
         interview_memory_enabled: store.interviewMemoryEnabled,
+        answer_language: store.answerLanguage,
+        answer_audience: store.answerAudience,
+        natural_answer_style_enabled: store.naturalAnswerStyleEnabled,
+        answer_imperfection_level: store.answerImperfectionLevel,
       });
 
       // Жёсткая проверка: иногда UI может думать что сохранили, но по факту snapshot остался старым.
@@ -315,20 +359,32 @@ export function useSettings() {
         const snap1 = await tauriSettingsService.getAppConfig();
         if (
           snap1.microphone_sensitivity !== store.microphoneSensitivity ||
-          snap1.interview_memory_enabled !== store.interviewMemoryEnabled
+          snap1.interview_memory_enabled !== store.interviewMemoryEnabled ||
+          snap1.answer_language !== store.answerLanguage ||
+          snap1.answer_audience !== store.answerAudience ||
+          snap1.natural_answer_style_enabled !== store.naturalAnswerStyleEnabled ||
+          snap1.answer_imperfection_level !== store.answerImperfectionLevel
         ) {
           // Повторяем только критичные app-config поля — минимальный безопасный ретрай.
           await tauriSettingsService.updateAppConfig({
             microphone_sensitivity: store.microphoneSensitivity,
             interview_memory_enabled: store.interviewMemoryEnabled,
+            answer_language: store.answerLanguage,
+            answer_audience: store.answerAudience,
+            natural_answer_style_enabled: store.naturalAnswerStyleEnabled,
+            answer_imperfection_level: store.answerImperfectionLevel,
           });
           const snap2 = await tauriSettingsService.getAppConfig();
           if (
             snap2.microphone_sensitivity !== store.microphoneSensitivity ||
-            snap2.interview_memory_enabled !== store.interviewMemoryEnabled
+            snap2.interview_memory_enabled !== store.interviewMemoryEnabled ||
+            snap2.answer_language !== store.answerLanguage ||
+            snap2.answer_audience !== store.answerAudience ||
+            snap2.natural_answer_style_enabled !== store.naturalAnswerStyleEnabled ||
+            snap2.answer_imperfection_level !== store.answerImperfectionLevel
           ) {
             throw new Error(
-              `Настройки не сохранились: sensitivity ${store.microphoneSensitivity}/${snap2.microphone_sensitivity}, interviewMemory ${store.interviewMemoryEnabled}/${snap2.interview_memory_enabled}`,
+              `Настройки не сохранились: sensitivity ${store.microphoneSensitivity}/${snap2.microphone_sensitivity}, interviewMemory ${store.interviewMemoryEnabled}/${snap2.interview_memory_enabled}, answerLanguage ${store.answerLanguage}/${snap2.answer_language}`,
             );
           }
         }
@@ -448,6 +504,10 @@ export function useSettings() {
     autoCopyToClipboard,
     autoPasteText,
     interviewMemoryEnabled,
+    answerLanguage,
+    answerAudience,
+    naturalAnswerStyleEnabled,
+    answerImperfectionLevel,
     deepgramKeyterms,
 
     // Store state (через computed для корректной реактивности)

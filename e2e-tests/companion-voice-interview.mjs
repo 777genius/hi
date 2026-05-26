@@ -413,15 +413,17 @@ function buildCodeAnchor(runId) {
 
 function buildFiller(runId, turnIndex, targetChars) {
   if (targetChars <= 0) return '';
-  const line = [
-    `Synthetic voice interview load ${turnIndex}.`,
-    'This block is only for explicit stress testing and is disabled by default.',
-  ].join(' ');
+  const lines = [
+    'Интервьюер делает короткую паузу и уточняет формат ответа, ожидания по глубине и порядок демонстрации решения.',
+    'Кандидат проговаривает, что сначала объяснит инвариант, затем крайние случаи, потом покажет небольшой пример.',
+    'Разговор ненадолго уходит в организационные детали про звук, экран, заметки, темп интервью и переход к следующей теме.',
+    `Пауза перед следующим вопросом, переход ${turnIndex}, участники сохраняют контекст предыдущего технического обсуждения.`,
+  ];
   const parts = [];
   let chars = 0;
   let index = 1;
   while (chars < targetChars) {
-    const next = `${line} load-line-${index}.`;
+    const next = lines[(index - 1) % lines.length];
     parts.push(next);
     chars += next.length + 1;
     index += 1;
@@ -547,13 +549,13 @@ function buildVoiceTurns(runId, count) {
   const followUps = [
     {
       label: 'voice extra cache sql',
-      spoken: 'Уточнение: сравни кэш с TTL и SQL с left join. Где мы боремся с устаревшими данными, а где с потерей строк в результате?',
+      spoken: 'Сравни кэш с TTL и SQL с left join. Где мы боремся с устаревшими данными, а где с потерей строк в результате?',
       transcriptExpected: [['cache', 'кэш'], ['ttl', 'т т л'], ['sql', 's q l'], ['left join', 'лев']],
       answerExpected: [['ttl', 'устар'], ['left join', 'sql'], ['данн', 'строк']],
     },
     {
       label: 'voice extra react retry',
-      spoken: 'Уточнение: сравни старое значение в React callback и повтор платежной операции. В обоих случаях проблема похожая или принципиально разная?',
+      spoken: 'Сравни старое значение в React callback и повтор платежной операции. В обоих случаях проблема похожая или принципиально разная?',
       transcriptExpected: [
         ['стар', 'устаревш'],
         ['callback', 'колбек', 'кэлбек', 'calboot', 'замыкан'],
@@ -568,7 +570,7 @@ function buildVoiceTurns(runId, count) {
     },
     {
       label: 'voice extra all topics',
-      spoken: 'Уточнение: если бы надо было объяснить все эти темы одним коротким ответом на интервью, как бы ты разделил кэш, SQL, React, платежи и ограничение нагрузки?',
+      spoken: 'Если бы надо было объяснить все эти темы одним коротким ответом на интервью, как бы ты разделил кэш, SQL, React, платежи и ограничение нагрузки?',
       transcriptExpected: [['cache', 'кэш'], ['sql', 's q l'], ['react', 'реакт'], ['backpressure', 'бекпреш']],
       answerExpected: [['cache', 'кэш', 'ttl'], ['sql', 'left join'], ['react', 'stale'], ['idempotency', 'идемпот'], 'backpressure'],
     },
@@ -578,7 +580,7 @@ function buildVoiceTurns(runId, count) {
     const followUp = followUps[index % followUps.length];
     turns.push({
       label: `${followUp.label} ${index}`,
-      spoken: `${followUp.spoken} Это продолжение длинного интервью после предыдущих AI ответов.`,
+      spoken: followUp.spoken,
       transcriptExpected: followUp.transcriptExpected,
       aiPrompt: 'implicit-ai-request',
       answerExpected: [...followUp.answerExpected],

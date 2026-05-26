@@ -30,6 +30,9 @@ export interface WhisperModelOption {
 
 // Тема приложения
 export type AppTheme = 'dark' | 'light';
+export type AnswerLanguage = 'auto' | 'en' | 'ru';
+export type AnswerImperfectionLevel = 'off' | 'light';
+export type AnswerAudience = 'auto' | 'internal' | 'client';
 
 // Конфигурация STT (соответствует бэкенду)
 export interface SttConfigData {
@@ -50,6 +53,10 @@ export interface AppConfigData {
   selected_audio_device: string | null;
   selected_output_audio_device: string | null;
   interview_memory_enabled: boolean;
+  answer_language: AnswerLanguage;
+  answer_audience: AnswerAudience;
+  natural_answer_style_enabled: boolean;
+  answer_imperfection_level: AnswerImperfectionLevel;
 }
 
 // Полная конфигурация настроек для UI
@@ -85,6 +92,12 @@ export interface SettingsState {
 
   // Interview memory
   interviewMemoryEnabled: boolean;
+
+  // AI answer style
+  answerLanguage: AnswerLanguage;
+  answerAudience: AnswerAudience;
+  naturalAnswerStyleEnabled: boolean;
+  answerImperfectionLevel: AnswerImperfectionLevel;
 
   // Deepgram keyterms
   deepgramKeyterms: string;
