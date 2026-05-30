@@ -39,6 +39,16 @@ pnpm tauri:dev
 Основной локальный сценарий для persistent memory:
 
 ```bash
+# Один раз: клонировать Memory Platform рядом с HackInterview.
+# Нужен доступ к приватному repo 777genius/memory-platform.
+cd ..
+git clone https://github.com/777genius/memory-platform.git memory-platform
+
+cd memory-platform
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev,qdrant,openai,graphiti]'
+
+cd ../HackInterview
 pnpm memory-platform:up
 pnpm memory-platform:server
 ```
@@ -51,6 +61,22 @@ pnpm tauri:dev:memory-platform
 ```
 
 В этом режиме STT остаётся на production backend, а память идёт в Memory Platform по `/v1/episodes` и `/v1/context`.
+
+Если Memory Platform лежит не рядом с `HackInterview`, передай путь явно:
+
+```bash
+MEMORY_PLATFORM_DIR=/absolute/path/to/memory-platform pnpm memory-platform:up
+MEMORY_PLATFORM_DIR=/absolute/path/to/memory-platform pnpm memory-platform:server
+```
+
+Если memory server уже запущен на другой машине или в Docker, локальный репозиторий `memory-platform` не нужен. Достаточно указать HTTP endpoint:
+
+```bash
+INTERVIEW_MEMORY_API_VARIANT=platform \
+INTERVIEW_MEMORY_API_URL=http://127.0.0.1:7788 \
+INTERVIEW_MEMORY_AUTH_TOKEN=local-dev-token \
+pnpm tauri:dev:memory-platform
+```
 
 ### Запуск с продовым backend на Render и Brave CDP
 
