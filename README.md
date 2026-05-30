@@ -34,33 +34,63 @@ pnpm install
 pnpm tauri:dev
 ```
 
-### Запуск с новой Memory Platform
+### Запуск с новой Memory Platform и Anthropic
 
-Основной локальный сценарий для persistent memory:
+`HackInterview` не хранит Memory Platform внутри этого репозитория. Для локального запуска с новой памятью нужно клонировать второй приватный репозиторий:
 
 ```bash
-# Один раз: клонировать Memory Platform рядом с HackInterview.
-# Нужен доступ к приватному repo 777genius/memory-platform.
-cd ..
+git clone https://github.com/777genius/hack_interview_ai.git HackInterview
 git clone https://github.com/777genius/memory-platform.git memory-platform
+```
 
-cd memory-platform
+Нужен доступ к приватному GitHub repo [777genius/memory-platform](https://github.com/777genius/memory-platform).
+
+Первичная установка:
+
+```bash
+# Если уже находишься в корне HackInterview:
+cd ../memory-platform
+
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev,qdrant,openai,graphiti]'
 
 cd ../HackInterview
+pnpm install
+```
+
+Запуск Memory Platform:
+
+```bash
+# Из корня HackInterview:
 pnpm memory-platform:up
 pnpm memory-platform:server
 ```
 
-В другом терминале:
+В другом терминале запусти desktop app с Anthropic Haiku, production STT backend и локальной Memory Platform:
 
 ```bash
+cd /path/to/HackInterview
+
 pnpm copy-helper:brave:restart-cdp
-pnpm tauri:dev:memory-platform
+
+LLM_PROVIDER=anthropic \
+ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+ANTHROPIC_MODEL=claude-haiku-4-5-20251001 \
+INTERVIEW_MEMORY_API_VARIANT=platform \
+INTERVIEW_MEMORY_API_URL=http://127.0.0.1:7788 \
+INTERVIEW_MEMORY_AUTH_TOKEN=local-dev-token \
+VITE_API_URL=https://api.voicetext.site \
+VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site \
+FOCUS_COPY_ENABLE_BROWSER_CDP=1 \
+pnpm tauri dev
 ```
 
-В этом режиме STT остаётся на production backend, а память идёт в Memory Platform по `/v1/episodes` и `/v1/context`.
+В этом режиме:
+
+- STT остаётся на production backend `api.voicetext.site`;
+- ответы ИИ идут через Anthropic Haiku;
+- память идёт в локальную Memory Platform по `/v1/episodes` и `/v1/context`;
+- токен `local-dev-token` используется только для локального memory server.
 
 Если Memory Platform лежит не рядом с `HackInterview`, передай путь явно:
 
@@ -69,13 +99,32 @@ MEMORY_PLATFORM_DIR=/absolute/path/to/memory-platform pnpm memory-platform:up
 MEMORY_PLATFORM_DIR=/absolute/path/to/memory-platform pnpm memory-platform:server
 ```
 
-Если memory server уже запущен на другой машине или в Docker, локальный репозиторий `memory-platform` не нужен. Достаточно указать HTTP endpoint:
+Если memory server уже запущен на другой машине или в Docker, локальный репозиторий `memory-platform` для запуска desktop app не нужен. Достаточно указать HTTP endpoint:
 
 ```bash
+LLM_PROVIDER=anthropic \
+ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+ANTHROPIC_MODEL=claude-haiku-4-5-20251001 \
 INTERVIEW_MEMORY_API_VARIANT=platform \
 INTERVIEW_MEMORY_API_URL=http://127.0.0.1:7788 \
 INTERVIEW_MEMORY_AUTH_TOKEN=local-dev-token \
 pnpm tauri:dev:memory-platform
+```
+
+Для полного memory-adapter режима с Qdrant, Graphiti и OpenAI embeddings нужны дополнительные переменные при запуске `memory-platform:server` вручную:
+
+```bash
+cd memory-platform
+
+MEMORY_AUTO_CREATE_SCHEMA=true \
+MEMORY_SERVICE_TOKEN=local-dev-token \
+MEMORY_QDRANT_ENABLED=true \
+MEMORY_EMBEDDINGS_ENABLED=true \
+MEMORY_EMBEDDINGS_PROVIDER=openai \
+MEMORY_OPENAI_API_KEY="$OPENAI_API_KEY" \
+MEMORY_GRAPHITI_ENABLED=true \
+MEMORY_GRAPHITI_NEO4J_PASSWORD=memorygraph \
+.venv/bin/python -m memory_server.main
 ```
 
 ### Запуск с продовым backend на Render и Brave CDP
