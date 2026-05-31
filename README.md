@@ -39,8 +39,10 @@ pnpm tauri:dev
 `HackInterview` не хранит Memory Platform внутри этого репозитория. Для локального запуска с новой памятью нужно клонировать второй приватный репозиторий:
 
 ```bash
-git clone https://github.com/777genius/hack_interview_ai.git HackInterview
+mkdir -p ~/dev/projects/ai
+cd ~/dev/projects/ai
 git clone https://github.com/777genius/memory-platform.git memory-platform
+cd ~/dev/projects/HackInterview
 ```
 
 Нужен доступ к приватному GitHub repo [777genius/memory-platform](https://github.com/777genius/memory-platform).
@@ -48,23 +50,36 @@ git clone https://github.com/777genius/memory-platform.git memory-platform
 Первичная установка:
 
 ```bash
-# Если уже находишься в корне HackInterview:
-cd ../memory-platform
+cd ~/dev/projects/ai/memory-platform
 
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev,qdrant,openai,graphiti]'
 
-cd ../HackInterview
+cd ~/dev/projects/HackInterview
 pnpm install
 ```
 
-Запуск Memory Platform:
+Самый простой запуск Memory Platform в Docker, без внешних provider adapters:
 
 ```bash
 # Из корня HackInterview:
-pnpm memory-platform:up
-pnpm memory-platform:server
+pnpm memory-platform:stack
+pnpm memory-platform:smoke
+pnpm memory-platform:mcp-smoke
 ```
+
+Полный режим с Qdrant, Graphiti и OpenAI embeddings:
+
+```bash
+# Из корня HackInterview:
+read -s OPENAI_API_KEY
+export OPENAI_API_KEY
+export MEMORY_OPENAI_API_KEY="$OPENAI_API_KEY"
+pnpm memory-platform:full-stack
+pnpm memory-platform:clean-full-smoke
+```
+
+`OPENAI_API_KEY` нужен Graphiti, `MEMORY_OPENAI_API_KEY` нужен embeddings adapter. Не записывай ключ в README, package scripts или `.env`, который может попасть в git.
 
 В другом терминале запусти desktop app с Anthropic Haiku, production STT backend и локальной Memory Platform:
 
@@ -95,8 +110,8 @@ pnpm tauri dev
 Если Memory Platform лежит не рядом с `HackInterview`, передай путь явно:
 
 ```bash
-MEMORY_PLATFORM_DIR=/absolute/path/to/memory-platform pnpm memory-platform:up
-MEMORY_PLATFORM_DIR=/absolute/path/to/memory-platform pnpm memory-platform:server
+MEMORY_PLATFORM_DIR=/absolute/path/to/memory-platform pnpm memory-platform:stack
+MEMORY_PLATFORM_DIR=/absolute/path/to/memory-platform pnpm memory-platform:full-stack
 ```
 
 Если memory server уже запущен на другой машине или в Docker, локальный репозиторий `memory-platform` для запуска desktop app не нужен. Достаточно указать HTTP endpoint:
@@ -111,10 +126,10 @@ INTERVIEW_MEMORY_AUTH_TOKEN=local-dev-token \
 pnpm tauri:dev:memory-platform
 ```
 
-Для полного memory-adapter режима с Qdrant, Graphiti и OpenAI embeddings нужны дополнительные переменные при запуске `memory-platform:server` вручную:
+Старый ручной локальный режим всё ещё доступен, если нужно запускать server не в Docker:
 
 ```bash
-cd memory-platform
+cd ../memory-platform
 
 MEMORY_AUTO_CREATE_SCHEMA=true \
 MEMORY_SERVICE_TOKEN=local-dev-token \
@@ -122,6 +137,7 @@ MEMORY_QDRANT_ENABLED=true \
 MEMORY_EMBEDDINGS_ENABLED=true \
 MEMORY_EMBEDDINGS_PROVIDER=openai \
 MEMORY_OPENAI_API_KEY="$OPENAI_API_KEY" \
+OPENAI_API_KEY="$OPENAI_API_KEY" \
 MEMORY_GRAPHITI_ENABLED=true \
 MEMORY_GRAPHITI_NEO4J_PASSWORD=memorygraph \
 .venv/bin/python -m memory_server.main

@@ -12,8 +12,7 @@
 - To run the desktop frontend against production STT but the new local Memory Platform:
 
   ```bash
-  pnpm memory-platform:up
-  pnpm memory-platform:server
+  pnpm memory-platform:stack
   pnpm copy-helper:brave:restart-cdp
   pnpm tauri:dev:memory-platform
   ```
