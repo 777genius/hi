@@ -53,7 +53,7 @@ case "$command_name" in
     MEMORY_AUTO_CREATE_SCHEMA=true MEMORY_SERVICE_TOKEN="${MEMORY_SERVICE_TOKEN:-local-dev-token}" .venv/bin/python -m memory_server.main
     ;;
   stack)
-    make memory-stack-up-hackinterview
+    make memory-stack-up-lite
     ;;
   full-stack)
     make memory-stack-up-full
