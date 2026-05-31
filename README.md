@@ -69,8 +69,9 @@ pnpm memory-platform:mcp-smoke
 ```
 
 Wrapper `pnpm memory-platform:*` сам выставляет `MEMORY_DEFAULT_SPACE_SLUG=hackinterview`
-для локального memory server. В самом репозитории Memory Platform дефолтный space
-остаётся generic `default`, чтобы платформа не была привязана к HackInterview.
+и `MEMORY_LEGACY_HACKINTERVIEW_ENABLED=true` для локального memory server. В самом
+репозитории Memory Platform дефолтный space остаётся generic `default`, а legacy
+compatibility routes выключены по умолчанию.
 
 Полный режим с Qdrant, Graphiti и OpenAI embeddings:
 
@@ -138,6 +139,7 @@ cd ../memory-platform
 MEMORY_AUTO_CREATE_SCHEMA=true \
 MEMORY_SERVICE_TOKEN=local-dev-token \
 MEMORY_DEFAULT_SPACE_SLUG=hackinterview \
+MEMORY_LEGACY_HACKINTERVIEW_ENABLED=true \
 MEMORY_QDRANT_ENABLED=true \
 MEMORY_EMBEDDINGS_ENABLED=true \
 MEMORY_EMBEDDINGS_PROVIDER=openai \
