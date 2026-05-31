@@ -44,6 +44,10 @@ ensure_venv() {
 
 ensure_memory_dir
 
+export MEMORY_DEFAULT_SPACE_SLUG="${MEMORY_DEFAULT_SPACE_SLUG:-hackinterview}"
+export MEMORY_SMOKE_SPACE="${MEMORY_SMOKE_SPACE:-hackinterview}"
+export MEMORY_MCP_DEFAULT_SPACE_SLUG="${MEMORY_MCP_DEFAULT_SPACE_SLUG:-hackinterview}"
+
 case "$command_name" in
   up)
     make memory-up-full-deps
