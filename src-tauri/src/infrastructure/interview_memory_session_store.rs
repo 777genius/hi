@@ -9,6 +9,8 @@ const SCHEMA_VERSION: u32 = 1;
 const DEFAULT_PROFILE_ID: &str = "default";
 const DEFAULT_PROFILE_LABEL: &str = "Default interview memory";
 const MEMORY_SESSIONS_PATH_ENV: &str = "HACKINTERVIEW_MEMORY_SESSIONS_PATH";
+const MEMORY_PROFILE_EXTERNAL_REF_ENV: &str = "INTERVIEW_MEMORY_PROFILE_EXTERNAL_REF";
+const MEMORY_PROFILE_REF_ENV: &str = "INTERVIEW_MEMORY_PROFILE_REF";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveInterviewMemorySession {
@@ -41,7 +43,8 @@ impl InterviewMemorySessionStore {
         let path = Self::sessions_path()?;
         let now = now_ms();
         let mut store = Self::read_store_or_default(&path).await;
-        let active_profile_id = normalize_profile_id(&store.active_profile_id);
+        let active_profile_id = configured_profile_id()
+            .unwrap_or_else(|| normalize_profile_id(&store.active_profile_id));
         let mut changed = store.schema_version != SCHEMA_VERSION
             || store.active_profile_id != active_profile_id
             || active_profile_id != DEFAULT_PROFILE_ID;
@@ -158,6 +161,19 @@ fn normalize_profile_id(value: &str) -> String {
     }
 }
 
+fn configured_profile_id() -> Option<String> {
+    std::env::var(MEMORY_PROFILE_EXTERNAL_REF_ENV)
+        .or_else(|_| std::env::var(MEMORY_PROFILE_REF_ENV))
+        .ok()
+        .map(|value| normalize_profile_id(&value))
+        .filter(|value| value != DEFAULT_PROFILE_ID || profile_env_explicitly_set())
+}
+
+fn profile_env_explicitly_set() -> bool {
+    std::env::var_os(MEMORY_PROFILE_EXTERNAL_REF_ENV).is_some()
+        || std::env::var_os(MEMORY_PROFILE_REF_ENV).is_some()
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -178,6 +194,8 @@ mod tests {
             Uuid::new_v4()
         ));
         std::env::set_var(MEMORY_SESSIONS_PATH_ENV, &path);
+        std::env::remove_var(MEMORY_PROFILE_EXTERNAL_REF_ENV);
+        std::env::remove_var(MEMORY_PROFILE_REF_ENV);
 
         let first = InterviewMemorySessionStore::load_or_create_active_session()
             .await
@@ -203,6 +221,8 @@ mod tests {
         ));
         tokio::fs::write(&path, "{not-json").await.unwrap();
         std::env::set_var(MEMORY_SESSIONS_PATH_ENV, &path);
+        std::env::remove_var(MEMORY_PROFILE_EXTERNAL_REF_ENV);
+        std::env::remove_var(MEMORY_PROFILE_REF_ENV);
 
         let active = InterviewMemorySessionStore::load_or_create_active_session()
             .await
@@ -213,5 +233,31 @@ mod tests {
 
         let _ = tokio::fs::remove_file(&path).await;
         std::env::remove_var(MEMORY_SESSIONS_PATH_ENV);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn configured_external_profile_gets_its_own_active_session() {
+        let path = std::env::temp_dir().join(format!(
+            "hackinterview-memory-sessions-{}.json",
+            Uuid::new_v4()
+        ));
+        std::env::set_var(MEMORY_SESSIONS_PATH_ENV, &path);
+        std::env::set_var(MEMORY_PROFILE_EXTERNAL_REF_ENV, "fuib-ai-fullstack-2026");
+        std::env::remove_var(MEMORY_PROFILE_REF_ENV);
+
+        let active = InterviewMemorySessionStore::load_or_create_active_session()
+            .await
+            .unwrap();
+
+        assert_eq!(active.profile_id, "fuib-ai-fullstack-2026");
+        assert_ne!(active.session_id, Uuid::nil());
+
+        let stored = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(stored.contains("\"activeProfileId\": \"fuib-ai-fullstack-2026\""));
+
+        let _ = tokio::fs::remove_file(&path).await;
+        std::env::remove_var(MEMORY_SESSIONS_PATH_ENV);
+        std::env::remove_var(MEMORY_PROFILE_EXTERNAL_REF_ENV);
     }
 }
