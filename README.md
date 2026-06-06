@@ -34,23 +34,23 @@ pnpm install
 pnpm tauri:dev
 ```
 
-### Запуск с новой Memory Platform и Anthropic
+### Запуск с новой Memo Stack и Anthropic
 
-`HackInterview` не хранит Memory Platform внутри этого репозитория. Для локального запуска с новой памятью нужно клонировать второй приватный репозиторий:
+`HackInterview` не хранит Memo Stack внутри этого репозитория. Для локального запуска с новой памятью нужно клонировать второй приватный репозиторий:
 
 ```bash
 mkdir -p ~/dev/projects/ai
 cd ~/dev/projects/ai
-git clone https://github.com/777genius/memory-platform.git memory-platform
+git clone https://github.com/777genius/memo-stack.git memo-stack
 cd ~/dev/projects/HackInterview
 ```
 
-Нужен доступ к приватному GitHub repo [777genius/memory-platform](https://github.com/777genius/memory-platform).
+Нужен доступ к приватному GitHub repo [777genius/memo-stack](https://github.com/777genius/memo-stack).
 
 Первичная установка:
 
 ```bash
-cd ~/dev/projects/ai/memory-platform
+cd ~/dev/projects/ai/memo-stack
 
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev,qdrant,openai,graphiti]'
@@ -59,18 +59,18 @@ cd ~/dev/projects/HackInterview
 pnpm install
 ```
 
-Самый простой запуск Memory Platform в Docker, без внешних provider adapters:
+Самый простой запуск Memo Stack в Docker, без внешних provider adapters:
 
 ```bash
 # Из корня HackInterview:
-pnpm memory-platform:stack
-pnpm memory-platform:smoke
-pnpm memory-platform:mcp-smoke
+pnpm memo-stack:stack
+pnpm memo-stack:smoke
+pnpm memo-stack:mcp-smoke
 ```
 
-Wrapper `pnpm memory-platform:*` сам выставляет `MEMORY_DEFAULT_SPACE_SLUG=hackinterview`
+Wrapper `pnpm memo-stack:*` сам выставляет `MEMORY_DEFAULT_SPACE_SLUG=hackinterview`
 и `MEMORY_LEGACY_HACKINTERVIEW_ENABLED=true` для локального memory server. В самом
-репозитории Memory Platform дефолтный space остаётся generic `default`, а legacy
+репозитории Memo Stack дефолтный space остаётся generic `default`, а legacy
 compatibility routes выключены по умолчанию.
 
 Полный режим с Qdrant, Graphiti и OpenAI embeddings:
@@ -80,13 +80,13 @@ compatibility routes выключены по умолчанию.
 read -s OPENAI_API_KEY
 export OPENAI_API_KEY
 export MEMORY_OPENAI_API_KEY="$OPENAI_API_KEY"
-pnpm memory-platform:full-stack
-pnpm memory-platform:clean-full-smoke
+pnpm memo-stack:full-stack
+pnpm memo-stack:clean-full-smoke
 ```
 
 `OPENAI_API_KEY` нужен Graphiti, `MEMORY_OPENAI_API_KEY` нужен embeddings adapter. Не записывай ключ в README, package scripts или `.env`, который может попасть в git.
 
-В другом терминале запусти desktop app с Anthropic Haiku, production STT backend и локальной Memory Platform:
+В другом терминале запусти desktop app с Anthropic Haiku, production STT backend и локальной Memo Stack:
 
 ```bash
 cd /path/to/HackInterview
@@ -109,17 +109,17 @@ pnpm tauri dev
 
 - STT остаётся на production backend `api.voicetext.site`;
 - ответы ИИ идут через Anthropic Haiku;
-- память идёт в локальную Memory Platform по `/v1/episodes` и `/v1/context`;
+- память идёт в локальную Memo Stack по `/v1/episodes` и `/v1/context`;
 - токен `local-dev-token` используется только для локального memory server.
 
-Если Memory Platform лежит не рядом с `HackInterview`, передай путь явно:
+Если Memo Stack лежит не рядом с `HackInterview`, передай путь явно:
 
 ```bash
-MEMORY_PLATFORM_DIR=/absolute/path/to/memory-platform pnpm memory-platform:stack
-MEMORY_PLATFORM_DIR=/absolute/path/to/memory-platform pnpm memory-platform:full-stack
+MEMO_STACK_DIR=/absolute/path/to/memo-stack pnpm memo-stack:stack
+MEMO_STACK_DIR=/absolute/path/to/memo-stack pnpm memo-stack:full-stack
 ```
 
-Если memory server уже запущен на другой машине или в Docker, локальный репозиторий `memory-platform` для запуска desktop app не нужен. Достаточно указать HTTP endpoint:
+Если memory server уже запущен на другой машине или в Docker, локальный репозиторий `memo-stack` для запуска desktop app не нужен. Достаточно указать HTTP endpoint:
 
 ```bash
 LLM_PROVIDER=anthropic \
@@ -128,13 +128,13 @@ ANTHROPIC_MODEL=claude-haiku-4-5-20251001 \
 INTERVIEW_MEMORY_API_VARIANT=platform \
 INTERVIEW_MEMORY_API_URL=http://127.0.0.1:7788 \
 INTERVIEW_MEMORY_AUTH_TOKEN=local-dev-token \
-pnpm tauri:dev:memory-platform
+pnpm tauri:dev:memo-stack
 ```
 
 Старый ручной локальный режим всё ещё доступен, если нужно запускать server не в Docker:
 
 ```bash
-cd ../memory-platform
+cd ../memo-stack
 
 MEMORY_AUTO_CREATE_SCHEMA=true \
 MEMORY_SERVICE_TOKEN=local-dev-token \

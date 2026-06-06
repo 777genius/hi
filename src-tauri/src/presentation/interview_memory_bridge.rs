@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::presentation::AppState;
 
 const DEFAULT_LEGACY_API_BASE_URL: &str = "https://api.voicetext.site";
-const DEFAULT_MEMORY_PLATFORM_API_BASE_URL: &str = "http://127.0.0.1:7788";
+const DEFAULT_MEMO_STACK_API_BASE_URL: &str = "http://127.0.0.1:7788";
 const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 14_000;
 const DEFAULT_MINIMAL_FALLBACK_CONTEXT_CHARS: usize = 12_000;
 const DEFAULT_MAX_MEMORY_CANDIDATES: u64 = 500;
@@ -492,7 +492,7 @@ async fn post_ingest_memory_request(
                 Ok(response) => Ok(response),
                 Err(err) if should_try_legacy_fallback(&err) => {
                     log::debug!(
-                        "Memory platform ingest endpoint unavailable, falling back to legacy API: {}",
+                        "Memo Stack ingest endpoint unavailable, falling back to legacy API: {}",
                         err
                     );
                     post_legacy_ingest_request(auth_token, request).await
@@ -517,7 +517,7 @@ async fn post_context_memory_request(
                 Ok(response) => Ok(response),
                 Err(err) if should_try_legacy_fallback(&err) => {
                     log::debug!(
-                        "Memory platform context endpoint unavailable, falling back to legacy API: {}",
+                        "Memo Stack context endpoint unavailable, falling back to legacy API: {}",
                         err
                     );
                     post_legacy_context_request(auth_token, request).await
@@ -550,7 +550,7 @@ async fn post_platform_ingest_request(
 ) -> Result<serde_json::Value, MemoryHttpError> {
     let body = platform_episode_request_from_legacy(request);
     post_json_with_retry::<_, serde_json::Value>(
-        &memory_platform_api_base_url(),
+        &memo_stack_api_base_url(),
         "/v1/episodes",
         auth_token,
         &body,
@@ -583,7 +583,7 @@ async fn post_platform_context_request(
 ) -> Result<AssembleContextResponse, MemoryHttpError> {
     let body = platform_context_request_from_legacy(request);
     log::debug!(
-        "Memory platform context request profile={} thread={} query_len={} max_facts={} max_chunks={}",
+        "Memo Stack context request profile={} thread={} query_len={} max_facts={} max_chunks={}",
         body.profile_external_ref,
         body.thread_external_ref,
         body.query.len(),
@@ -591,7 +591,7 @@ async fn post_platform_context_request(
         body.max_chunks
     );
     let response = post_json_with_retry::<_, PlatformContextResponse>(
-        &memory_platform_api_base_url(),
+        &memo_stack_api_base_url(),
         "/v1/context",
         auth_token,
         &body,
@@ -601,7 +601,7 @@ async fn post_platform_context_request(
     )
     .await?;
     log::debug!(
-        "Memory platform context response profile={} rendered_len={}",
+        "Memo Stack context response profile={} rendered_len={}",
         body.profile_external_ref,
         response.rendered_text.len()
     );
@@ -1587,15 +1587,21 @@ fn explicit_memory_api_base_url() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn memory_platform_api_base_url() -> String {
+fn memo_stack_api_base_url() -> String {
     explicit_memory_api_base_url()
+        .or_else(|| {
+            std::env::var("MEMO_STACK_API_URL")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
         .or_else(|| {
             std::env::var("MEMORY_PLATFORM_API_URL")
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         })
-        .unwrap_or_else(|| DEFAULT_MEMORY_PLATFORM_API_BASE_URL.to_string())
+        .unwrap_or_else(|| DEFAULT_MEMO_STACK_API_BASE_URL.to_string())
 }
 
 fn legacy_api_base_url() -> String {
@@ -1640,7 +1646,7 @@ pub fn resolved_primary_api_base_url() -> String {
     match resolved_api_variant() {
         InterviewMemoryApiVariant::Legacy => legacy_api_base_url(),
         InterviewMemoryApiVariant::Auto | InterviewMemoryApiVariant::Platform => {
-            memory_platform_api_base_url()
+            memo_stack_api_base_url()
         }
     }
 }
@@ -1796,9 +1802,12 @@ fn resolve_api_variant_from_env(
         .filter(|value| !value.is_empty());
 
     match raw.as_deref() {
-        Some("platform") | Some("v1") | Some("memory_platform") | Some("memory-platform") => {
-            InterviewMemoryApiVariant::Platform
-        }
+        Some("platform")
+        | Some("v1")
+        | Some("memo_stack")
+        | Some("memo-stack")
+        | Some("memory_platform")
+        | Some("memory-platform") => InterviewMemoryApiVariant::Platform,
         Some("legacy") | Some("compat") | Some("compatibility") => {
             InterviewMemoryApiVariant::Legacy
         }
@@ -1810,6 +1819,7 @@ fn resolve_api_variant_from_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     fn resolve_mode(entries: &[(&str, &str)]) -> InterviewMemoryMode {
         resolve_mode_from_env(|name| {
@@ -2000,7 +2010,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn platform_episode_request_uses_session_as_thread_external_ref() {
+        std::env::remove_var("INTERVIEW_MEMORY_PROFILE_EXTERNAL_REF");
+        std::env::remove_var("INTERVIEW_MEMORY_PROFILE_REF");
+
         let session_id = Uuid::new_v4();
         let legacy = build_ingest_request(
             session_id,
@@ -2028,10 +2042,17 @@ mod tests {
         );
         assert_eq!(platform.speaker, "unknown");
         assert_eq!(platform.trust_level, "high");
+
+        std::env::remove_var("INTERVIEW_MEMORY_PROFILE_EXTERNAL_REF");
+        std::env::remove_var("INTERVIEW_MEMORY_PROFILE_REF");
     }
 
     #[test]
+    #[serial]
     fn platform_context_request_uses_external_scope_and_bounded_query() {
+        std::env::remove_var("INTERVIEW_MEMORY_PROFILE_EXTERNAL_REF");
+        std::env::remove_var("INTERVIEW_MEMORY_PROFILE_REF");
+
         let request = build_chat_context_request(
             Uuid::new_v4(),
             "ОС: ".to_string() + &"длинный контекст\n".repeat(2_000),
@@ -2048,6 +2069,9 @@ mod tests {
         assert!(platform.query.chars().count() <= PLATFORM_CONTEXT_QUERY_MAX_CHARS);
         assert_eq!(platform.max_facts, PLATFORM_CONTEXT_MAX_FACTS);
         assert_eq!(platform.max_chunks, DEFAULT_MAX_MEMORY_RESULTS);
+
+        std::env::remove_var("INTERVIEW_MEMORY_PROFILE_EXTERNAL_REF");
+        std::env::remove_var("INTERVIEW_MEMORY_PROFILE_REF");
     }
 
     #[test]
@@ -2097,7 +2121,7 @@ mod tests {
 
         let rendered = render_platform_context_response(
             &request,
-            "Retrieved fact: Memory Platform must keep active context evidence.",
+            "Retrieved fact: Memo Stack must keep active context evidence.",
         );
 
         assert!(rendered.contains("[current_request]\nshort current question"));
@@ -2554,7 +2578,7 @@ mod tests {
         std::env::set_var("VOICE_TO_TEXT_API_URL", "https://wrong.example");
         std::env::set_var("VITE_API_URL", "https://also-wrong.example");
 
-        assert_eq!(memory_platform_api_base_url(), "http://127.0.0.1:8080");
+        assert_eq!(memo_stack_api_base_url(), "http://127.0.0.1:8080");
         assert_eq!(legacy_api_base_url(), "http://127.0.0.1:8080");
 
         std::env::remove_var("INTERVIEW_MEMORY_API_URL");
@@ -2563,19 +2587,34 @@ mod tests {
     }
 
     #[test]
-    fn memory_platform_api_url_defaults_to_local_platform_without_stealing_legacy_base() {
+    fn memo_stack_api_url_defaults_to_local_platform_without_stealing_legacy_base() {
         std::env::remove_var("INTERVIEW_MEMORY_API_URL");
+        std::env::remove_var("MEMO_STACK_API_URL");
         std::env::remove_var("MEMORY_PLATFORM_API_URL");
         std::env::set_var("VOICE_TO_TEXT_API_URL", "https://legacy.example");
         std::env::set_var("VITE_API_URL", "https://also-legacy.example");
 
         assert_eq!(
-            memory_platform_api_base_url(),
-            DEFAULT_MEMORY_PLATFORM_API_BASE_URL
+            memo_stack_api_base_url(),
+            DEFAULT_MEMO_STACK_API_BASE_URL
         );
         assert_eq!(legacy_api_base_url(), "https://legacy.example");
 
         std::env::remove_var("VOICE_TO_TEXT_API_URL");
         std::env::remove_var("VITE_API_URL");
+    }
+
+    #[test]
+    fn memo_stack_api_url_prefers_new_env_and_keeps_old_env_as_fallback() {
+        std::env::remove_var("INTERVIEW_MEMORY_API_URL");
+        std::env::set_var("MEMORY_PLATFORM_API_URL", "http://127.0.0.1:9090");
+        std::env::set_var("MEMO_STACK_API_URL", "http://127.0.0.1:8081");
+
+        assert_eq!(memo_stack_api_base_url(), "http://127.0.0.1:8081");
+
+        std::env::remove_var("MEMO_STACK_API_URL");
+        assert_eq!(memo_stack_api_base_url(), "http://127.0.0.1:9090");
+
+        std::env::remove_var("MEMORY_PLATFORM_API_URL");
     }
 }

@@ -87,10 +87,10 @@ VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voic
 
 `INTERVIEW_MEMORY_MODE=active_context` and `INTERVIEW_MEMORY_ENABLED=1` are explicit equivalents of the default. Lower modes are available for canaries: `shadow_ingest` stores chunks without prompt impact, `shadow_retrieve` enables retrieval checks without prompt impact, and `INTERVIEW_MEMORY_FORCE_DISABLED=true` is the emergency kill switch. `INTERVIEW_MEMORY_MODE=disabled`, `INTERVIEW_MEMORY_ENABLED=false` or `INTERVIEW_MEMORY_ACTIVE_CONTEXT=false` disable the default. The Settings switch writes `AppConfig.interview_memory_enabled=false`, which also resolves the desktop bridge to `disabled` at runtime without restart. `INTERVIEW_MEMORY_FORCE_LOCAL_ONLY=true` avoids backend memory calls and keeps only the minimal local prompt fallback.
 
-Для local Memory Platform canary, когда STT остаётся на production websocket, а память идёт в новый локальный memory server:
+Для local Memo Stack canary, когда STT остаётся на production websocket, а память идёт в новый локальный memory server:
 
 ```bash
-cd /Users/belief/dev/projects/ai/memory-platform
+cd /Users/belief/dev/projects/ai/memo-stack
 docker compose up -d memory_postgres memory_qdrant memory_neo4j
 MEMORY_AUTO_CREATE_SCHEMA=true MEMORY_SERVICE_TOKEN=local-dev-token .venv/bin/python -m memory_server.main
 
@@ -101,13 +101,13 @@ INTERVIEW_MEMORY_API_VARIANT=platform INTERVIEW_MEMORY_AUTH_TOKEN="local-dev-tok
 То же самое через штатные scripts:
 
 ```bash
-pnpm memory-platform:up
-pnpm memory-platform:server
+pnpm memo-stack:up
+pnpm memo-stack:server
 pnpm copy-helper:brave:restart-cdp
-pnpm tauri:dev:memory-platform
+pnpm tauri:dev:memo-stack
 ```
 
-`INTERVIEW_MEMORY_API_VARIANT=platform` форсирует новый `/v1` контракт (`/v1/episodes`, `/v1/context`). `INTERVIEW_MEMORY_AUTH_TOKEN` намеренно имеет приоритет только для memory bridge. Это позволяет гонять Memory Platform E2E без замены основного app auth/provider flow.
+`INTERVIEW_MEMORY_API_VARIANT=platform` форсирует новый `/v1` контракт (`/v1/episodes`, `/v1/context`). `INTERVIEW_MEMORY_AUTH_TOKEN` намеренно имеет приоритет только для memory bridge. Это позволяет гонять Memo Stack E2E без замены основного app auth/provider flow.
 
 Старый compatibility backend всё ещё можно проверить явно:
 
@@ -155,7 +155,7 @@ Production/staging canary для уже задеплоенного backend memor
 pnpm e2e:memory-canary -- --api-url https://api.voicetext.site
 ```
 
-Для нового Memory Platform API:
+Для нового Memo Stack API:
 
 ```bash
 INTERVIEW_MEMORY_API_VARIANT=platform pnpm e2e:memory-canary -- --api-url http://127.0.0.1:7788 --auth-token local-dev-token
