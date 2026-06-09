@@ -1339,7 +1339,7 @@ mod snapshot_contract_tests {
 }
 /// Toggle window visibility
 #[tauri::command]
-pub async fn toggle_window(state: State<'_, AppState>, window: Window) -> Result<(), String> {
+pub async fn toggle_window(_state: State<'_, AppState>, window: Window) -> Result<(), String> {
     log::info!("Command: toggle_window");
 
     if window.is_visible().map_err(|e| e.to_string())? {

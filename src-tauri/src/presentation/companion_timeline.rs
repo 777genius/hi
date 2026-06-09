@@ -1037,6 +1037,7 @@ pub async fn cancel_active_haiku_generation(state: &AppState) -> bool {
     true
 }
 
+#[allow(dead_code)]
 pub async fn append_haiku_delta(state: &AppState, request_id: &str, delta: &str) {
     append_haiku_candidate_delta(state, request_id, None, delta).await;
 }
@@ -1105,6 +1106,7 @@ pub async fn append_haiku_candidate_delta(
     }
 }
 
+#[allow(dead_code)]
 pub async fn finalize_haiku_message(state: &AppState, request_id: &str) {
     finalize_haiku_candidate_with_normalizer(state, request_id, None, None).await;
 }
@@ -1566,11 +1568,13 @@ pub async fn on_microphone_final(state: &AppState, payload: &FinalTranscriptionP
     clear_microphone_live_buffers(state).await;
 }
 
+#[allow(dead_code)]
 pub async fn build_context_text(state: &AppState, include_full_history: bool) -> String {
     let parts = collect_context_parts(state, include_full_history).await;
     context_text_from_selected_parts(&select_context_parts(&parts))
 }
 
+#[allow(dead_code)]
 pub async fn build_memory_context_evidence(
     state: &AppState,
     include_full_history: bool,
@@ -2064,6 +2068,7 @@ fn select_context_parts(raw_parts: &[ContextPart]) -> Vec<ContextPart> {
     selected
 }
 
+#[allow(dead_code)]
 fn trim_context_parts(raw_parts: &[ContextPart]) -> String {
     let selected = select_context_parts(raw_parts);
     context_text_from_selected_parts(&selected)

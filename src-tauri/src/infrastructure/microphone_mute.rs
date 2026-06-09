@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 #[derive(Debug, Clone)]
 pub struct MicrophoneMuteStatus {
@@ -14,6 +14,7 @@ pub struct SetMicrophoneMuteOutcome {
     pub applied_methods: Vec<String>,
 }
 
+#[allow(dead_code)]
 const DEFAULT_RESTORE_INPUT_VOLUME: u32 = 75;
 
 #[cfg(target_os = "macos")]
