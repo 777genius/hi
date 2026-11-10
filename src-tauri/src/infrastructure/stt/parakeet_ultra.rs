@@ -399,7 +399,7 @@ mod tests {
         );
         a.unwrap();
         b.unwrap();
-        let play = |provider: &mut ParakeetUltraProvider, pcm: &[u8]| async move {
+        async fn play(provider: &mut ParakeetUltraProvider, pcm: &[u8]) -> SttResult<()> {
             let clip = pcm.chunks_exact(2)
                 .map(|x| i16::from_le_bytes([x[0],x[1]]))
                 .collect::<Vec<_>>();
