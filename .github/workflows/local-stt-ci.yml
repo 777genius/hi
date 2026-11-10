@@ -12,6 +12,11 @@ on:
 permissions:
   contents: read
 
+# Only the newest PR head matters. Cancel superseded queue entries.
+concurrency:
+  group: local-stt-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   macos-arm-rust:
     runs-on: macos-15
