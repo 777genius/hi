@@ -51,6 +51,25 @@ impl TranscriptionService {
         *self.microphone_sensitivity.write().await = sensitivity.min(200);
     }
 
+    /// Unlike the cloud send path, local STT consumes PCM cheaply and can
+    /// drain the last queued frames after capture stops. A bounded wait avoids
+    /// keeping Stop hung when the audio source retains a sender.
+    async fn finish_audio_processor(&self, drain_local: bool) {
+        let Some(mut task) = self.audio_processor_task.write().await.take() else { return; };
+        if drain_local {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) => {
+                    log::warn!("Local STT audio processor failed while draining: {}", error);
+                    return;
+                }
+                Err(_) => log::warn!("Local STT audio drain timed out; aborting processor"),
+            }
+        }
+        task.abort();
+        let _ = task.await;
+    }
+
     /// Start recording and transcription
     pub async fn start_recording(
         &self,
@@ -89,6 +108,7 @@ impl TranscriptionService {
 
         // Проверяем можно ли переиспользовать существующее соединение
         let config = self.config.read().await.clone();
+        let local_utterance_provider = config.provider == SttProviderType::ParakeetUltra;
         let mut can_reuse_connection = {
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
@@ -256,7 +276,9 @@ impl TranscriptionService {
                 chunk_count += 1;
 
                 let status = status_arc.read().await;
-                if *status != RecordingStatus::Recording {
+                if *status != RecordingStatus::Recording
+                    && !(local_utterance_provider && *status == RecordingStatus::Processing)
+                {
                     continue;
                 }
                 drop(status);
@@ -567,11 +589,9 @@ impl TranscriptionService {
         // Stop audio capture
         let stop_capture_result = self.audio_capture.write().await.stop_capture().await;
 
-        // При остановке записи прибиваем audio processor, чтобы не оставлять висящий task между сессиями.
-        if let Some(task) = self.audio_processor_task.write().await.take() {
-            task.abort();
-            let _ = task.await;
-        }
+        // A local decoder must see every queued frame before its final Stop flush.
+        let drain_local = self.config.read().await.provider == SttProviderType::ParakeetUltra;
+        self.finish_audio_processor(drain_local).await;
 
         // Если не смогли остановить захват аудио — считаем это критическим сценарием:
         // лучше упасть с ошибкой, но гарантированно вернуть сервис в Idle, чем зависнуть в Processing.
@@ -746,11 +766,8 @@ impl TranscriptionService {
         // Stop audio capture
         let stop_capture_result = self.audio_capture.write().await.stop_capture().await;
 
-        // При остановке записи прибиваем audio processor, чтобы он гарантированно не жил в фоне.
-        if let Some(task) = self.audio_processor_task.write().await.take() {
-            task.abort();
-            let _ = task.await;
-        }
+        let drain_local = self.config.read().await.provider == SttProviderType::ParakeetUltra;
+        self.finish_audio_processor(drain_local).await;
 
         if let Err(e) = stop_capture_result {
             log::error!("Failed to stop audio capture: {}", e);
