@@ -133,6 +133,9 @@ pub struct AppState {
 
     /// Companion timeline (session-local, backend-owned coarse snapshot).
     pub companion_timeline: Arc<RwLock<Vec<crate::presentation::companion::CompanionMessage>>>,
+    /// Stop waits for mic + system event reducers before clearing session identity.
+    pub(crate) system_stt_event_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<crate::presentation::commands::SttTranscriptionEvent>>>>,
+    pub(crate) microphone_stt_event_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<crate::presentation::commands::SttTranscriptionEvent>>>>,
 
     /// Следующий монотонный seq для companion timeline.
     pub companion_next_seq: Arc<AtomicU64>,
@@ -282,6 +285,8 @@ impl AppState {
                     companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
                     companion_desktop_blackout_enabled: Arc::new(AtomicBool::new(false)),
                     companion_timeline: Arc::new(RwLock::new(Vec::new())),
+                    system_stt_event_tx: Arc::new(RwLock::new(None)),
+                    microphone_stt_event_tx: Arc::new(RwLock::new(None)),
                     companion_next_seq: Arc::new(AtomicU64::new(0)),
                     companion_next_stt_index: Arc::new(AtomicU64::new(0)),
                     companion_history_floor_seq: Arc::new(AtomicU64::new(0)),
@@ -375,6 +380,8 @@ impl AppState {
                     companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
                     companion_desktop_blackout_enabled: Arc::new(AtomicBool::new(false)),
                     companion_timeline: Arc::new(RwLock::new(Vec::new())),
+                    system_stt_event_tx: Arc::new(RwLock::new(None)),
+                    microphone_stt_event_tx: Arc::new(RwLock::new(None)),
                     companion_next_seq: Arc::new(AtomicU64::new(0)),
                     companion_next_stt_index: Arc::new(AtomicU64::new(0)),
                     companion_history_floor_seq: Arc::new(AtomicU64::new(0)),
@@ -479,6 +486,8 @@ impl AppState {
             companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
             companion_desktop_blackout_enabled: Arc::new(AtomicBool::new(false)),
             companion_timeline: Arc::new(RwLock::new(Vec::new())),
+            system_stt_event_tx: Arc::new(RwLock::new(None)),
+            microphone_stt_event_tx: Arc::new(RwLock::new(None)),
             companion_next_seq: Arc::new(AtomicU64::new(0)),
             companion_next_stt_index: Arc::new(AtomicU64::new(0)),
             companion_history_floor_seq: Arc::new(AtomicU64::new(0)),
