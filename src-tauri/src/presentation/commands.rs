@@ -1039,11 +1039,13 @@ pub async fn stop_recording_raw(
         .active_transcription_session_id
         .load(Ordering::Relaxed);
 
+    // Always finish the second channel and drain both reducers even if the
+    // system provider reports that its final utterance could not be decoded.
     let result = state
         .transcription_service
         .stop_recording()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string());
 
     // The mic may still be in Starting while its local model is loading.
     // Abort that startup rather than leaving a recording to start after Stop.
@@ -1093,7 +1095,7 @@ pub async fn stop_recording_raw(
         },
     );
 
-    Ok(result)
+    result
 }
 
 /// Abort recording start while the service is still in `Starting`.
