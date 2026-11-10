@@ -799,7 +799,9 @@ impl TranscriptionService {
 
         let config_requires_new_connection = prev_config.provider != config.provider
             || prev_config.language != config.language
-            || prev_config.deepgram_keyterms != config.deepgram_keyterms;
+            || prev_config.deepgram_keyterms != config.deepgram_keyterms
+            || prev_config.model != config.model
+            || prev_config.auto_detect_language != config.auto_detect_language;
 
         if config_requires_new_connection {
             let status = *self.status.read().await;
