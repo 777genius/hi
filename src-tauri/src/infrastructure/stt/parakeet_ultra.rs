@@ -363,6 +363,9 @@ mod tests {
         let mic_pcm = std::fs::read(
             std::env::var("LOCAL_STT_MIC_PCM").expect("mic fixture path required")
         ).expect("mic fixture");
+        let en_pcm = std::fs::read(
+            std::env::var("LOCAL_STT_EN_PCM").expect("english fixture path required")
+        ).expect("english fixture");
         let mut system = ParakeetUltraProvider::new();
         let mut microphone = ParakeetUltraProvider::new();
         let mut config = SttConfig::new(SttProviderType::ParakeetUltra);
@@ -427,12 +430,30 @@ mod tests {
         assert!(!b.is_empty(), "microphone produced no final transcription");
         let system_text=a.join(" ").to_lowercase();
         let mic_text=b.join(" ").to_lowercase();
-        assert!(system_text.contains("fox") || system_text.contains("quick"),
-            "unexpected system transcription: {system_text}");
-        assert!(mic_text.contains("answer") || mic_text.contains("question"),
-            "unexpected mic transcription: {mic_text}");
-        assert!(!mic_text.contains("quick brown fox"), "audio channels mixed");
-        println!("Real dual-source Parakeet E2E {:?} system={system_text:?} mic={mic_text:?}",
-            started.elapsed());
+        // Real FLEURS RU and UK speech from the transcribe.cpp fixtures.
+        assert!(system_text.contains("добавил") || system_text.contains("следует"),
+            "unexpected RU system transcription: {system_text}");
+        assert!(mic_text.contains("управління") || mic_text.contains("маріанськ") || mic_text.contains("україн"),
+            "unexpected UK mic transcription: {mic_text}");
+        assert!(!mic_text.contains("он добавил"), "audio channels mixed");
+
+        // Model remains loaded: re-start the same provider for English audio.
+        let english_out = Arc::new(Mutex::new(Vec::<String>::new()));
+        system.start_stream(
+            Arc::new(|_| {}),
+            to_final(Arc::clone(&english_out)),
+            to_error(Arc::clone(&system_errors)),
+            Arc::new(|_, _| {}),
+        ).await.unwrap();
+        play(&mut system, &en_pcm).await.unwrap();
+        system.stop_stream().await.unwrap();
+        let english_text = english_out.lock().unwrap().join(" ");
+        assert!(english_text.len() > 20 && english_text.chars().any(|c| c.is_ascii_alphabetic()),
+            "unexpected EN transcription: {english_text}");
+        assert!(system_errors.lock().unwrap().is_empty(), "English errors");
+        println!(
+            "Real RU/UK dual-source + EN restart E2E {:?} ru={system_text:?} uk={mic_text:?} en={english_text:?}",
+            started.elapsed()
+        );
     }
 }
