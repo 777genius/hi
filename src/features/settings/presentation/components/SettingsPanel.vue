@@ -16,6 +16,7 @@ import { invokeUpdateAppConfig } from '@/windowing/stateSync';
 
 // Секции
 import LanguageSection from './sections/LanguageSection.vue';
+import ProviderSection from './sections/ProviderSection.vue';
 import ThemeSection from './sections/ThemeSection.vue';
 import HotkeySection from './sections/HotkeySection.vue';
 import SystemAudioDeviceSection from './sections/SystemAudioDeviceSection.vue';
@@ -205,6 +206,9 @@ watch(
             <LanguageSection />
             <ThemeSection />
           </div>
+
+          <!-- Local or cloud STT choice (the default remains Backend) -->
+          <ProviderSection />
 
           <!-- Ключевые термины -->
           <KeytermsSection />
