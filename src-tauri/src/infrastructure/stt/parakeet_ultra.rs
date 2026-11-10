@@ -141,11 +141,23 @@ impl SttProvider for ParakeetUltraProvider {
         self.cancelled = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::clone(&self.cancelled);
         let (tx, mut rx) = mpsc::channel::<Utterance>(JOB_QUEUE_CAPACITY);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<SttResult<()>>();
 
-        let worker = tokio::task::spawn_blocking(move || -> SttResult<()> {
-            let mut session = model.session().map_err(|error| {
-                SttError::Processing(format!("Cannot start Parakeet session: {error}"))
-            })?;
+        let mut worker = tokio::task::spawn_blocking(move || -> SttResult<()> {
+            // Validate model/session readiness before starting the audio capture.
+            let mut session = match model.session() {
+                Ok(session) => {
+                    let _ = ready_tx.send(Ok(()));
+                    session
+                }
+                Err(error) => {
+                    let failure = SttError::Processing(
+                        format!("Cannot start Parakeet session: {error}")
+                    );
+                    let _ = ready_tx.send(Err(failure.clone()));
+                    return Err(failure);
+                }
+            };
             let opts = transcribe_cpp::RunOptions::default(); // automatic RU/EN/UK detection
             while let Some(job) = rx.blocking_recv() {
                 if cancelled.load(Ordering::Acquire) {
@@ -191,6 +203,20 @@ impl SttProvider for ParakeetUltraProvider {
             }
             Ok(())
         });
+
+        match tokio::time::timeout(std::time::Duration::from_secs(10), ready_rx).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => {
+                let _ = worker.await;
+                return Err(error);
+            }
+            other => {
+                worker.abort();
+                return Err(SttError::Processing(
+                    format!("Local Parakeet worker failed to become ready: {other:?}")
+                ));
+            }
+        }
 
         self.segmenter = Some(segmenter);
         self.job_tx = Some(tx);
