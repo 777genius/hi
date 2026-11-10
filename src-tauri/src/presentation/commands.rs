@@ -635,6 +635,14 @@ fn spawn_microphone_transcription_start(
             .await
         {
             log::warn!("Microphone transcription failed to start: {}", e);
+        } else if let Some(state) = app_handle_partial.try_state::<AppState>() {
+            // The mic starts asynchronously after the system capture. A quick
+            // Stop can invalidate the session while the model is still loading.
+            // Do not leave an orphaned mic recording in that race.
+            if state.active_transcription_session_id.load(Ordering::Relaxed) != session_id {
+                log::info!("Mic startup completed after Stop; shutting down stale mic session");
+                let _ = mic_service.stop_recording().await;
+            }
         }
     });
 }
@@ -1037,13 +1045,21 @@ pub async fn stop_recording_raw(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Best-effort: останавливаем микрофонную транскрибацию (если она была запущена).
-    if let Err(e) = state
-        .microphone_transcription_service
-        .stop_recording()
-        .await
-    {
-        log::debug!("Microphone transcription stop skipped/failed: {}", e);
+    // The mic may still be in Starting while its local model is loading.
+    // Abort that startup rather than leaving a recording to start after Stop.
+    let mic_service = &state.microphone_transcription_service;
+    match mic_service.get_status().await {
+        RecordingStatus::Recording => {
+            if let Err(e) = mic_service.stop_recording().await {
+                log::warn!("Microphone transcription stop failed: {}", e);
+            }
+        }
+        RecordingStatus::Starting => {
+            if let Err(e) = mic_service.abort_starting().await {
+                log::warn!("Microphone startup abort failed: {}", e);
+            }
+        }
+        _ => {}
     }
 
     // The STT workers have stopped emitting callbacks. Ensure their finals
