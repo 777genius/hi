@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub enum SttProviderType {
     /// Local Whisper.cpp implementation (offline)
     WhisperLocal,
+    /// Parakeet Ultra with per-utterance VAD, local Metal inference on Apple Silicon.
+    ParakeetUltra,
     /// AssemblyAI Universal-Streaming v3 (low cost, ultra-low latency)
     AssemblyAI,
     /// Deepgram cloud service (Nova-3 model)
@@ -315,6 +317,7 @@ mod tests {
 
     #[test]
     fn test_stt_provider_type_default() {
+        assert_eq!(serde_json::to_string(&SttProviderType::ParakeetUltra).unwrap(), "\"parakeetultra\"");
         assert_eq!(SttProviderType::default(), SttProviderType::Backend);
     }
 
