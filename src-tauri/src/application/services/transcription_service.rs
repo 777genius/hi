@@ -444,8 +444,10 @@ impl TranscriptionService {
                                     ("connection", false)
                                 }
                             }
+                            // A local inference queue overflow means an entire utterance
+                            // was lost. Fail visibly rather than resuming with a gap.
                             SttError::Processing(_) | SttError::Internal(_) => {
-                                ("processing", false)
+                                ("processing", local_utterance_provider)
                             }
                             SttError::Unsupported(_) => ("processing", true),
                         };
