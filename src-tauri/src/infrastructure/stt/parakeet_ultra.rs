@@ -1,6 +1,8 @@
 //! Offline Parakeet Ultra inference behind the existing STT provider contract.
 //! A background worker decodes completed VAD utterances while audio capture runs.
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -14,6 +16,8 @@ use crate::domain::{
 use super::utterance_segmenter::{Utterance, UtteranceSegmenter};
 
 const MODEL_FILE: &str = "parakeet-ultra-Q8_0.gguf";
+/// Handy catalog's pinned Q8_0 model at revision 39eeb55181f0d354fd934f06e92fd8d5037fed8e.
+const MODEL_SHA256: &str = "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59";
 const JOB_QUEUE_CAPACITY: usize = 32;
 
 /// Each provider instance owns a different loaded model handle: transcribe.cpp
@@ -87,6 +91,38 @@ impl ParakeetUltraProvider {
         )))
     }
 
+    fn verify_model_integrity(path: &Path) -> SttResult<()> {
+        let mut file = std::fs::File::open(path).map_err(|error| {
+            SttError::Configuration(format!("Cannot read local STT model: {error}"))
+        })?;
+        let metadata = file.metadata().map_err(|error| {
+            SttError::Configuration(format!("Cannot stat local STT model: {error}"))
+        })?;
+        if metadata.len() != 740_363_168 {
+            return Err(SttError::Configuration(
+                "Parakeet Ultra Q8 model size differs from pinned catalog; redownload model".into(),
+            ));
+        }
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 256 * 1024];
+        loop {
+            let count = file.read(&mut buffer).map_err(|error| {
+                SttError::Configuration(format!("Model checksum read failed: {error}"))
+            })?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        let actual = format!("{:x}", digest.finalize());
+        if actual != MODEL_SHA256 {
+            return Err(SttError::Configuration(
+                "Parakeet Ultra Q8 checksum mismatch; refusing unverified model".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn require_file(path: PathBuf) -> SttResult<PathBuf> {
         if path.extension().and_then(|s| s.to_str()) != Some("gguf") {
             return Err(SttError::Configuration(
@@ -116,10 +152,14 @@ impl SttProvider for ParakeetUltraProvider {
             return Err(SttError::Processing("Cannot change model during recording".into()));
         }
         let path = Self::resolve_model_path(config)?;
-        let model = tokio::task::spawn_blocking(move || transcribe_cpp::Model::load(path))
-            .await
-            .map_err(|error| SttError::Internal(format!("Local model load task: {error}")))?
-            .map_err(|error| SttError::Configuration(format!("Cannot load Parakeet: {error}")))?;
+        let model = tokio::task::spawn_blocking(move || -> SttResult<_> {
+            Self::verify_model_integrity(&path)?;
+            transcribe_cpp::Model::load(path).map_err(|error| {
+                SttError::Configuration(format!("Cannot load Parakeet Ultra Q8: {error}"))
+            })
+        })
+        .await
+        .map_err(|error| SttError::Internal(format!("Local model load task: {error}")))??;
         self.model = Some(model);
         Ok(())
     }
