@@ -1513,10 +1513,16 @@ pub async fn on_microphone_final(state: &AppState, payload: &FinalTranscriptionP
     }
 
     let status = state.transcription_service.get_status().await;
+    // System capture stops before the mic is flushed. Its status may already
+    // be Idle even though mic finals still belong to the active session.
+    let active_session = state.active_transcription_session_id.load(Ordering::Relaxed);
     if !matches!(
         status,
         RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Processing
-    ) {
+    ) && !(status == RecordingStatus::Idle
+        && active_session != 0
+        && active_session == payload.session_id)
+    {
         return;
     }
 
