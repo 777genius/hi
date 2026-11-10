@@ -2217,6 +2217,43 @@ mod tests {
         }
     }
 
+    /// A local decoder may deliver mic final more than a second after
+    /// the speaker stopped. It must use the capture timestamp even while
+    /// Stop has already moved the system capture to Idle.
+    #[tokio::test]
+    async fn delayed_local_microphone_final_reaches_llm_context() {
+        let state = AppState::default();
+        let session_id = 47;
+        state.active_transcription_session_id.store(
+            session_id, std::sync::atomic::Ordering::Relaxed
+        );
+        update_system_audio_level(&state, 0.02);
+        update_microphone_audio_level(&state, 0.6);
+        let captured = now_ms();
+        tokio::time::sleep(std::time::Duration::from_millis(1_250)).await;
+        on_microphone_final(&state, &FinalTranscriptionPayload {
+            session_id,
+            source: "microphone".to_string(),
+            text: "Я объясняю интерфейсы в Go".to_string(),
+            timestamp: captured,
+            confidence: None,
+            language: Some("ru".to_string()),
+            start: 0.0,
+            duration: 2.0,
+        }).await;
+        append_system_final(
+            &state, session_id,
+            &test_transcription("Почему интерфейс удовлетворяется неявно?", captured)
+        ).await;
+        let (context, evidence) = build_context_text_and_memory_evidence(&state, false).await;
+        assert!(context.contains("МИКРОФОН: Я объясняю интерфейсы в Go"), "{context}");
+        assert!(context.contains("ОС: Почему интерфейс удовлетворяется неявно?"), "{context}");
+        assert!(evidence.recent_timeline.iter().any(|x|
+            x.label.as_deref() == Some("microphone")
+                && x.text == "Я объясняю интерфейсы в Go"
+        ));
+    }
+
     #[tokio::test]
     async fn signal_message_enters_context_as_interviewer_text() {
         let state = AppState::default();
