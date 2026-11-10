@@ -24,9 +24,10 @@ pub struct AudioPermissionStatus {
 const DEFAULT_MICROPHONE_MUTE_HOTKEY: &str = "Alt+Z";
 const APP_MICROPHONE_MUTE_SOURCE: &str = "app-microphone-toggle";
 
-enum SttTranscriptionEvent {
+pub(crate) enum SttTranscriptionEvent {
     Partial(crate::domain::Transcription),
     Final(crate::domain::Transcription),
+    Barrier(tokio::sync::oneshot::Sender<()>),
 }
 
 struct CompanionDeltaWriter {
@@ -523,6 +524,11 @@ fn spawn_microphone_transcription_start(
 
         let (mic_event_tx, mut mic_event_rx) =
             tokio::sync::mpsc::unbounded_channel::<SttTranscriptionEvent>();
+        if let Some(state) = app_handle_partial.try_state::<AppState>() {
+            if state.active_transcription_session_id.load(Ordering::Relaxed) == session_id {
+                *state.microphone_stt_event_tx.write().await = Some(mic_event_tx.clone());
+            }
+        }
         let app_handle_mic_events = app_handle_partial.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(event) = mic_event_rx.recv().await {
@@ -571,6 +577,9 @@ fn spawn_microphone_transcription_start(
                             &app_handle_mic_events,
                         )
                         .await;
+                    }
+                    SttTranscriptionEvent::Barrier(ack) => {
+                        let _ = ack.send(());
                     }
                 }
             }
@@ -680,6 +689,7 @@ pub async fn start_recording_raw(
 
     let (system_event_tx, mut system_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<SttTranscriptionEvent>();
+    *state.system_stt_event_tx.write().await = Some(system_event_tx.clone());
     let app_handle_events = app_handle.clone();
     let state_final_events = state.final_transcription.clone();
     let state_history_events = state.history.clone();
@@ -771,6 +781,9 @@ pub async fn start_recording_raw(
                     {
                         log::debug!("Failed to publish companion final snapshot: {}", e);
                     }
+                }
+                SttTranscriptionEvent::Barrier(ack) => {
+                    let _ = ack.send(());
                 }
             }
         }
@@ -987,6 +1000,25 @@ pub async fn start_recording_raw(
     Ok("Recording started".to_string())
 }
 
+/// Drain both reducer queues before invalidating the recording session ID.
+/// Each worker's final callback only enqueues its result; the timeline update
+/// happens on the event receiver and is not synchronous with worker completion.
+async fn drain_stt_event_queue(
+    slot: &Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::UnboundedSender<SttTranscriptionEvent>>>>,
+    source: &str,
+) {
+    let Some(tx) = slot.write().await.take() else { return; };
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    if tx.send(SttTranscriptionEvent::Barrier(ack_tx)).is_ok()
+        && !matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), ack_rx).await,
+            Ok(Ok(()))
+        )
+    {
+        log::warn!("Timed out draining STT {} events after Stop", source);
+    }
+}
+
 /// Stop recording voice
 pub async fn stop_recording_raw(
     state: &AppState,
@@ -1013,6 +1045,13 @@ pub async fn stop_recording_raw(
     {
         log::debug!("Microphone transcription stop skipped/failed: {}", e);
     }
+
+    // The STT workers have stopped emitting callbacks. Ensure their finals
+    // reached the canonical timeline before deactivating this session.
+    tokio::join!(
+        drain_stt_event_queue(&state.system_stt_event_tx, "system"),
+        drain_stt_event_queue(&state.microphone_stt_event_tx, "microphone"),
+    );
 
     crate::presentation::companion_timeline::finalize_or_clear_system_live_on_stop(
         state, session_id,
