@@ -703,14 +703,23 @@ impl TranscriptionService {
             // Обычная остановка для провайдеров без keep-alive
             log::info!("Stopping STT stream completely");
 
+            let mut local_flush_error = None;
             if let Some(mut provider) = self.stt_provider.write().await.take() {
                 if let Err(e) = provider.stop_stream().await {
                     log::warn!("Failed to stop STT stream cleanly, aborting: {}", e);
+                    if drain_local {
+                        local_flush_error = Some(e);
+                    }
                     let _ = provider.abort().await;
                 }
             }
 
             *self.status.write().await = RecordingStatus::Idle;
+            if let Some(error) = local_flush_error {
+                return Err(anyhow::anyhow!(
+                    "Local STT could not commit the last utterance: {}", error
+                ));
+            }
 
             log::info!("Recording stopped");
             Ok("Transcription completed".to_string())
@@ -789,15 +798,24 @@ impl TranscriptionService {
             let _ = timer.await;
         }
 
-        // Жёстко закрываем провайдера и соединение
+        // Hard Stop must also report loss of a local final utterance.
+        let mut local_flush_error = None;
         if let Some(mut provider) = self.stt_provider.write().await.take() {
             if let Err(e) = provider.stop_stream().await {
                 log::warn!("Failed to stop STT stream cleanly, aborting: {}", e);
+                if drain_local {
+                    local_flush_error = Some(e);
+                }
                 let _ = provider.abort().await;
             }
         }
 
         *self.status.write().await = RecordingStatus::Idle;
+        if let Some(error) = local_flush_error {
+            return Err(anyhow::anyhow!(
+                "Local STT could not commit the last utterance: {}", error
+            ));
+        }
         log::info!("Recording stopped (hard), provider connection closed");
         Ok("Transcription completed".to_string())
     }
