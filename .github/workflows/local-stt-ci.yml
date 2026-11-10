@@ -1,0 +1,56 @@
+name: Local Parakeet Ultra PR checks
+
+on:
+  pull_request:
+    paths:
+      - 'src-tauri/**'
+      - 'src/features/settings/**'
+      - 'src/types/**'
+      - '.github/workflows/local-stt-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-arm-rust:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+      - name: Unit tests — VAD utterance segmenter (Apple Silicon)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib utterance_segmenter -- --nocapture
+      - name: Complete Rust library check
+        run: cargo check --manifest-path src-tauri/Cargo.toml --lib
+      - name: Preserve resolved Cargo.lock for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock-local-stt-macos-arm
+          path: src-tauri/Cargo.lock
+          retention-days: 7
+
+  frontend-typecheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: Build state-sync workspace dependency
+        run: |
+          git clone --depth 1 https://github.com/777genius/state-sync.git ../state-sync
+          (cd ../state-sync && pnpm install --frozen-lockfile && pnpm build)
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
