@@ -107,6 +107,11 @@ objc = "0.2"  # Objective-C runtime bindings
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }  # NSPanel для появления поверх fullscreen приложений
 screencapturekit = "1"
 
+# Parakeet Ultra on Apple Silicon: native GGUF inference with Metal.
+# Other platforms keep existing STT providers and do not compile the C++ runtime.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+transcribe-cpp = { version = "=0.4.1", default-features = false, features = ["metal"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = "0.9"
 
