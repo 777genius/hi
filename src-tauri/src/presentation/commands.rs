@@ -1568,10 +1568,12 @@ pub async fn update_stt_config(
 
     let _guard = state.stt_config_guard.lock().await;
 
-    // Выбор провайдера отключён — всегда используем Backend.
-    // Параметр provider оставлен, чтобы не ломать совместимость API.
-    let _ = provider;
-    let provider_type = SttProviderType::Backend;
+    // An explicit choice; do not silently switch offline transcription to cloud.
+    let provider_type = match provider.trim().to_ascii_lowercase().as_str() {
+        "backend" => SttProviderType::Backend,
+        "parakeetultra" => SttProviderType::ParakeetUltra,
+        other => return Err(format!("Unsupported STT provider: {other}")),
+    };
 
     // Снимаем текущее состояние для сравнения после сохранения
     let old_stt = {
@@ -1586,9 +1588,16 @@ pub async fn update_stt_config(
     config.provider = provider_type;
     config.language = language;
 
-    // Whisper/model больше не используем в backend-only архитектуре.
-    let _ = model;
-    config.model = None;
+    // Preserve the model path on partial language updates; clear legacy model
+    // when first switching to Parakeet so auto-discovery works.
+    if provider_type == SttProviderType::ParakeetUltra
+        && old_stt.provider != SttProviderType::ParakeetUltra
+    {
+        config.model = None;
+    }
+    if let Some(model) = model {
+        config.model = (!model.trim().is_empty()).then_some(model);
+    }
 
     // Backend keep-alive deliberately stays disabled: Deepgram/Backend pause+resume is
     // harder to make reliable than reconnecting, and transcription stability is more important.
@@ -1646,7 +1655,8 @@ pub async fn update_stt_config(
     // чтобы state-sync корректно подтягивал актуальный snapshot (включая keyterms и т.д.)
     let stt_changed = config.language != old_stt.language
         || config.deepgram_keyterms != old_stt.deepgram_keyterms
-        || config.provider != old_stt.provider;
+        || config.provider != old_stt.provider
+        || config.model != old_stt.model;
     if stt_changed {
         let revision = AppState::bump_revision(&state.stt_config_revision).await;
         let _ = app_handle.emit(
