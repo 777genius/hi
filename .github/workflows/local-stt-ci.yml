@@ -31,9 +31,42 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
       - name: Unit tests — VAD utterance segmenter (Apple Silicon)
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib utterance_segmenter -- --nocapture
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib utterance_segmenter -- --nocapture
       - name: Complete Rust library check
-        run: cargo check --manifest-path src-tauri/Cargo.toml --lib
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --lib
+      - name: Download pinned Parakeet Ultra Q8 model (cache)
+        uses: actions/cache@v4
+        id: ultra-cache
+        with:
+          path: .e2e-artifacts/models/parakeet-ultra-Q8_0.gguf
+          key: macos-local-stt-parakeet-ultra-39eeb551-q8
+      - name: Fetch verified local model
+        if: steps.ultra-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .e2e-artifacts/models
+          curl --fail --location --retry 2 --retry-delay 3 \
+            --output .e2e-artifacts/models/parakeet-ultra-Q8_0.gguf \
+            'https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/39eeb55181f0d354fd934f06e92fd8d5037fed8e/parakeet-ultra-Q8_0.gguf?download=true'
+      - name: Validate model integrity
+        run: |
+          echo '007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59  .e2e-artifacts/models/parakeet-ultra-Q8_0.gguf' | shasum -a 256 --check
+      - name: Generate two distinct spoken interview fixtures
+        run: |
+          say -o "${RUNNER_TEMP}/local-stt-system.aiff" "The quick brown fox jumps over the lazy dog."
+          say -o "${RUNNER_TEMP}/local-stt-mic.aiff" "The answer to the technical question is forty two."
+          if ! command -v ffmpeg >/dev/null 2>&1; then brew install ffmpeg; fi
+          ffmpeg -nostdin -y -loglevel error -i "${RUNNER_TEMP}/local-stt-system.aiff" \
+            -ar 16000 -ac 1 -f s16le "${RUNNER_TEMP}/local-stt-system.pcm"
+          ffmpeg -nostdin -y -loglevel error -i "${RUNNER_TEMP}/local-stt-mic.aiff" \
+            -ar 16000 -ac 1 -f s16le "${RUNNER_TEMP}/local-stt-mic.pcm"
+      - name: E2E real Parakeet with simultaneous system and microphone PCM
+        env:
+          HACKINTERVIEW_PARAKEET_MODEL_PATH: ${{ github.workspace }}/.e2e-artifacts/models/parakeet-ultra-Q8_0.gguf
+          LOCAL_STT_SYSTEM_PCM: ${{ runner.temp }}/local-stt-system.pcm
+          LOCAL_STT_MIC_PCM: ${{ runner.temp }}/local-stt-mic.pcm
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib \
+            e2e_local_parakeet_two_sources -- --ignored --nocapture
       - name: Preserve resolved Cargo.lock for review
         if: always()
         uses: actions/upload-artifact@v4
