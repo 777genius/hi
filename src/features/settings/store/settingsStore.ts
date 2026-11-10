@@ -33,7 +33,7 @@ function trimKeyterms(input: string, maxTerms: number): string {
 
 export const useSettingsStore = defineStore('settings', () => {
   // Состояние настроек
-  // По умолчанию используем только наш Backend. Выбор провайдера в UI скрыт.
+  // Existing Backend remains the default; Apple Silicon users may opt into local STT.
   const provider = ref<SttProviderType>(SttProviderType.Backend);
   const language = ref('ru');
   const deepgramApiKey = ref('');
@@ -115,9 +115,10 @@ export const useSettingsStore = defineStore('settings', () => {
   }));
 
   // Действия
-  function setProvider(_value: SttProviderType) {
-    // Выбор провайдера выключен: всегда используем Backend.
-    provider.value = SttProviderType.Backend;
+  function setProvider(value: SttProviderType) {
+    provider.value = value === SttProviderType.ParakeetUltra
+      ? value
+      : SttProviderType.Backend;
   }
 
   function setLanguage(value: string, opts?: { persist?: boolean }) {
@@ -142,7 +143,7 @@ export const useSettingsStore = defineStore('settings', () => {
       if (lastPersistedSttLanguage === language.value) return;
       try {
         void invokeUpdateSttConfig({
-          provider: SttProviderType.Backend,
+          provider: provider.value,
           language: language.value,
         });
         lastPersistedSttLanguage = language.value;
@@ -164,7 +165,7 @@ export const useSettingsStore = defineStore('settings', () => {
 
     try {
       await invokeUpdateSttConfig({
-        provider: SttProviderType.Backend,
+        provider: provider.value,
         language: next,
       });
       lastPersistedSttLanguage = next;
