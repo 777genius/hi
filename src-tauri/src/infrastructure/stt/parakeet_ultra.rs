@@ -259,10 +259,25 @@ impl SttProvider for ParakeetUltraProvider {
             }
             drop(tx); // worker drains all queued utterances, then exits
         }
-        if let Some(worker) = self.worker.take() {
-            worker.await.map_err(|error| {
-                SttError::Internal(format!("Parakeet worker join failed: {error}"))
-            })??;
+        if let Some(mut worker) = self.worker.take() {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                &mut worker,
+            ).await {
+                Ok(Ok(result)) => result?,
+                Ok(Err(error)) => {
+                    return Err(SttError::Internal(
+                        format!("Parakeet worker join failed: {error}")
+                    ));
+                }
+                Err(_) => {
+                    self.cancelled.store(true, Ordering::Release);
+                    worker.abort();
+                    return Err(SttError::Processing(
+                        "Local Parakeet did not finish decoding within 10 seconds".into()
+                    ));
+                }
+            }
         }
         self.segmenter = None;
         Ok(())
