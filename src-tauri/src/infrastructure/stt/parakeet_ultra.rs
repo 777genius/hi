@@ -342,3 +342,97 @@ impl SttProvider for ParakeetUltraProvider {
         false
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use crate::domain::SttProviderType;
+
+    /// Real ASR E2E: run ONLY with two distinct 16 kHz mono PCM16 fixtures and
+    /// a pinned Parakeet Ultra Q8 model. The two audio sources decode concurrently.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires HACKINTERVIEW_PARAKEET_MODEL_PATH + LOCAL_STT_SYSTEM_PCM + LOCAL_STT_MIC_PCM"]
+    async fn e2e_local_parakeet_two_sources() {
+        let model = std::env::var("HACKINTERVIEW_PARAKEET_MODEL_PATH")
+            .expect("model path required");
+        let system_pcm = std::fs::read(
+            std::env::var("LOCAL_STT_SYSTEM_PCM").expect("system fixture path required")
+        ).expect("system fixture");
+        let mic_pcm = std::fs::read(
+            std::env::var("LOCAL_STT_MIC_PCM").expect("mic fixture path required")
+        ).expect("mic fixture");
+        let mut system = ParakeetUltraProvider::new();
+        let mut microphone = ParakeetUltraProvider::new();
+        let mut config = SttConfig::new(SttProviderType::ParakeetUltra);
+        config.model = Some(model);
+        let (a,b) = tokio::join!(system.initialize(&config), microphone.initialize(&config));
+        a.unwrap();
+        b.unwrap();
+
+        let system_out = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mic_out = Arc::new(Mutex::new(Vec::<String>::new()));
+        let system_errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mic_errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let to_final = |out: Arc<Mutex<Vec<String>>>| -> TranscriptionCallback {
+            Arc::new(move |final_text| out.lock().unwrap().push(final_text.text))
+        };
+        let to_error = |out: Arc<Mutex<Vec<String>>>| -> ErrorCallback {
+            Arc::new(move |error| out.lock().unwrap().push(error.to_string()))
+        };
+        let quality: ConnectionQualityCallback = Arc::new(|_, _| {});
+
+        let (a,b) = tokio::join!(
+            system.start_stream(
+                Arc::new(|_| {}),
+                to_final(Arc::clone(&system_out)),
+                to_error(Arc::clone(&system_errors)),
+                Arc::clone(&quality),
+            ),
+            microphone.start_stream(
+                Arc::new(|_| {}),
+                to_final(Arc::clone(&mic_out)),
+                to_error(Arc::clone(&mic_errors)),
+                quality,
+            )
+        );
+        a.unwrap();
+        b.unwrap();
+        let play = |provider: &mut ParakeetUltraProvider, pcm: &[u8]| async move {
+            let clip = pcm.chunks_exact(2)
+                .map(|x| i16::from_le_bytes([x[0],x[1]]))
+                .collect::<Vec<_>>();
+            for frame in clip.chunks(480) {
+                provider.send_audio(&AudioChunk::new(frame.to_vec(),16_000,1)).await?;
+                tokio::task::yield_now().await;
+            }
+            for _ in 0..30 { // 900 ms silence, enough to commit the last utterance.
+                provider.send_audio(&AudioChunk::new(vec![0;480],16_000,1)).await?;
+            }
+            Ok::<(),SttError>(())
+        };
+        let started = std::time::Instant::now();
+        let (a,b) = tokio::join!(play(&mut system,&system_pcm),play(&mut microphone,&mic_pcm));
+        a.unwrap();
+        b.unwrap();
+        let (a,b) = tokio::join!(system.stop_stream(),microphone.stop_stream());
+        a.unwrap();
+        b.unwrap();
+        let a = system_out.lock().unwrap().clone();
+        let b = mic_out.lock().unwrap().clone();
+        assert!(system_errors.lock().unwrap().is_empty(), "system errors");
+        assert!(mic_errors.lock().unwrap().is_empty(), "mic errors");
+        assert!(!a.is_empty(), "system audio produced no final transcription");
+        assert!(!b.is_empty(), "microphone produced no final transcription");
+        let system_text=a.join(" ").to_lowercase();
+        let mic_text=b.join(" ").to_lowercase();
+        assert!(system_text.contains("fox") || system_text.contains("quick"),
+            "unexpected system transcription: {system_text}");
+        assert!(mic_text.contains("answer") || mic_text.contains("question"),
+            "unexpected mic transcription: {mic_text}");
+        assert!(!mic_text.contains("quick brown fox"), "audio channels mixed");
+        println!("Real dual-source Parakeet E2E {:?} system={system_text:?} mic={mic_text:?}",
+            started.elapsed());
+    }
+}
