@@ -1520,7 +1520,9 @@ pub async fn on_microphone_final(state: &AppState, payload: &FinalTranscriptionP
         return;
     }
 
-    if !is_mic_dominant_now(state, now_ms()) {
+    // The local decoder finishes after the VAD pause. Use the original
+    // utterance timestamp rather than dropping mic text because inference took time.
+    if !is_mic_dominant_now(state, payload.timestamp) {
         clear_microphone_live_buffers(state).await;
         return;
     }
