@@ -50,20 +50,31 @@ jobs:
       - name: Validate model integrity
         run: |
           echo '007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59  .e2e-artifacts/models/parakeet-ultra-Q8_0.gguf' | shasum -a 256 --check
-      - name: Generate two distinct spoken interview fixtures
+      - name: Download pinned FLEURS RU / UK / EN fixtures
         run: |
-          say -o "${RUNNER_TEMP}/local-stt-system.aiff" "The quick brown fox jumps over the lazy dog."
-          say -o "${RUNNER_TEMP}/local-stt-mic.aiff" "The answer to the technical question is forty two."
-          if ! command -v ffmpeg >/dev/null 2>&1; then brew install ffmpeg; fi
-          ffmpeg -nostdin -y -loglevel error -i "${RUNNER_TEMP}/local-stt-system.aiff" \
-            -ar 16000 -ac 1 -f s16le "${RUNNER_TEMP}/local-stt-system.pcm"
-          ffmpeg -nostdin -y -loglevel error -i "${RUNNER_TEMP}/local-stt-mic.aiff" \
-            -ar 16000 -ac 1 -f s16le "${RUNNER_TEMP}/local-stt-mic.pcm"
+          mkdir -p .e2e-artifacts/fixtures
+          base='https://raw.githubusercontent.com/handy-computer/transcribe.cpp/5700f127e38dd53c4735ea23ef743b4b538eacd4/samples'
+          for file in ru-short uk-short fleurs-en; do
+            curl --fail --location --retry 2 \
+              "${base}/${file}.wav" --output ".e2e-artifacts/fixtures/${file}.wav"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          import wave
+          root = Path(".e2e-artifacts/fixtures")
+          for name in ("ru-short", "uk-short", "fleurs-en"):
+              with wave.open(str(root / f"{name}.wav"), "rb") as sound:
+                  assert sound.getnchannels() == 1
+                  assert sound.getsampwidth() == 2
+                  assert sound.getframerate() == 16000
+                  (root / f"{name}.pcm").write_bytes(sound.readframes(sound.getnframes()))
+          PY
       - name: E2E real Parakeet with simultaneous system and microphone PCM
         env:
           HACKINTERVIEW_PARAKEET_MODEL_PATH: ${{ github.workspace }}/.e2e-artifacts/models/parakeet-ultra-Q8_0.gguf
-          LOCAL_STT_SYSTEM_PCM: ${{ runner.temp }}/local-stt-system.pcm
-          LOCAL_STT_MIC_PCM: ${{ runner.temp }}/local-stt-mic.pcm
+          LOCAL_STT_SYSTEM_PCM: ${{ github.workspace }}/.e2e-artifacts/fixtures/ru-short.pcm
+          LOCAL_STT_MIC_PCM: ${{ github.workspace }}/.e2e-artifacts/fixtures/uk-short.pcm
+          LOCAL_STT_EN_PCM: ${{ github.workspace }}/.e2e-artifacts/fixtures/fleurs-en.pcm
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib \
             e2e_local_parakeet_two_sources -- --ignored --nocapture
