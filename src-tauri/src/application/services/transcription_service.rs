@@ -315,8 +315,14 @@ impl TranscriptionService {
                 chunk_count += 1;
 
                 let status = status_arc.read().await;
+                // The local worker is already initialized before start_capture()
+                // returns. Preserve early microphone/system PCM while status is
+                // Starting, and queued tail PCM while status is Processing.
                 if *status != RecordingStatus::Recording
-                    && !(local_utterance_provider && *status == RecordingStatus::Processing)
+                    && !(local_utterance_provider && matches!(
+                        *status,
+                        RecordingStatus::Starting | RecordingStatus::Processing
+                    ))
                 {
                     continue;
                 }
@@ -1160,6 +1166,7 @@ mod tests {
         initialized: AtomicUsize,
         starts: AtomicUsize,
         stops: AtomicUsize,
+        audio_chunks: AtomicUsize,
     }
 
     struct CachedSttFactory {
@@ -1202,6 +1209,7 @@ mod tests {
         }
 
         async fn send_audio(&mut self, _chunk: &crate::domain::AudioChunk) -> SttResult<()> {
+            self.counters.audio_chunks.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -1250,6 +1258,49 @@ mod tests {
             Arc::new(|_| {}),
             Arc::new(|_, _| {}),
         ).await.unwrap();
+    }
+
+    /// Captures a frame synchronously during start_capture(), then yields.
+    /// This reproduces the early-audio race before Recording status is set.
+    struct ImmediateLocalAudioCapture;
+
+    #[async_trait]
+    impl AudioCapture for ImmediateLocalAudioCapture {
+        async fn initialize(&mut self, _config: AudioConfig) -> AudioResult<()> {
+            Ok(())
+        }
+        async fn start_capture(
+            &mut self,
+            on_chunk: crate::domain::AudioChunkCallback,
+        ) -> AudioResult<()> {
+            on_chunk(crate::domain::AudioChunk::new(vec![1_200; 480], 16_000, 1));
+            tokio::time::sleep(Duration::from_millis(35)).await;
+            Ok(())
+        }
+        async fn stop_capture(&mut self) -> AudioResult<()> {
+            Ok(())
+        }
+        fn is_capturing(&self) -> bool {
+            true
+        }
+        fn config(&self) -> AudioConfig {
+            AudioConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_local_stt_preserves_pcm_during_starting() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = TranscriptionService::new(
+            Box::new(ImmediateLocalAudioCapture),
+            Arc::new(CachedSttFactory { counters: counters.clone() }),
+        );
+        service.update_config(SttConfig::new(SttProviderType::ParakeetUltra))
+            .await.unwrap();
+        start_cached_test_recording(&service).await;
+        assert_eq!(counters.audio_chunks.load(Ordering::SeqCst), 1,
+            "capture delivered PCM before Recording status, but local worker dropped it");
+        service.stop_recording().await.unwrap();
     }
 
     #[tokio::test]
