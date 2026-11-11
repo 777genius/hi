@@ -695,6 +695,8 @@ pub async fn start_recording_raw(
     crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
     log::info!("Recording session started: session_id={}", session_id);
 
+    // A disabled microphone must not reuse the previous session's reducer.
+    *state.microphone_stt_event_tx.write().await = None;
     let (system_event_tx, mut system_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<SttTranscriptionEvent>();
     *state.system_stt_event_tx.write().await = Some(system_event_tx.clone());
@@ -1082,6 +1084,8 @@ pub async fn stop_recording_raw(
     let session_id = state
         .active_transcription_session_id
         .load(Ordering::Relaxed);
+    let local_stt_enabled = state.config.read().await.stt.provider == SttProviderType::ParakeetUltra;
+    let mic_expected = state.microphone_transcription_enabled.load(Ordering::Relaxed);
 
     // Always finish the second channel and drain both reducers even if the
     // system provider reports that its final utterance could not be decoded.
@@ -1106,7 +1110,14 @@ pub async fn stop_recording_raw(
             if let Err(e) = mic_service.abort_starting().await {
                 log::warn!("Microphone startup abort failed: {}", e);
                 mic_stop_error = Some(e.to_string());
+            } else if local_stt_enabled && mic_expected {
+                mic_stop_error = Some("Microphone had not finished starting before Stop".to_string());
             }
+        }
+        _ if local_stt_enabled && mic_expected => {
+            // An enabled local microphone that never started (or failed earlier)
+            // must not be silently reported as a complete two-channel session.
+            mic_stop_error = Some("Microphone was not recording when local STT stopped".to_string());
         }
         _ => {}
     }
@@ -1144,7 +1155,7 @@ pub async fn stop_recording_raw(
 
     // Offline local STT must never report a clean Stop if mic data or reducer
     // events were lost. Keep the legacy cloud mic best-effort semantics.
-    if state.config.read().await.stt.provider == SttProviderType::ParakeetUltra {
+    if local_stt_enabled {
         let mut failures = Vec::new();
         if let Err(error) = &result {
             failures.push(format!("system: {error}"));

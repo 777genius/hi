@@ -26,6 +26,7 @@ pub struct TranscriptionService {
     inactivity_timer_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // таймер для автоочистки соединения
     audio_processor_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // обработчик аудио-чанков → STT
     start_abort_requested: Arc<AtomicBool>,
+    dropped_audio_chunks: Arc<AtomicUsize>,
 }
 
 impl TranscriptionService {
@@ -43,6 +44,7 @@ impl TranscriptionService {
             inactivity_timer_task: Arc::new(RwLock::new(None)),
             audio_processor_task: Arc::new(RwLock::new(None)),
             start_abort_requested: Arc::new(AtomicBool::new(false)),
+            dropped_audio_chunks: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -60,7 +62,15 @@ impl TranscriptionService {
         };
         if drain_local {
             match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
-                Ok(Ok(())) => return Ok(()),
+                Ok(Ok(())) => {
+                    let dropped = self.dropped_audio_chunks.load(Ordering::Relaxed);
+                    if dropped > 0 {
+                        return Err(anyhow::anyhow!(
+                            "Local STT dropped {dropped} PCM chunks due to capture queue overflow"
+                        ));
+                    }
+                    return Ok(());
+                },
                 Ok(Err(error)) => {
                     return Err(anyhow::anyhow!(
                         "Local STT audio processing failed before finalization: {error}"
@@ -99,6 +109,7 @@ impl TranscriptionService {
         // Устанавливаем статус Starting чтобы заблокировать повторные вызовы
         *status = RecordingStatus::Starting;
         self.start_abort_requested.store(false, Ordering::SeqCst);
+        self.dropped_audio_chunks.store(0, Ordering::Relaxed);
         drop(status);
 
         // Отменяем таймер неактивности если он запущен
@@ -269,7 +280,7 @@ impl TranscriptionService {
         // мы можем накопить гигабайты аудио в памяти и уронить приложение.
         let (tx, mut rx) = tokio::sync::mpsc::channel(256);
 
-        let dropped_chunks = Arc::new(AtomicUsize::new(0));
+        let dropped_chunks = Arc::clone(&self.dropped_audio_chunks);
         let dropped_chunks_for_cb = dropped_chunks.clone();
         let dropped_chunks_for_processor = dropped_chunks.clone();
         let on_chunk = Arc::new(move |chunk: crate::domain::AudioChunk| {
@@ -1262,7 +1273,7 @@ mod tests {
 
     /// Captures a frame synchronously during start_capture(), then yields.
     /// This reproduces the early-audio race before Recording status is set.
-    struct ImmediateLocalAudioCapture;
+    struct ImmediateLocalAudioCapture { chunks: usize }
 
     #[async_trait]
     impl AudioCapture for ImmediateLocalAudioCapture {
@@ -1273,7 +1284,9 @@ mod tests {
             &mut self,
             on_chunk: crate::domain::AudioChunkCallback,
         ) -> AudioResult<()> {
-            on_chunk(crate::domain::AudioChunk::new(vec![1_200; 480], 16_000, 1));
+            for _ in 0..self.chunks {
+                on_chunk(crate::domain::AudioChunk::new(vec![1_200; 480], 16_000, 1));
+            }
             tokio::time::sleep(Duration::from_millis(35)).await;
             Ok(())
         }
@@ -1292,7 +1305,7 @@ mod tests {
     async fn cached_local_stt_preserves_pcm_during_starting() {
         let counters = Arc::new(CachedSttCounters::default());
         let service = TranscriptionService::new(
-            Box::new(ImmediateLocalAudioCapture),
+            Box::new(ImmediateLocalAudioCapture { chunks: 1 }),
             Arc::new(CachedSttFactory { counters: counters.clone() }),
         );
         service.update_config(SttConfig::new(SttProviderType::ParakeetUltra))
@@ -1301,6 +1314,21 @@ mod tests {
         assert_eq!(counters.audio_chunks.load(Ordering::SeqCst), 1,
             "capture delivered PCM before Recording status, but local worker dropped it");
         service.stop_recording().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_local_stt_reports_pcm_overflow_on_stop() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = TranscriptionService::new(
+            Box::new(ImmediateLocalAudioCapture { chunks: 400 }),
+            Arc::new(CachedSttFactory { counters }),
+        );
+        service.update_config(SttConfig::new(SttProviderType::ParakeetUltra))
+            .await.unwrap();
+        start_cached_test_recording(&service).await;
+        let error = service.stop_recording().await.unwrap_err().to_string();
+        assert!(error.contains("dropped") && error.contains("PCM"), "{error}");
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
     }
 
     #[tokio::test]

@@ -233,11 +233,15 @@ impl SttProvider for ParakeetUltraProvider {
                         }
                     }
                     Err(error) => {
-                        if !cancelled.load(Ordering::Acquire) {
-                            on_error(SttError::Processing(
-                                format!("Parakeet utterance inference failed: {error}")
-                            ));
+                        if cancelled.load(Ordering::Acquire) {
+                            break;
                         }
+                        let failure = SttError::Processing(
+                            format!("Parakeet utterance inference failed: {error}")
+                        );
+                        on_error(failure.clone());
+                        // Do not return success from Stop after losing a decoded phrase.
+                        return Err(failure);
                     }
                 }
             }
