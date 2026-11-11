@@ -414,7 +414,7 @@ mod tests {
                 provider.send_audio(&AudioChunk::new(vec![0;480],16_000,1)).await?;
             }
             Ok::<(),SttError>(())
-        };
+        }
         let started = std::time::Instant::now();
         let (a,b) = tokio::join!(play(&mut system,&system_pcm),play(&mut microphone,&mic_pcm));
         a.unwrap();
