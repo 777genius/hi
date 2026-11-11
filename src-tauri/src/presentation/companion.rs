@@ -2420,6 +2420,64 @@ fn is_usable_companion_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 #[cfg(test)]
+mod local_stt_snapshot_tests {
+    use super::*;
+    use crate::domain::{SttProviderType, Transcription};
+    use crate::presentation::events::FinalTranscriptionPayload;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn local_stt_final_is_visible_in_mobile_snapshot_and_sse() {
+        let state = AppState::default();
+        let session_id = 19;
+        state.config.write().await.stt.provider = SttProviderType::ParakeetUltra;
+        state.active_transcription_session_id.store(session_id, Ordering::Relaxed);
+
+        // Separate microphone and system utterances, as produced by the two
+        // native Parakeet providers after VAD endpointing.
+        crate::presentation::companion_timeline::on_microphone_final(
+            &state,
+            &FinalTranscriptionPayload {
+                session_id,
+                source: "microphone".to_string(),
+                text: "Я применял Go context".to_string(),
+                confidence: None,
+                language: Some("ru".to_string()),
+                timestamp: chrono::Utc::now().timestamp_millis(),
+                start: 0.0,
+                duration: 1.5,
+            },
+        ).await;
+
+        crate::presentation::companion_timeline::append_system_final(
+            &state, session_id,
+            &Transcription::final_result("How do you handle cancellations?".to_string()),
+        ).await;
+
+        let snapshot = build_snapshot_data(&state).await.expect("mobile snapshot");
+        let mic = snapshot.timeline.iter().filter(|x| x.kind == CompanionMessageKind::Mic)
+            .collect::<Vec<_>>();
+        let system = snapshot.timeline.iter().filter(|x| x.kind == CompanionMessageKind::Stt)
+            .collect::<Vec<_>>();
+
+        assert_eq!(mic.len(), 1, "mobile must contain exactly one local mic final");
+        assert_eq!(system.len(), 1, "mobile must contain exactly one system final");
+        assert_eq!(mic[0].text, "Я применял Go context");
+        assert_eq!(system[0].text, "How do you handle cancellations?");
+
+        let envelope = CompanionSnapshotEnvelope {
+            revision: "42".to_string(),
+            data: snapshot,
+        };
+        let sse = String::from_utf8(sse_snapshot_bytes(&envelope).to_vec()).unwrap();
+        assert!(sse.starts_with("id: 42\nevent: snapshot\n"));
+        assert!(sse.contains("Я применял Go context"));
+        assert!(sse.contains("How do you handle cancellations?"));
+        assert_eq!(sse.matches("Я применял Go context").count(), 1);
+    }
+}
+
+#[cfg(test)]
 mod idempotency_tests {
     use super::*;
     use crate::presentation::companion_actions::CompanionActionResponse;
