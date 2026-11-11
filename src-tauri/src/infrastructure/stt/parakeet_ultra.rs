@@ -183,7 +183,7 @@ impl SttProvider for ParakeetUltraProvider {
         let (tx, mut rx) = mpsc::channel::<Utterance>(JOB_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<SttResult<()>>();
 
-        let mut worker = tokio::task::spawn_blocking(move || -> SttResult<()> {
+        let worker = tokio::task::spawn_blocking(move || -> SttResult<()> {
             // Validate model/session readiness before starting the audio capture.
             let mut session = match model.session() {
                 Ok(session) => {
