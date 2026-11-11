@@ -329,12 +329,14 @@ async fn sync_microphone_transcription_enabled_internal(
         .store(enabled, Ordering::Relaxed);
 
     if !enabled {
-        if let Err(e) = state
-            .microphone_transcription_service
-            .stop_recording()
-            .await
-        {
-            log::debug!("Microphone transcription stop skipped/failed: {}", e);
+        let mic = &state.microphone_transcription_service;
+        let result = match mic.get_status().await {
+            RecordingStatus::Starting => mic.abort_starting().await,
+            RecordingStatus::Recording => mic.stop_recording().await,
+            _ => Ok("Microphone already stopped".to_string()),
+        };
+        if let Err(error) = result {
+            log::warn!("Microphone mute could not stop transcription: {}", error);
         }
         crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
         return Ok(());
@@ -495,6 +497,12 @@ pub async fn toggle_microphone_muted(
     }
 }
 
+/// A pending microphone start must not survive Stop, a new session, or mute.
+fn microphone_session_should_run(state: &AppState, session_id: u64) -> bool {
+    state.active_transcription_session_id.load(Ordering::Relaxed) == session_id
+        && state.microphone_transcription_enabled.load(Ordering::Relaxed)
+}
+
 fn spawn_microphone_transcription_start(
     mic_service: Arc<TranscriptionService>,
     app_handle: AppHandle,
@@ -504,6 +512,19 @@ fn spawn_microphone_transcription_start(
     let app_handle_partial = app_handle.clone();
 
     tauri::async_runtime::spawn(async move {
+        // Keep a previous, slow model initialization from replacing or
+        // stopping the microphone capture of the next recording session.
+        let start_lock = match app_handle_partial.try_state::<AppState>() {
+            Some(state) => Arc::clone(&state.microphone_start_lock),
+            None => return,
+        };
+        let _start_guard = start_lock.lock().await;
+        let Some(state) = app_handle_partial.try_state::<AppState>() else { return; };
+        if !microphone_session_should_run(state.inner(), session_id) {
+            return;
+        }
+        drop(state);
+
         // Важно: если выбран "Default" (device_name=None), то при подключении/смене микрофона
         // системное устройство по умолчанию может измениться во время работы приложения.
         // Поэтому перед стартом микрофонной транскрибации пересоздаём захват.
@@ -522,10 +543,17 @@ fn spawn_microphone_transcription_start(
             }
         }
 
+        // Device setup itself is asynchronous. Re-check before creating a new
+        // provider stream; Stop or mute may have happened meanwhile.
+        let Some(state) = app_handle_partial.try_state::<AppState>() else { return; };
+        if !microphone_session_should_run(state.inner(), session_id) {
+            return;
+        }
+        drop(state);
         let (mic_event_tx, mut mic_event_rx) =
             tokio::sync::mpsc::unbounded_channel::<SttTranscriptionEvent>();
         if let Some(state) = app_handle_partial.try_state::<AppState>() {
-            if state.active_transcription_session_id.load(Ordering::Relaxed) == session_id {
+            if microphone_session_should_run(state.inner(), session_id) {
                 *state.microphone_stt_event_tx.write().await = Some(mic_event_tx.clone());
             }
         }
@@ -639,8 +667,8 @@ fn spawn_microphone_transcription_start(
             // The mic starts asynchronously after the system capture. A quick
             // Stop can invalidate the session while the model is still loading.
             // Do not leave an orphaned mic recording in that race.
-            if state.active_transcription_session_id.load(Ordering::Relaxed) != session_id {
-                log::info!("Mic startup completed after Stop; shutting down stale mic session");
+            if !microphone_session_should_run(state.inner(), session_id) {
+                log::info!("Mic startup completed after Stop or mute; shutting down stale mic session");
                 let _ = mic_service.stop_recording().await;
             }
         }
@@ -1062,6 +1090,19 @@ mod stt_drain_tests {
         });
         drain_stt_event_queue(&slot, "test").await.unwrap();
         worker.await.unwrap();
+    }
+
+    #[test]
+    fn stale_or_muted_microphone_session_cannot_start() {
+        let state = AppState::default();
+        state.active_transcription_session_id.store(41, Ordering::Relaxed);
+        assert!(microphone_session_should_run(&state, 41));
+        state.microphone_transcription_enabled.store(false, Ordering::Relaxed);
+        assert!(!microphone_session_should_run(&state, 41));
+        state.microphone_transcription_enabled.store(true, Ordering::Relaxed);
+        state.active_transcription_session_id.store(42, Ordering::Relaxed);
+        assert!(!microphone_session_should_run(&state, 41));
+        assert!(microphone_session_should_run(&state, 42));
     }
 
     #[tokio::test]

@@ -224,6 +224,8 @@ pub struct AppState {
     /// Включена ли параллельная транскрибация микрофона.
     /// Управляется из UI (кнопкой рядом с Haiku).
     pub microphone_transcription_enabled: AtomicBool,
+    /// Serialize asynchronous mic startups across consecutive sessions and mute toggles.
+    pub(crate) microphone_start_lock: Arc<tokio::sync::Mutex<()>>,
 
     /// Последняя ненулевая input volume для восстановления после OS mute.
     pub microphone_restore_input_volume: Arc<RwLock<Option<u32>>>,
@@ -317,6 +319,7 @@ impl AppState {
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
                     microphone_transcription_enabled: AtomicBool::new(true),
+                    microphone_start_lock: Arc::new(tokio::sync::Mutex::new(())),
                     microphone_restore_input_volume: Arc::new(RwLock::new(None)),
                 };
             }
@@ -412,6 +415,7 @@ impl AppState {
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
                     microphone_transcription_enabled: AtomicBool::new(true),
+                    microphone_start_lock: Arc::new(tokio::sync::Mutex::new(())),
                     microphone_restore_input_volume: Arc::new(RwLock::new(None)),
                 };
             }
@@ -518,6 +522,7 @@ impl AppState {
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
             microphone_transcription_enabled: AtomicBool::new(true),
+            microphone_start_lock: Arc::new(tokio::sync::Mutex::new(())),
             microphone_restore_input_volume: Arc::new(RwLock::new(None)),
         }
     }
