@@ -1014,16 +1014,17 @@ pub async fn start_recording_raw(
 async fn drain_stt_event_queue(
     slot: &Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::UnboundedSender<SttTranscriptionEvent>>>>,
     source: &str,
-) {
-    let Some(tx) = slot.write().await.take() else { return; };
+) -> Result<(), String> {
+    let Some(tx) = slot.write().await.take() else {
+        return Ok(());
+    };
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-    if tx.send(SttTranscriptionEvent::Barrier(ack_tx)).is_ok()
-        && !matches!(
-            tokio::time::timeout(std::time::Duration::from_secs(3), ack_rx).await,
-            Ok(Ok(()))
-        )
-    {
-        log::warn!("Timed out draining STT {} events after Stop", source);
+    tx.send(SttTranscriptionEvent::Barrier(ack_tx))
+        .map_err(|_| format!("Failed to queue {source} final transcription drain"))?;
+    match tokio::time::timeout(std::time::Duration::from_secs(3), ack_rx).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(format!("{source} transcription reducer stopped before drain")),
+        Err(_) => Err(format!("Timed out draining {source} final transcription events")),
     }
 }
 
@@ -1050,15 +1051,18 @@ pub async fn stop_recording_raw(
     // The mic may still be in Starting while its local model is loading.
     // Abort that startup rather than leaving a recording to start after Stop.
     let mic_service = &state.microphone_transcription_service;
+    let mut mic_stop_error = None;
     match mic_service.get_status().await {
         RecordingStatus::Recording => {
             if let Err(e) = mic_service.stop_recording().await {
                 log::warn!("Microphone transcription stop failed: {}", e);
+                mic_stop_error = Some(e.to_string());
             }
         }
         RecordingStatus::Starting => {
             if let Err(e) = mic_service.abort_starting().await {
                 log::warn!("Microphone startup abort failed: {}", e);
+                mic_stop_error = Some(e.to_string());
             }
         }
         _ => {}
@@ -1066,7 +1070,7 @@ pub async fn stop_recording_raw(
 
     // The STT workers have stopped emitting callbacks. Ensure their finals
     // reached the canonical timeline before deactivating this session.
-    tokio::join!(
+    let (system_drain, microphone_drain) = tokio::join!(
         drain_stt_event_queue(&state.system_stt_event_tx, "system"),
         drain_stt_event_queue(&state.microphone_stt_event_tx, "microphone"),
     );
@@ -1094,6 +1098,34 @@ pub async fn stop_recording_raw(
             stopped_via_hotkey,
         },
     );
+
+    // Offline local STT must never report a clean Stop if mic data or reducer
+    // events were lost. Keep the legacy cloud mic best-effort semantics.
+    if state.config.read().await.stt.provider == SttProviderType::ParakeetUltra {
+        let mut failures = Vec::new();
+        if let Err(error) = &result {
+            failures.push(format!("system: {error}"));
+        }
+        if let Some(error) = mic_stop_error {
+            failures.push(format!("microphone: {error}"));
+        }
+        if let Err(error) = system_drain {
+            failures.push(error);
+        }
+        if let Err(error) = microphone_drain {
+            failures.push(error);
+        }
+        if !failures.is_empty() {
+            return Err(format!("Local STT Stop did not preserve all finals: {}", failures.join("; ")));
+        }
+    } else {
+        if let Err(error) = system_drain {
+            log::warn!("{}", error);
+        }
+        if let Err(error) = microphone_drain {
+            log::warn!("{}", error);
+        }
+    }
 
     result
 }
