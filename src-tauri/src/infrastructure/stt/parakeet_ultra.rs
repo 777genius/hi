@@ -367,6 +367,10 @@ impl SttProvider for ParakeetUltraProvider {
         "parakeet-ultra-local"
     }
 
+    fn supports_idle_model_reuse(&self) -> bool {
+        self.model.is_some() && !self.recording && self.worker.is_none()
+    }
+
     fn is_online(&self) -> bool {
         false
     }
