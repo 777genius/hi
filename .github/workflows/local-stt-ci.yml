@@ -111,3 +111,5 @@ jobs:
           (cd ../state-sync && pnpm install --frozen-lockfile && pnpm build)
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      - name: Local STT provider settings regression
+        run: pnpm exec vitest run src/features/settings/store/settingsStore.localStt.test.ts
