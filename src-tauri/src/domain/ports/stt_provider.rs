@@ -179,6 +179,12 @@ pub trait SttProvider: Send + Sync {
         false
     }
 
+    /// Local model weights may remain loaded after stop_stream() for fast
+    /// restart. No audio stream, worker, or transcript state may survive Stop.
+    fn supports_idle_model_reuse(&self) -> bool {
+        false
+    }
+
     /// Check if connection is currently alive (paused but not closed)
     fn is_connection_alive(&self) -> bool {
         false

@@ -4,6 +4,8 @@ use crate::domain::{
 use crate::infrastructure::stt::{
     AssemblyAIProvider, BackendProvider, DeepgramProvider, WhisperLocalProvider,
 };
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use crate::infrastructure::stt::ParakeetUltraProvider;
 
 /// Factory for creating STT providers based on configuration
 ///
@@ -28,6 +30,15 @@ impl SttProviderFactory for DefaultSttProviderFactory {
 
         match config.provider {
             SttProviderType::WhisperLocal => Ok(Box::new(WhisperLocalProvider::new())),
+
+            SttProviderType::ParakeetUltra => {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { Ok(Box::new(ParakeetUltraProvider::new())) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { Err(SttError::Unsupported(
+                    "Local Parakeet Ultra currently requires macOS Apple Silicon".to_string(),
+                )) }
+            },
 
             SttProviderType::AssemblyAI => Ok(Box::new(AssemblyAIProvider::new())),
 
@@ -69,6 +80,16 @@ mod tests {
         let config = SttConfig::new(SttProviderType::WhisperLocal);
         let result = factory.create(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_local_parakeet() {
+        let factory = DefaultSttProviderFactory::new();
+        let config = SttConfig::new(SttProviderType::ParakeetUltra);
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert!(factory.create(&config).is_ok());
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        assert!(factory.create(&config).is_err());
     }
 
     #[test]

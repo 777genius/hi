@@ -91,6 +91,7 @@
         "createUpdaterArtifacts": true,
         "icon": [],
         "macOS": {
+            "minimumSystemVersion": "11.0",
             "entitlements": "entitlements.plist",
             "exceptionDomain": null,
             "frameworks": [],

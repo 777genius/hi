@@ -1,0 +1,137 @@
+name: Local Parakeet Ultra PR checks
+
+on:
+  pull_request:
+    paths:
+      - 'src-tauri/**'
+      - 'src/features/settings/**'
+      - 'src/types/**'
+      - '.github/workflows/local-stt-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Only the newest PR head matters. Cancel superseded queue entries.
+concurrency:
+  group: local-stt-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-arm-rust:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+      - name: Unit tests — VAD utterance segmenter (Apple Silicon)
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib utterance_segmenter -- --nocapture
+      - name: Local Parakeet cache lifecycle tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cached_local_stt -- --nocapture
+      - name: Local microphone final and shared-context tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib microphone_final -- --nocapture
+      - name: Stop drain barrier regression tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib stt_drain -- --nocapture
+      - name: Mobile SSE snapshot contains both final channels
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib local_stt_final_is_visible_in_mobile_snapshot_and_sse -- --nocapture
+      - name: Full Rust library regression suite
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+      - name: Complete Rust library check
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --lib
+      - name: Download pinned Parakeet Ultra Q8 model (cache)
+        uses: actions/cache@v4
+        id: ultra-cache
+        with:
+          path: .e2e-artifacts/models/parakeet-ultra-Q8_0.gguf
+          key: macos-local-stt-parakeet-ultra-39eeb551-q8
+      - name: Fetch verified local model
+        if: steps.ultra-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .e2e-artifacts/models
+          curl --fail --location --retry 2 --retry-delay 3 \
+            --output .e2e-artifacts/models/parakeet-ultra-Q8_0.gguf \
+            'https://huggingface.co/handy-computer/parakeet-ultra-gguf/resolve/39eeb55181f0d354fd934f06e92fd8d5037fed8e/parakeet-ultra-Q8_0.gguf?download=true'
+      - name: Validate model integrity
+        run: |
+          echo '007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59  .e2e-artifacts/models/parakeet-ultra-Q8_0.gguf' | shasum -a 256 --check
+      - name: Download pinned FLEURS RU / UK / EN fixtures
+        run: |
+          mkdir -p .e2e-artifacts/fixtures
+          base='https://raw.githubusercontent.com/handy-computer/transcribe.cpp/5700f127e38dd53c4735ea23ef743b4b538eacd4/samples'
+          for file in ru-short uk-short fleurs-en; do
+            curl --fail --location --retry 2 \
+              "${base}/${file}.wav" --output ".e2e-artifacts/fixtures/${file}.wav"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          import wave
+          root = Path(".e2e-artifacts/fixtures")
+          for name in ("ru-short", "uk-short", "fleurs-en"):
+              with wave.open(str(root / f"{name}.wav"), "rb") as sound:
+                  assert sound.getnchannels() == 1
+                  assert sound.getsampwidth() == 2
+                  assert sound.getframerate() == 16000
+                  (root / f"{name}.pcm").write_bytes(sound.readframes(sound.getnframes()))
+          PY
+      - name: E2E real Parakeet with simultaneous system and microphone PCM
+        env:
+          HACKINTERVIEW_PARAKEET_MODEL_PATH: ${{ github.workspace }}/.e2e-artifacts/models/parakeet-ultra-Q8_0.gguf
+          LOCAL_STT_SYSTEM_PCM: ${{ github.workspace }}/.e2e-artifacts/fixtures/ru-short.pcm
+          LOCAL_STT_MIC_PCM: ${{ github.workspace }}/.e2e-artifacts/fixtures/uk-short.pcm
+          LOCAL_STT_EN_PCM: ${{ github.workspace }}/.e2e-artifacts/fixtures/fleurs-en.pcm
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib \
+            e2e_local_parakeet_two_sources -- --ignored --nocapture
+      - name: Setup Node and pnpm for packaged macOS app
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: Build shared state-sync dependency
+        run: |
+          git clone --depth 1 https://github.com/777genius/state-sync.git ../state-sync
+          (cd ../state-sync && pnpm install --frozen-lockfile && pnpm build)
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build unsigned macOS .app for actual Tauri packaging check
+        env:
+          CARGO_BUILD_JOBS: 2
+          CMAKE_BUILD_PARALLEL_LEVEL: 2
+        run: |
+          pnpm exec tauri build --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          test -f src-tauri/target/release/bundle/macos/Telegram.app/Contents/MacOS/Telegram
+      - name: Preserve resolved Cargo.lock for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock-local-stt-macos-arm
+          path: src-tauri/Cargo.lock
+          retention-days: 7
+
+  frontend-typecheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: Build state-sync workspace dependency
+        run: |
+          git clone --depth 1 https://github.com/777genius/state-sync.git ../state-sync
+          (cd ../state-sync && pnpm install --frozen-lockfile && pnpm build)
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - name: Local STT provider settings regression
+        run: pnpm exec vitest run src/features/settings/store/settingsStore.localStt.test.ts

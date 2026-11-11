@@ -1858,9 +1858,13 @@ mod tests {
     use tokio_tungstenite::accept_async;
 
     static BACKEND_PROTOCOL_ENV_LOCK: StdMutex<()> = StdMutex::new(());
+    static BACKEND_URL_ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
     #[test]
     fn test_backend_provider_new() {
+        let _guard = BACKEND_URL_ENV_LOCK.lock().unwrap();
+        let _old = std::env::var("VOICE_TO_TEXT_BACKEND_URL").ok();
+        std::env::remove_var("VOICE_TO_TEXT_BACKEND_URL");
         let provider = BackendProvider::new();
         assert!(!provider.is_streaming);
         assert!(provider.auth_token.is_none());
@@ -1869,6 +1873,25 @@ mod tests {
         assert_eq!(provider.backend_url, DEV_BACKEND_URL);
         #[cfg(not(debug_assertions))]
         assert_eq!(provider.backend_url, PROD_BACKEND_URL);
+        // Восстанавливаем оригинальное значение (если было)
+        if let Some(val) = _old {
+            std::env::set_var("VOICE_TO_TEXT_BACKEND_URL", val);
+        }
+    }
+
+    #[test]
+    fn test_backend_provider_new_env_override() {
+        let _guard = BACKEND_URL_ENV_LOCK.lock().unwrap();
+        // Проверяем, что VOICE_TO_TEXT_BACKEND_URL переопределяет DEV_BACKEND_URL
+        let _old = std::env::var("VOICE_TO_TEXT_BACKEND_URL").ok();
+        std::env::set_var("VOICE_TO_TEXT_BACKEND_URL", "wss://custom.example.com");
+        let provider = BackendProvider::new();
+        assert_eq!(provider.backend_url, "wss://custom.example.com");
+        if let Some(val) = _old {
+            std::env::set_var("VOICE_TO_TEXT_BACKEND_URL", val);
+        } else {
+            std::env::remove_var("VOICE_TO_TEXT_BACKEND_URL");
+        }
     }
 
     #[test]

@@ -133,6 +133,9 @@ pub struct AppState {
 
     /// Companion timeline (session-local, backend-owned coarse snapshot).
     pub companion_timeline: Arc<RwLock<Vec<crate::presentation::companion::CompanionMessage>>>,
+    /// Stop waits for mic + system event reducers before clearing session identity.
+    pub(crate) system_stt_event_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<crate::presentation::commands::SttTranscriptionEvent>>>>,
+    pub(crate) microphone_stt_event_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<crate::presentation::commands::SttTranscriptionEvent>>>>,
 
     /// Следующий монотонный seq для companion timeline.
     pub companion_next_seq: Arc<AtomicU64>,
@@ -221,6 +224,8 @@ pub struct AppState {
     /// Включена ли параллельная транскрибация микрофона.
     /// Управляется из UI (кнопкой рядом с Haiku).
     pub microphone_transcription_enabled: AtomicBool,
+    /// Serialize asynchronous mic startups across consecutive sessions and mute toggles.
+    pub(crate) microphone_start_lock: Arc<tokio::sync::Mutex<()>>,
 
     /// Последняя ненулевая input volume для восстановления после OS mute.
     pub microphone_restore_input_volume: Arc<RwLock<Option<u32>>>,
@@ -282,6 +287,8 @@ impl AppState {
                     companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
                     companion_desktop_blackout_enabled: Arc::new(AtomicBool::new(false)),
                     companion_timeline: Arc::new(RwLock::new(Vec::new())),
+                    system_stt_event_tx: Arc::new(RwLock::new(None)),
+                    microphone_stt_event_tx: Arc::new(RwLock::new(None)),
                     companion_next_seq: Arc::new(AtomicU64::new(0)),
                     companion_next_stt_index: Arc::new(AtomicU64::new(0)),
                     companion_history_floor_seq: Arc::new(AtomicU64::new(0)),
@@ -312,6 +319,7 @@ impl AppState {
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
                     microphone_transcription_enabled: AtomicBool::new(true),
+                    microphone_start_lock: Arc::new(tokio::sync::Mutex::new(())),
                     microphone_restore_input_volume: Arc::new(RwLock::new(None)),
                 };
             }
@@ -375,6 +383,8 @@ impl AppState {
                     companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
                     companion_desktop_blackout_enabled: Arc::new(AtomicBool::new(false)),
                     companion_timeline: Arc::new(RwLock::new(Vec::new())),
+                    system_stt_event_tx: Arc::new(RwLock::new(None)),
+                    microphone_stt_event_tx: Arc::new(RwLock::new(None)),
                     companion_next_seq: Arc::new(AtomicU64::new(0)),
                     companion_next_stt_index: Arc::new(AtomicU64::new(0)),
                     companion_history_floor_seq: Arc::new(AtomicU64::new(0)),
@@ -405,6 +415,7 @@ impl AppState {
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
                     microphone_transcription_enabled: AtomicBool::new(true),
+                    microphone_start_lock: Arc::new(tokio::sync::Mutex::new(())),
                     microphone_restore_input_volume: Arc::new(RwLock::new(None)),
                 };
             }
@@ -479,6 +490,8 @@ impl AppState {
             companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
             companion_desktop_blackout_enabled: Arc::new(AtomicBool::new(false)),
             companion_timeline: Arc::new(RwLock::new(Vec::new())),
+            system_stt_event_tx: Arc::new(RwLock::new(None)),
+            microphone_stt_event_tx: Arc::new(RwLock::new(None)),
             companion_next_seq: Arc::new(AtomicU64::new(0)),
             companion_next_stt_index: Arc::new(AtomicU64::new(0)),
             companion_history_floor_seq: Arc::new(AtomicU64::new(0)),
@@ -509,6 +522,7 @@ impl AppState {
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
             microphone_transcription_enabled: AtomicBool::new(true),
+            microphone_start_lock: Arc::new(tokio::sync::Mutex::new(())),
             microphone_restore_input_volume: Arc::new(RwLock::new(None)),
         }
     }

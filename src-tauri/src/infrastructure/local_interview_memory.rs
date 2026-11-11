@@ -758,6 +758,7 @@ fn vector_literal(vector: &[f32]) -> String {
     format!("[{values}]")
 }
 
+#[allow(dead_code)]
 fn trim_text_tail_to_char_boundary(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
@@ -841,6 +842,7 @@ const STOP_WORDS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     fn ranked_chunk(id: Uuid, score: f32, reason: &str, text: &str) -> RankedChunk {
         RankedChunk {
@@ -912,6 +914,7 @@ mod tests {
         assert_eq!(infer_kind("ai_response", "Sure"), "ai_response");
     }
 
+    #[serial]
     #[test]
     fn synthetic_e2e_memory_is_skipped_by_default() {
         std::env::remove_var("INTERVIEW_MEMORY_ALLOW_SYNTHETIC_E2E");
@@ -927,6 +930,7 @@ mod tests {
         ));
     }
 
+    #[serial]
     #[test]
     fn synthetic_e2e_memory_can_be_allowed_for_dedicated_tests() {
         std::env::set_var("INTERVIEW_MEMORY_ALLOW_SYNTHETIC_E2E", "1");

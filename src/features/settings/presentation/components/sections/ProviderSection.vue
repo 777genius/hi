@@ -1,22 +1,15 @@
 <script setup lang="ts">
-/**
- * Секция выбора провайдера STT
- */
-
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { SttProviderType } from '@/types';
 import SettingGroup from '../shared/SettingGroup.vue';
 import { useSettings } from '../../composables/useSettings';
-import type { ProviderOption } from '../../../domain/types';
 
 const { t } = useI18n();
 const { provider } = useSettings();
-
-const providerOptions = computed<ProviderOption[]>(() => [
-  { value: SttProviderType.WhisperLocal, label: t('settings.provider.optionWhisper') },
-  { value: SttProviderType.AssemblyAI, label: t('settings.provider.optionAssembly') },
-  { value: SttProviderType.Deepgram, label: t('settings.provider.optionDeepgram') },
+const providerOptions = computed(() => [
+  { value: SttProviderType.Backend, label: 'Cloud STT (current backend)' },
+  { value: SttProviderType.ParakeetUltra, label: 'Parakeet Ultra · Local (Apple Silicon)' },
 ]);
 </script>
 
@@ -30,19 +23,11 @@ const providerOptions = computed<ProviderOption[]>(() => [
       density="comfortable"
       hide-details
     />
-
-    <template #hint>
-      <div class="text-caption text-medium-emphasis mt-2">
-        <p class="mb-1">
-          <strong>{{ t('settings.provider.hintWhisperTitle') }}</strong>
-          {{ t('settings.provider.hintWhisperBody') }}
-        </p>
-        <p class="mb-0">
-          <strong>{{ t('settings.provider.hintCloudTitle') }}</strong>
-          {{ t('settings.provider.hintCloudBody') }}
-          {{ t('settings.provider.hintDeepgramNote') }}
-        </p>
-      </div>
-    </template>
+    <div v-if="provider === SttProviderType.ParakeetUltra" class="text-caption text-medium-emphasis mt-2">
+      Offline recognition on Mac Apple Silicon. After ~700 ms of silence,
+      the completed phrase is sent to the same conversation history and AI context.
+      Download Parakeet Ultra Q8 in Handy first (or configure
+      HACKINTERVIEW_PARAKEET_MODEL_PATH). RU, EN and UK are auto-detected.
+    </div>
   </SettingGroup>
 </template>

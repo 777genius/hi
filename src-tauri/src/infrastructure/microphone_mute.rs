@@ -14,6 +14,7 @@ pub struct SetMicrophoneMuteOutcome {
     pub applied_methods: Vec<String>,
 }
 
+#[allow(dead_code)]
 const DEFAULT_RESTORE_INPUT_VOLUME: u32 = 75;
 
 #[cfg(target_os = "macos")]
