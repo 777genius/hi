@@ -1680,6 +1680,27 @@ pub async fn update_stt_config(
         config.deepgram_keyterms = next;
     }
 
+    // Do not partially switch only one of the two audio services while a
+    // local-model session is active (including asynchronous mic startup).
+    let local_model_change =
+        (old_stt.provider == SttProviderType::ParakeetUltra
+            || config.provider == SttProviderType::ParakeetUltra)
+            && (old_stt.provider != config.provider
+                || old_stt.model != config.model
+                || old_stt.language != config.language);
+    if local_model_change {
+        let (system_status, mic_status) = tokio::join!(
+            state.transcription_service.get_status(),
+            state.microphone_transcription_service.get_status(),
+        );
+        if system_status != RecordingStatus::Idle || mic_status != RecordingStatus::Idle {
+            return Err(
+                "Stop both audio streams before changing the local STT provider or model"
+                    .to_string(),
+            );
+        }
+    }
+
     // Обновляем конфигурацию в сервисе
     state
         .transcription_service
