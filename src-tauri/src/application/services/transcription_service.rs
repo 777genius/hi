@@ -54,20 +54,30 @@ impl TranscriptionService {
     /// Unlike the cloud send path, local STT consumes PCM cheaply and can
     /// drain the last queued frames after capture stops. A bounded wait avoids
     /// keeping Stop hung when the audio source retains a sender.
-    async fn finish_audio_processor(&self, drain_local: bool) {
-        let Some(mut task) = self.audio_processor_task.write().await.take() else { return; };
+    async fn finish_audio_processor(&self, drain_local: bool) -> Result<()> {
+        let Some(mut task) = self.audio_processor_task.write().await.take() else {
+            return Ok(());
+        };
         if drain_local {
             match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
-                Ok(Ok(())) => return,
+                Ok(Ok(())) => return Ok(()),
                 Ok(Err(error)) => {
-                    log::warn!("Local STT audio processor failed while draining: {}", error);
-                    return;
+                    return Err(anyhow::anyhow!(
+                        "Local STT audio processing failed before finalization: {error}"
+                    ));
                 }
-                Err(_) => log::warn!("Local STT audio drain timed out; aborting processor"),
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    return Err(anyhow::anyhow!(
+                        "Local STT audio drain timed out; input frames may be missing"
+                    ));
+                }
             }
         }
         task.abort();
         let _ = task.await;
+        Ok(())
     }
 
     /// Start recording and transcription
@@ -593,7 +603,8 @@ impl TranscriptionService {
 
         // A local decoder must see every queued frame before its final Stop flush.
         let drain_local = self.config.read().await.provider == SttProviderType::ParakeetUltra;
-        self.finish_audio_processor(drain_local).await;
+        // Drain the PCM queue, but always proceed to close the local provider.
+        let pcm_drain_error = self.finish_audio_processor(drain_local).await.err();
 
         // Если не смогли остановить захват аудио — считаем это критическим сценарием:
         // лучше упасть с ошибкой, но гарантированно вернуть сервис в Idle, чем зависнуть в Processing.
@@ -703,12 +714,12 @@ impl TranscriptionService {
             // Обычная остановка для провайдеров без keep-alive
             log::info!("Stopping STT stream completely");
 
-            let mut local_flush_error = None;
+            let mut local_flush_error = pcm_drain_error;
             if let Some(mut provider) = self.stt_provider.write().await.take() {
                 if let Err(e) = provider.stop_stream().await {
                     log::warn!("Failed to stop STT stream cleanly, aborting: {}", e);
-                    if drain_local {
-                        local_flush_error = Some(e);
+                    if drain_local && local_flush_error.is_none() {
+                        local_flush_error = Some(anyhow::Error::new(e));
                     }
                     let _ = provider.abort().await;
                 }
@@ -778,7 +789,8 @@ impl TranscriptionService {
         let stop_capture_result = self.audio_capture.write().await.stop_capture().await;
 
         let drain_local = self.config.read().await.provider == SttProviderType::ParakeetUltra;
-        self.finish_audio_processor(drain_local).await;
+        // Drain the PCM queue, but always proceed to close the local provider.
+        let pcm_drain_error = self.finish_audio_processor(drain_local).await.err();
 
         if let Err(e) = stop_capture_result {
             log::error!("Failed to stop audio capture: {}", e);
@@ -799,12 +811,12 @@ impl TranscriptionService {
         }
 
         // Hard Stop must also report loss of a local final utterance.
-        let mut local_flush_error = None;
+        let mut local_flush_error = pcm_drain_error;
         if let Some(mut provider) = self.stt_provider.write().await.take() {
             if let Err(e) = provider.stop_stream().await {
                 log::warn!("Failed to stop STT stream cleanly, aborting: {}", e);
-                if drain_local {
-                    local_flush_error = Some(e);
+                if drain_local && local_flush_error.is_none() {
+                    local_flush_error = Some(anyhow::Error::new(e));
                 }
                 let _ = provider.abort().await;
             }
