@@ -1154,6 +1154,154 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct CachedSttCounters {
+        created: AtomicUsize,
+        initialized: AtomicUsize,
+        starts: AtomicUsize,
+        stops: AtomicUsize,
+    }
+
+    struct CachedSttFactory {
+        counters: Arc<CachedSttCounters>,
+    }
+
+    struct CachedSttProvider {
+        counters: Arc<CachedSttCounters>,
+        active: bool,
+    }
+
+    impl SttProviderFactory for CachedSttFactory {
+        fn create(&self, _config: &SttConfig) -> SttResult<Box<dyn SttProvider>> {
+            self.counters.created.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(CachedSttProvider {
+                counters: self.counters.clone(),
+                active: false,
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl SttProvider for CachedSttProvider {
+        async fn initialize(&mut self, _config: &SttConfig) -> SttResult<()> {
+            self.counters.initialized.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn start_stream(
+            &mut self,
+            _on_partial: TranscriptionCallback,
+            _on_final: TranscriptionCallback,
+            _on_error: ErrorCallback,
+            _on_connection_quality: ConnectionQualityCallback,
+        ) -> SttResult<()> {
+            assert!(!self.active, "local STT stream must be reset before reuse");
+            self.active = true;
+            self.counters.starts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn send_audio(&mut self, _chunk: &crate::domain::AudioChunk) -> SttResult<()> {
+            Ok(())
+        }
+
+        async fn stop_stream(&mut self) -> SttResult<()> {
+            self.active = false;
+            self.counters.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn abort(&mut self) -> SttResult<()> {
+            self.active = false;
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "test-cached-parakeet"
+        }
+
+        fn supports_idle_model_reuse(&self) -> bool {
+            !self.active
+        }
+
+        fn is_online(&self) -> bool {
+            false
+        }
+    }
+
+    fn cached_stt_test_service(
+        counters: Arc<CachedSttCounters>,
+    ) -> TranscriptionService {
+        TranscriptionService::new(
+            Box::new(BurstAudioCapture::new(
+                Arc::new(AtomicBool::new(false)),
+                0,
+            )),
+            Arc::new(CachedSttFactory { counters }),
+        )
+    }
+
+    async fn start_cached_test_recording(service: &TranscriptionService) {
+        service.start_recording(
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+            Arc::new(|_, _| {}),
+        ).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_local_stt_reuses_model_across_two_recordings() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = cached_stt_test_service(counters.clone());
+        service.update_config(SttConfig::new(SttProviderType::ParakeetUltra))
+            .await.unwrap();
+
+        for _ in 0..2 {
+            start_cached_test_recording(&service).await;
+            service.stop_recording().await.unwrap();
+        }
+
+        assert_eq!(counters.created.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.initialized.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.starts.load(Ordering::SeqCst), 2);
+        assert_eq!(counters.stops.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cached_local_stt_invalidates_weights_on_model_change() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = cached_stt_test_service(counters.clone());
+        let mut config = SttConfig::new(SttProviderType::ParakeetUltra);
+        service.update_config(config.clone()).await.unwrap();
+        start_cached_test_recording(&service).await;
+        service.stop_recording().await.unwrap();
+
+        config.model = Some("another-model.gguf".to_string());
+        service.update_config(config).await.unwrap();
+        start_cached_test_recording(&service).await;
+        service.stop_recording().await.unwrap();
+
+        assert_eq!(counters.created.load(Ordering::SeqCst), 2);
+        assert_eq!(counters.initialized.load(Ordering::SeqCst), 2);
+        assert_eq!(counters.starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cached_local_stt_rejects_model_switch_while_recording() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = cached_stt_test_service(counters);
+        let mut config = SttConfig::new(SttProviderType::ParakeetUltra);
+        service.update_config(config.clone()).await.unwrap();
+        start_cached_test_recording(&service).await;
+
+        config.model = Some("another-model.gguf".to_string());
+        assert!(service.update_config(config).await.is_err());
+        service.stop_recording().await.unwrap();
+    }
+
     #[tokio::test]
     async fn backend_config_disables_keep_alive_for_stability() {
         let provider_aborted = Arc::new(AtomicBool::new(false));
