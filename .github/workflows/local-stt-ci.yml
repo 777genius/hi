@@ -36,6 +36,8 @@ jobs:
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cached_local_stt -- --nocapture
       - name: Local microphone final and shared-context tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib microphone_final -- --nocapture
+      - name: Stop drain barrier regression tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib stt_drain -- --nocapture
       - name: Complete Rust library check
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml --lib
       - name: Download pinned Parakeet Ultra Q8 model (cache)
