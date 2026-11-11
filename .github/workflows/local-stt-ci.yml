@@ -86,6 +86,26 @@ jobs:
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib \
             e2e_local_parakeet_two_sources -- --ignored --nocapture
+      - name: Setup Node and pnpm for packaged macOS app
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: Build shared state-sync dependency
+        run: |
+          git clone --depth 1 https://github.com/777genius/state-sync.git ../state-sync
+          (cd ../state-sync && pnpm install --frozen-lockfile && pnpm build)
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build unsigned macOS .app for actual Tauri packaging check
+        env:
+          CARGO_BUILD_JOBS: 2
+          CMAKE_BUILD_PARALLEL_LEVEL: 2
+        run: |
+          pnpm exec tauri build --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          test -f src-tauri/target/release/bundle/macos/Telegram.app/Contents/MacOS/Telegram
       - name: Preserve resolved Cargo.lock for review
         if: always()
         uses: actions/upload-artifact@v4
