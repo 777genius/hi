@@ -1028,6 +1028,49 @@ async fn drain_stt_event_queue(
     }
 }
 
+#[cfg(test)]
+mod stt_drain_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stt_drain_barrier_waits_for_prior_final_events() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let slot = Arc::new(tokio::sync::RwLock::new(Some(tx.clone())));
+        tx.send(SttTranscriptionEvent::Final(
+            crate::domain::Transcription::final_result("last word".to_string())
+        )).unwrap();
+        drop(tx);
+        let worker = tokio::spawn(async move {
+            let mut saw_final = false;
+            while let Some(event) = rx.recv().await {
+                match event {
+                    SttTranscriptionEvent::Final(result) => {
+                        assert_eq!(result.text, "last word");
+                        saw_final = true;
+                    }
+                    SttTranscriptionEvent::Barrier(ack) => {
+                        assert!(saw_final);
+                        let _ = ack.send(());
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            panic!("lost final event before Stop barrier");
+        });
+        drain_stt_event_queue(&slot, "test").await.unwrap();
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stt_drain_barrier_reports_closed_receiver() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        let slot = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        assert!(drain_stt_event_queue(&slot, "test").await.is_err());
+    }
+}
+
 /// Stop recording voice
 pub async fn stop_recording_raw(
     state: &AppState,
