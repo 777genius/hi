@@ -176,6 +176,35 @@ impl TranscriptionService {
             }
         }
 
+        // Reuse a loaded local model across Start/Stop cycles. The prior
+        // stop_stream() has drained the worker and reset all utterance state.
+        // Unlike a WebSocket, this reuses only model weights, never a stream.
+        if !can_reuse_connection && local_utterance_provider {
+            let cached = self.stt_provider.write().await.take();
+            if let Some(mut provider) = cached {
+                if provider.supports_idle_model_reuse() {
+                    match provider.start_stream(
+                        on_partial.clone(),
+                        on_final.clone(),
+                        on_error.clone(),
+                        on_connection_quality.clone(),
+                    ).await {
+                        Ok(()) => {
+                            log::info!("Reusing loaded local Parakeet model for fast restart");
+                            *self.stt_provider.write().await = Some(provider);
+                            can_reuse_connection = true;
+                        }
+                        Err(error) => {
+                            log::warn!("Cached local STT model could not start: {}", error);
+                            let _ = provider.abort().await;
+                        }
+                    }
+                } else {
+                    let _ = provider.abort().await;
+                }
+            }
+        }
+
         if !can_reuse_connection {
             // Создаем новое соединение (обычный старт с задержкой)
             log::info!("Creating new STT connection");
@@ -715,13 +744,18 @@ impl TranscriptionService {
             log::info!("Stopping STT stream completely");
 
             let mut local_flush_error = pcm_drain_error;
-            if let Some(mut provider) = self.stt_provider.write().await.take() {
+            let current_provider = self.stt_provider.write().await.take();
+            if let Some(mut provider) = current_provider {
                 if let Err(e) = provider.stop_stream().await {
                     log::warn!("Failed to stop STT stream cleanly, aborting: {}", e);
                     if drain_local && local_flush_error.is_none() {
                         local_flush_error = Some(anyhow::Error::new(e));
                     }
                     let _ = provider.abort().await;
+                } else if drain_local && local_flush_error.is_none()
+                    && provider.supports_idle_model_reuse()
+                {
+                    *self.stt_provider.write().await = Some(provider);
                 }
             }
 
@@ -812,13 +846,18 @@ impl TranscriptionService {
 
         // Hard Stop must also report loss of a local final utterance.
         let mut local_flush_error = pcm_drain_error;
-        if let Some(mut provider) = self.stt_provider.write().await.take() {
+        let current_provider = self.stt_provider.write().await.take();
+        if let Some(mut provider) = current_provider {
             if let Err(e) = provider.stop_stream().await {
                 log::warn!("Failed to stop STT stream cleanly, aborting: {}", e);
                 if drain_local && local_flush_error.is_none() {
                     local_flush_error = Some(anyhow::Error::new(e));
                 }
                 let _ = provider.abort().await;
+            } else if drain_local && local_flush_error.is_none()
+                && provider.supports_idle_model_reuse()
+            {
+                *self.stt_provider.write().await = Some(provider);
             }
         }
 
@@ -863,7 +902,11 @@ impl TranscriptionService {
                         .unwrap_or(false)
                 };
 
-                if has_keep_alive_connection {
+                let has_idle_local_model = self.stt_provider.read().await.as_ref()
+                    .map(|provider| provider.supports_idle_model_reuse())
+                    .unwrap_or(false);
+
+                if has_keep_alive_connection || has_idle_local_model {
                     if let Some(timer) = self.inactivity_timer_task.write().await.take() {
                         timer.abort();
                         let _ = timer.await;
@@ -879,6 +922,10 @@ impl TranscriptionService {
                         }
                     }
                 }
+            } else if prev_config.provider == SttProviderType::ParakeetUltra
+                || config.provider == SttProviderType::ParakeetUltra
+            {
+                anyhow::bail!("Stop recording before changing local STT provider or model");
             } else {
                 log::info!(
                     "STT config updated while status={:?}; keep-alive connection will not be reset until idle",
