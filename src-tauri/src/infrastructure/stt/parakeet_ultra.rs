@@ -437,6 +437,35 @@ mod tests {
             "unexpected UK mic transcription: {mic_text}");
         assert!(!mic_text.contains("он добавил"), "audio channels mixed");
 
+        // End-to-end continuation: the very same final strings must enter the
+        // canonical companion timeline and be included in an LLM-ready context.
+        let state = crate::presentation::AppState::default();
+        let session_id = 53_u64;
+        state.active_transcription_session_id.store(
+            session_id, std::sync::atomic::Ordering::Relaxed,
+        );
+        crate::presentation::companion_timeline::update_system_audio_level(&state, 0.02);
+        crate::presentation::companion_timeline::update_microphone_audio_level(&state, 0.75);
+        let mic_final = crate::presentation::events::FinalTranscriptionPayload::from_transcription(
+            Transcription::final_result(mic_text.clone()), session_id, "microphone",
+        );
+        crate::presentation::companion_timeline::on_microphone_final(&state, &mic_final).await;
+        crate::presentation::companion_timeline::append_system_final(
+            &state, session_id, &Transcription::final_result(system_text.clone()),
+        ).await;
+        let (llm_context, evidence) =
+            crate::presentation::companion_timeline::build_context_text_and_memory_evidence(
+                &state, false,
+            ).await;
+        assert!(llm_context.contains("ОС: "), "system channel missing: {llm_context}");
+        assert!(llm_context.contains("МИКРОФОН: "), "mic channel missing: {llm_context}");
+        assert!(evidence.recent_timeline.iter().any(|item|
+            item.label.as_deref() == Some("system_audio") && item.text == system_text
+        ), "system final missing from evidence");
+        assert!(evidence.recent_timeline.iter().any(|item|
+            item.label.as_deref() == Some("microphone") && item.text == mic_text
+        ), "microphone final missing from evidence");
+
         // Model remains loaded: re-start the same provider for English audio.
         let english_out = Arc::new(Mutex::new(Vec::<String>::new()));
         system.start_stream(
