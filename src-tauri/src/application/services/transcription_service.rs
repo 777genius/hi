@@ -26,6 +26,7 @@ pub struct TranscriptionService {
     inactivity_timer_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // таймер для автоочистки соединения
     audio_processor_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // обработчик аудио-чанков → STT
     start_abort_requested: Arc<AtomicBool>,
+    dropped_audio_chunks: Arc<AtomicUsize>,
 }
 
 impl TranscriptionService {
@@ -43,12 +44,50 @@ impl TranscriptionService {
             inactivity_timer_task: Arc::new(RwLock::new(None)),
             audio_processor_task: Arc::new(RwLock::new(None)),
             start_abort_requested: Arc::new(AtomicBool::new(false)),
+            dropped_audio_chunks: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     /// Update microphone sensitivity (0-200)
     pub async fn set_microphone_sensitivity(&self, sensitivity: u8) {
         *self.microphone_sensitivity.write().await = sensitivity.min(200);
+    }
+
+    /// Unlike the cloud send path, local STT consumes PCM cheaply and can
+    /// drain the last queued frames after capture stops. A bounded wait avoids
+    /// keeping Stop hung when the audio source retains a sender.
+    async fn finish_audio_processor(&self, drain_local: bool) -> Result<()> {
+        let Some(mut task) = self.audio_processor_task.write().await.take() else {
+            return Ok(());
+        };
+        if drain_local {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
+                Ok(Ok(())) => {
+                    let dropped = self.dropped_audio_chunks.load(Ordering::Relaxed);
+                    if dropped > 0 {
+                        return Err(anyhow::anyhow!(
+                            "Local STT dropped {dropped} PCM chunks due to capture queue overflow"
+                        ));
+                    }
+                    return Ok(());
+                },
+                Ok(Err(error)) => {
+                    return Err(anyhow::anyhow!(
+                        "Local STT audio processing failed before finalization: {error}"
+                    ));
+                }
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    return Err(anyhow::anyhow!(
+                        "Local STT audio drain timed out; input frames may be missing"
+                    ));
+                }
+            }
+        }
+        task.abort();
+        let _ = task.await;
+        Ok(())
     }
 
     /// Start recording and transcription
@@ -70,6 +109,7 @@ impl TranscriptionService {
         // Устанавливаем статус Starting чтобы заблокировать повторные вызовы
         *status = RecordingStatus::Starting;
         self.start_abort_requested.store(false, Ordering::SeqCst);
+        self.dropped_audio_chunks.store(0, Ordering::Relaxed);
         drop(status);
 
         // Отменяем таймер неактивности если он запущен
@@ -89,6 +129,7 @@ impl TranscriptionService {
 
         // Проверяем можно ли переиспользовать существующее соединение
         let config = self.config.read().await.clone();
+        let local_utterance_provider = config.provider == SttProviderType::ParakeetUltra;
         let mut can_reuse_connection = {
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
@@ -142,6 +183,35 @@ impl TranscriptionService {
                         let _ = provider.abort().await;
                     }
                     can_reuse_connection = false;
+                }
+            }
+        }
+
+        // Reuse a loaded local model across Start/Stop cycles. The prior
+        // stop_stream() has drained the worker and reset all utterance state.
+        // Unlike a WebSocket, this reuses only model weights, never a stream.
+        if !can_reuse_connection && local_utterance_provider {
+            let cached = self.stt_provider.write().await.take();
+            if let Some(mut provider) = cached {
+                if provider.supports_idle_model_reuse() {
+                    match provider.start_stream(
+                        on_partial.clone(),
+                        on_final.clone(),
+                        on_error.clone(),
+                        on_connection_quality.clone(),
+                    ).await {
+                        Ok(()) => {
+                            log::info!("Reusing loaded local Parakeet model for fast restart");
+                            *self.stt_provider.write().await = Some(provider);
+                            can_reuse_connection = true;
+                        }
+                        Err(error) => {
+                            log::warn!("Cached local STT model could not start: {}", error);
+                            let _ = provider.abort().await;
+                        }
+                    }
+                } else {
+                    let _ = provider.abort().await;
                 }
             }
         }
@@ -210,7 +280,7 @@ impl TranscriptionService {
         // мы можем накопить гигабайты аудио в памяти и уронить приложение.
         let (tx, mut rx) = tokio::sync::mpsc::channel(256);
 
-        let dropped_chunks = Arc::new(AtomicUsize::new(0));
+        let dropped_chunks = Arc::clone(&self.dropped_audio_chunks);
         let dropped_chunks_for_cb = dropped_chunks.clone();
         let dropped_chunks_for_processor = dropped_chunks.clone();
         let on_chunk = Arc::new(move |chunk: crate::domain::AudioChunk| {
@@ -256,7 +326,15 @@ impl TranscriptionService {
                 chunk_count += 1;
 
                 let status = status_arc.read().await;
-                if *status != RecordingStatus::Recording {
+                // The local worker is already initialized before start_capture()
+                // returns. Preserve early microphone/system PCM while status is
+                // Starting, and queued tail PCM while status is Processing.
+                if *status != RecordingStatus::Recording
+                    && !(local_utterance_provider && matches!(
+                        *status,
+                        RecordingStatus::Starting | RecordingStatus::Processing
+                    ))
+                {
                     continue;
                 }
                 drop(status);
@@ -422,8 +500,10 @@ impl TranscriptionService {
                                     ("connection", false)
                                 }
                             }
+                            // A local inference queue overflow means an entire utterance
+                            // was lost. Fail visibly rather than resuming with a gap.
                             SttError::Processing(_) | SttError::Internal(_) => {
-                                ("processing", false)
+                                ("processing", local_utterance_provider)
                             }
                             SttError::Unsupported(_) => ("processing", true),
                         };
@@ -567,11 +647,10 @@ impl TranscriptionService {
         // Stop audio capture
         let stop_capture_result = self.audio_capture.write().await.stop_capture().await;
 
-        // При остановке записи прибиваем audio processor, чтобы не оставлять висящий task между сессиями.
-        if let Some(task) = self.audio_processor_task.write().await.take() {
-            task.abort();
-            let _ = task.await;
-        }
+        // A local decoder must see every queued frame before its final Stop flush.
+        let drain_local = self.config.read().await.provider == SttProviderType::ParakeetUltra;
+        // Drain the PCM queue, but always proceed to close the local provider.
+        let pcm_drain_error = self.finish_audio_processor(drain_local).await.err();
 
         // Если не смогли остановить захват аудио — считаем это критическим сценарием:
         // лучше упасть с ошибкой, но гарантированно вернуть сервис в Idle, чем зависнуть в Processing.
@@ -681,14 +760,28 @@ impl TranscriptionService {
             // Обычная остановка для провайдеров без keep-alive
             log::info!("Stopping STT stream completely");
 
-            if let Some(mut provider) = self.stt_provider.write().await.take() {
+            let mut local_flush_error = pcm_drain_error;
+            let current_provider = self.stt_provider.write().await.take();
+            if let Some(mut provider) = current_provider {
                 if let Err(e) = provider.stop_stream().await {
                     log::warn!("Failed to stop STT stream cleanly, aborting: {}", e);
+                    if drain_local && local_flush_error.is_none() {
+                        local_flush_error = Some(anyhow::Error::new(e));
+                    }
                     let _ = provider.abort().await;
+                } else if drain_local && local_flush_error.is_none()
+                    && provider.supports_idle_model_reuse()
+                {
+                    *self.stt_provider.write().await = Some(provider);
                 }
             }
 
             *self.status.write().await = RecordingStatus::Idle;
+            if let Some(error) = local_flush_error {
+                return Err(anyhow::anyhow!(
+                    "Local STT could not commit the last utterance: {}", error
+                ));
+            }
 
             log::info!("Recording stopped");
             Ok("Transcription completed".to_string())
@@ -746,11 +839,9 @@ impl TranscriptionService {
         // Stop audio capture
         let stop_capture_result = self.audio_capture.write().await.stop_capture().await;
 
-        // При остановке записи прибиваем audio processor, чтобы он гарантированно не жил в фоне.
-        if let Some(task) = self.audio_processor_task.write().await.take() {
-            task.abort();
-            let _ = task.await;
-        }
+        let drain_local = self.config.read().await.provider == SttProviderType::ParakeetUltra;
+        // Drain the PCM queue, but always proceed to close the local provider.
+        let pcm_drain_error = self.finish_audio_processor(drain_local).await.err();
 
         if let Err(e) = stop_capture_result {
             log::error!("Failed to stop audio capture: {}", e);
@@ -770,15 +861,29 @@ impl TranscriptionService {
             let _ = timer.await;
         }
 
-        // Жёстко закрываем провайдера и соединение
-        if let Some(mut provider) = self.stt_provider.write().await.take() {
+        // Hard Stop must also report loss of a local final utterance.
+        let mut local_flush_error = pcm_drain_error;
+        let current_provider = self.stt_provider.write().await.take();
+        if let Some(mut provider) = current_provider {
             if let Err(e) = provider.stop_stream().await {
                 log::warn!("Failed to stop STT stream cleanly, aborting: {}", e);
+                if drain_local && local_flush_error.is_none() {
+                    local_flush_error = Some(anyhow::Error::new(e));
+                }
                 let _ = provider.abort().await;
+            } else if drain_local && local_flush_error.is_none()
+                && provider.supports_idle_model_reuse()
+            {
+                *self.stt_provider.write().await = Some(provider);
             }
         }
 
         *self.status.write().await = RecordingStatus::Idle;
+        if let Some(error) = local_flush_error {
+            return Err(anyhow::anyhow!(
+                "Local STT could not commit the last utterance: {}", error
+            ));
+        }
         log::info!("Recording stopped (hard), provider connection closed");
         Ok("Transcription completed".to_string())
     }
@@ -799,7 +904,9 @@ impl TranscriptionService {
 
         let config_requires_new_connection = prev_config.provider != config.provider
             || prev_config.language != config.language
-            || prev_config.deepgram_keyterms != config.deepgram_keyterms;
+            || prev_config.deepgram_keyterms != config.deepgram_keyterms
+            || prev_config.model != config.model
+            || prev_config.auto_detect_language != config.auto_detect_language;
 
         if config_requires_new_connection {
             let status = *self.status.read().await;
@@ -812,7 +919,11 @@ impl TranscriptionService {
                         .unwrap_or(false)
                 };
 
-                if has_keep_alive_connection {
+                let has_idle_local_model = self.stt_provider.read().await.as_ref()
+                    .map(|provider| provider.supports_idle_model_reuse())
+                    .unwrap_or(false);
+
+                if has_keep_alive_connection || has_idle_local_model {
                     if let Some(timer) = self.inactivity_timer_task.write().await.take() {
                         timer.abort();
                         let _ = timer.await;
@@ -828,6 +939,10 @@ impl TranscriptionService {
                         }
                     }
                 }
+            } else if prev_config.provider == SttProviderType::ParakeetUltra
+                || config.provider == SttProviderType::ParakeetUltra
+            {
+                anyhow::bail!("Stop recording before changing local STT provider or model");
             } else {
                 log::info!(
                     "STT config updated while status={:?}; keep-alive connection will not be reset until idle",
@@ -1054,6 +1169,216 @@ mod tests {
                 aborted: self.aborted.clone(),
             }))
         }
+    }
+
+    #[derive(Default)]
+    struct CachedSttCounters {
+        created: AtomicUsize,
+        initialized: AtomicUsize,
+        starts: AtomicUsize,
+        stops: AtomicUsize,
+        audio_chunks: AtomicUsize,
+    }
+
+    struct CachedSttFactory {
+        counters: Arc<CachedSttCounters>,
+    }
+
+    struct CachedSttProvider {
+        counters: Arc<CachedSttCounters>,
+        active: bool,
+    }
+
+    impl SttProviderFactory for CachedSttFactory {
+        fn create(&self, _config: &SttConfig) -> SttResult<Box<dyn SttProvider>> {
+            self.counters.created.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(CachedSttProvider {
+                counters: self.counters.clone(),
+                active: false,
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl SttProvider for CachedSttProvider {
+        async fn initialize(&mut self, _config: &SttConfig) -> SttResult<()> {
+            self.counters.initialized.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn start_stream(
+            &mut self,
+            _on_partial: TranscriptionCallback,
+            _on_final: TranscriptionCallback,
+            _on_error: ErrorCallback,
+            _on_connection_quality: ConnectionQualityCallback,
+        ) -> SttResult<()> {
+            assert!(!self.active, "local STT stream must be reset before reuse");
+            self.active = true;
+            self.counters.starts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn send_audio(&mut self, _chunk: &crate::domain::AudioChunk) -> SttResult<()> {
+            self.counters.audio_chunks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_stream(&mut self) -> SttResult<()> {
+            self.active = false;
+            self.counters.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn abort(&mut self) -> SttResult<()> {
+            self.active = false;
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "test-cached-parakeet"
+        }
+
+        fn supports_idle_model_reuse(&self) -> bool {
+            !self.active
+        }
+
+        fn is_online(&self) -> bool {
+            false
+        }
+    }
+
+    fn cached_stt_test_service(
+        counters: Arc<CachedSttCounters>,
+    ) -> TranscriptionService {
+        TranscriptionService::new(
+            Box::new(BurstAudioCapture::new(
+                Arc::new(AtomicBool::new(false)),
+                0,
+            )),
+            Arc::new(CachedSttFactory { counters }),
+        )
+    }
+
+    async fn start_cached_test_recording(service: &TranscriptionService) {
+        service.start_recording(
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+            Arc::new(|_, _| {}),
+        ).await.unwrap();
+    }
+
+    /// Captures a frame synchronously during start_capture(), then yields.
+    /// This reproduces the early-audio race before Recording status is set.
+    struct ImmediateLocalAudioCapture { chunks: usize }
+
+    #[async_trait]
+    impl AudioCapture for ImmediateLocalAudioCapture {
+        async fn initialize(&mut self, _config: AudioConfig) -> AudioResult<()> {
+            Ok(())
+        }
+        async fn start_capture(
+            &mut self,
+            on_chunk: crate::domain::AudioChunkCallback,
+        ) -> AudioResult<()> {
+            for _ in 0..self.chunks {
+                on_chunk(crate::domain::AudioChunk::new(vec![1_200; 480], 16_000, 1));
+            }
+            tokio::time::sleep(Duration::from_millis(35)).await;
+            Ok(())
+        }
+        async fn stop_capture(&mut self) -> AudioResult<()> {
+            Ok(())
+        }
+        fn is_capturing(&self) -> bool {
+            true
+        }
+        fn config(&self) -> AudioConfig {
+            AudioConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_local_stt_preserves_pcm_during_starting() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = TranscriptionService::new(
+            Box::new(ImmediateLocalAudioCapture { chunks: 1 }),
+            Arc::new(CachedSttFactory { counters: counters.clone() }),
+        );
+        service.update_config(SttConfig::new(SttProviderType::ParakeetUltra))
+            .await.unwrap();
+        start_cached_test_recording(&service).await;
+        assert_eq!(counters.audio_chunks.load(Ordering::SeqCst), 1,
+            "capture delivered PCM before Recording status, but local worker dropped it");
+        service.stop_recording().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_local_stt_reports_pcm_overflow_on_stop() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = TranscriptionService::new(
+            Box::new(ImmediateLocalAudioCapture { chunks: 400 }),
+            Arc::new(CachedSttFactory { counters }),
+        );
+        service.update_config(SttConfig::new(SttProviderType::ParakeetUltra))
+            .await.unwrap();
+        start_cached_test_recording(&service).await;
+        let error = service.stop_recording().await.unwrap_err().to_string();
+        assert!(error.contains("dropped") && error.contains("PCM"), "{error}");
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn cached_local_stt_reuses_model_across_two_recordings() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = cached_stt_test_service(counters.clone());
+        service.update_config(SttConfig::new(SttProviderType::ParakeetUltra))
+            .await.unwrap();
+
+        for _ in 0..2 {
+            start_cached_test_recording(&service).await;
+            service.stop_recording().await.unwrap();
+        }
+
+        assert_eq!(counters.created.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.initialized.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.starts.load(Ordering::SeqCst), 2);
+        assert_eq!(counters.stops.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cached_local_stt_invalidates_weights_on_model_change() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = cached_stt_test_service(counters.clone());
+        let mut config = SttConfig::new(SttProviderType::ParakeetUltra);
+        service.update_config(config.clone()).await.unwrap();
+        start_cached_test_recording(&service).await;
+        service.stop_recording().await.unwrap();
+
+        config.model = Some("another-model.gguf".to_string());
+        service.update_config(config).await.unwrap();
+        start_cached_test_recording(&service).await;
+        service.stop_recording().await.unwrap();
+
+        assert_eq!(counters.created.load(Ordering::SeqCst), 2);
+        assert_eq!(counters.initialized.load(Ordering::SeqCst), 2);
+        assert_eq!(counters.starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cached_local_stt_rejects_model_switch_while_recording() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = cached_stt_test_service(counters);
+        let mut config = SttConfig::new(SttProviderType::ParakeetUltra);
+        service.update_config(config.clone()).await.unwrap();
+        start_cached_test_recording(&service).await;
+
+        config.model = Some("another-model.gguf".to_string());
+        assert!(service.update_config(config).await.is_err());
+        service.stop_recording().await.unwrap();
     }
 
     #[tokio::test]

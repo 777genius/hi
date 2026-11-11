@@ -1513,14 +1513,26 @@ pub async fn on_microphone_final(state: &AppState, payload: &FinalTranscriptionP
     }
 
     let status = state.transcription_service.get_status().await;
+    // System capture stops before the mic is flushed. Its status may already
+    // be Idle even though mic finals still belong to the active session.
+    let active_session = state.active_transcription_session_id.load(Ordering::Relaxed);
     if !matches!(
         status,
         RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Processing
-    ) {
+    ) && !(status == RecordingStatus::Idle
+        && active_session != 0
+        && active_session == payload.session_id)
+    {
         return;
     }
 
-    if !is_mic_dominant_now(state, now_ms()) {
+    // Offline Parakeet emits final-only utterances from an independent mic
+    // capture. A loud simultaneous system speaker must not suppress the
+    // candidate's words; cross-stream duplicate-text detection below still
+    // rejects actual echoes. Keep legacy dominance gating for cloud partials.
+    let independent_local_mic = state.config.read().await.stt.provider
+        == crate::domain::SttProviderType::ParakeetUltra;
+    if !independent_local_mic && !is_mic_dominant_now(state, payload.timestamp) {
         clear_microphone_live_buffers(state).await;
         return;
     }
@@ -2207,6 +2219,83 @@ mod tests {
             text: String::new(),
             error: None,
         }
+    }
+
+    /// A local decoder may deliver mic final more than a second after
+    /// the speaker stopped. It must use the capture timestamp even while
+    /// Stop has already moved the system capture to Idle.
+    #[tokio::test]
+    async fn delayed_local_microphone_final_reaches_llm_context() {
+        let state = AppState::default();
+        let session_id = 47;
+        state.active_transcription_session_id.store(
+            session_id, std::sync::atomic::Ordering::Relaxed
+        );
+        update_system_audio_level(&state, 0.02);
+        update_microphone_audio_level(&state, 0.6);
+        let captured = now_ms();
+        tokio::time::sleep(std::time::Duration::from_millis(1_250)).await;
+        on_microphone_final(&state, &FinalTranscriptionPayload {
+            session_id,
+            source: "microphone".to_string(),
+            text: "Я объясняю интерфейсы в Go".to_string(),
+            timestamp: captured,
+            confidence: None,
+            language: Some("ru".to_string()),
+            start: 0.0,
+            duration: 2.0,
+        }).await;
+        append_system_final(
+            &state, session_id,
+            &test_transcription("Почему интерфейс удовлетворяется неявно?", captured)
+        ).await;
+        let (context, evidence) = build_context_text_and_memory_evidence(&state, false).await;
+        assert!(context.contains("МИКРОФОН: Я объясняю интерфейсы в Go"), "{context}");
+        assert!(context.contains("ОС: Почему интерфейс удовлетворяется неявно?"), "{context}");
+        assert!(evidence.recent_timeline.iter().any(|x|
+            x.label.as_deref() == Some("microphone")
+                && x.text == "Я объясняю интерфейсы в Go"
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_microphone_final_survives_loud_overlapping_system_audio() {
+        let state = AppState::default();
+        state.config.write().await.stt.provider =
+            crate::domain::SttProviderType::ParakeetUltra;
+        let session_id = 88_u64;
+        state.active_transcription_session_id.store(
+            session_id, std::sync::atomic::Ordering::Relaxed,
+        );
+        // The interviewer is much louder than the candidate, so the legacy
+        // mic-dominance heuristic is false despite independent mic speech.
+        update_system_audio_level(&state, 0.95);
+        update_microphone_audio_level(&state, 0.04);
+        assert!(!is_mic_dominant_now(&state, now_ms()));
+
+        let captured = now_ms();
+        on_microphone_final(&state, &FinalTranscriptionPayload {
+            session_id,
+            source: "microphone".to_string(),
+            text: "I use dependency inversion for the Go interface".to_string(),
+            timestamp: captured,
+            confidence: None,
+            language: Some("en".to_string()),
+            start: 0.0,
+            duration: 3.0,
+        }).await;
+        append_system_final(
+            &state, session_id,
+            &test_transcription("Could you explain a Go interface?", captured),
+        ).await;
+
+        let (context, evidence) = build_context_text_and_memory_evidence(&state, false).await;
+        assert!(context.contains("МИКРОФОН: I use dependency inversion"), "{context}");
+        assert!(context.contains("ОС: Could you explain a Go interface?"), "{context}");
+        assert!(evidence.recent_timeline.iter().any(|v|
+            v.label.as_deref() == Some("microphone")
+                && v.text.contains("dependency inversion")
+        ));
     }
 
     #[tokio::test]

@@ -177,6 +177,7 @@ export enum SttProviderType {
   Deepgram = 'deepgram',
   Backend = 'backend',
   WhisperLocal = 'whisperlocal',
+  ParakeetUltra = 'parakeetultra',
   GoogleCloud = 'googlecloud',
   Azure = 'azure',
 }

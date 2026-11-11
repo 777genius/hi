@@ -190,12 +190,12 @@ export function useSettings() {
       // Загружаем STT конфиг — из sync store если уже загружен, иначе invoke
       const sttConfigStoreInstance = useSttConfigStore();
       if (sttConfigStoreInstance.isLoaded) {
-        store.setProvider(SttProviderType.Backend);
+        store.setProvider(sttConfigStoreInstance.provider);
         store.setLanguage(sttConfigStoreInstance.language, { persist: false });
         store.setDeepgramKeyterms(sttConfigStoreInstance.deepgramKeyterms ?? '');
       } else {
         const sttConfig = await tauriSettingsService.getSttConfig();
-        store.setProvider(SttProviderType.Backend);
+        store.setProvider(sttConfig.provider);
         store.setLanguage(sttConfig.language, { persist: false });
         store.setDeepgramKeyterms(sttConfig.deepgram_keyterms ?? '');
       }
@@ -303,8 +303,8 @@ export function useSettings() {
       // Сохраняем STT конфиг
       const expectedKeyterms = normalizeKeyterms(store.deepgramKeyterms);
       const sttConfigData: Partial<SttConfigData> & Pick<SttConfigData, 'provider' | 'language'> = {
-        // Выбор провайдера выключен: всегда Backend
-        provider: SttProviderType.Backend,
+        // Backend is the default, but local Parakeet is an explicit choice.
+        provider: store.provider,
         language: store.language,
         deepgramApiKey: null,
         assemblyaiApiKey: null,
@@ -319,6 +319,7 @@ export function useSettings() {
         const stt1 = await tauriSettingsService.getSttConfig();
         const isApplied = (stt: Awaited<ReturnType<typeof tauriSettingsService.getSttConfig>>) =>
           stt.language === store.language &&
+          stt.provider === store.provider &&
           normalizeKeyterms(stt.deepgram_keyterms) === expectedKeyterms;
 
         if (!isApplied(stt1)) {

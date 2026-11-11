@@ -24,9 +24,10 @@ pub struct AudioPermissionStatus {
 const DEFAULT_MICROPHONE_MUTE_HOTKEY: &str = "Alt+Z";
 const APP_MICROPHONE_MUTE_SOURCE: &str = "app-microphone-toggle";
 
-enum SttTranscriptionEvent {
+pub(crate) enum SttTranscriptionEvent {
     Partial(crate::domain::Transcription),
     Final(crate::domain::Transcription),
+    Barrier(tokio::sync::oneshot::Sender<()>),
 }
 
 struct CompanionDeltaWriter {
@@ -328,12 +329,14 @@ async fn sync_microphone_transcription_enabled_internal(
         .store(enabled, Ordering::Relaxed);
 
     if !enabled {
-        if let Err(e) = state
-            .microphone_transcription_service
-            .stop_recording()
-            .await
-        {
-            log::debug!("Microphone transcription stop skipped/failed: {}", e);
+        let mic = &state.microphone_transcription_service;
+        let result = match mic.get_status().await {
+            RecordingStatus::Starting => mic.abort_starting().await,
+            RecordingStatus::Recording => mic.stop_recording().await,
+            _ => Ok("Microphone already stopped".to_string()),
+        };
+        if let Err(error) = result {
+            log::warn!("Microphone mute could not stop transcription: {}", error);
         }
         crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
         return Ok(());
@@ -494,6 +497,12 @@ pub async fn toggle_microphone_muted(
     }
 }
 
+/// A pending microphone start must not survive Stop, a new session, or mute.
+fn microphone_session_should_run(state: &AppState, session_id: u64) -> bool {
+    state.active_transcription_session_id.load(Ordering::Relaxed) == session_id
+        && state.microphone_transcription_enabled.load(Ordering::Relaxed)
+}
+
 fn spawn_microphone_transcription_start(
     mic_service: Arc<TranscriptionService>,
     app_handle: AppHandle,
@@ -503,6 +512,19 @@ fn spawn_microphone_transcription_start(
     let app_handle_partial = app_handle.clone();
 
     tauri::async_runtime::spawn(async move {
+        // Keep a previous, slow model initialization from replacing or
+        // stopping the microphone capture of the next recording session.
+        let start_lock = match app_handle_partial.try_state::<AppState>() {
+            Some(state) => Arc::clone(&state.microphone_start_lock),
+            None => return,
+        };
+        let _start_guard = start_lock.lock().await;
+        let Some(state) = app_handle_partial.try_state::<AppState>() else { return; };
+        if !microphone_session_should_run(state.inner(), session_id) {
+            return;
+        }
+        drop(state);
+
         // Важно: если выбран "Default" (device_name=None), то при подключении/смене микрофона
         // системное устройство по умолчанию может измениться во время работы приложения.
         // Поэтому перед стартом микрофонной транскрибации пересоздаём захват.
@@ -521,8 +543,20 @@ fn spawn_microphone_transcription_start(
             }
         }
 
+        // Device setup itself is asynchronous. Re-check before creating a new
+        // provider stream; Stop or mute may have happened meanwhile.
+        let Some(state) = app_handle_partial.try_state::<AppState>() else { return; };
+        if !microphone_session_should_run(state.inner(), session_id) {
+            return;
+        }
+        drop(state);
         let (mic_event_tx, mut mic_event_rx) =
             tokio::sync::mpsc::unbounded_channel::<SttTranscriptionEvent>();
+        if let Some(state) = app_handle_partial.try_state::<AppState>() {
+            if microphone_session_should_run(state.inner(), session_id) {
+                *state.microphone_stt_event_tx.write().await = Some(mic_event_tx.clone());
+            }
+        }
         let app_handle_mic_events = app_handle_partial.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(event) = mic_event_rx.recv().await {
@@ -571,6 +605,9 @@ fn spawn_microphone_transcription_start(
                             &app_handle_mic_events,
                         )
                         .await;
+                    }
+                    SttTranscriptionEvent::Barrier(ack) => {
+                        let _ = ack.send(());
                     }
                 }
             }
@@ -626,6 +663,14 @@ fn spawn_microphone_transcription_start(
             .await
         {
             log::warn!("Microphone transcription failed to start: {}", e);
+        } else if let Some(state) = app_handle_partial.try_state::<AppState>() {
+            // The mic starts asynchronously after the system capture. A quick
+            // Stop can invalidate the session while the model is still loading.
+            // Do not leave an orphaned mic recording in that race.
+            if !microphone_session_should_run(state.inner(), session_id) {
+                log::info!("Mic startup completed after Stop or mute; shutting down stale mic session");
+                let _ = mic_service.stop_recording().await;
+            }
         }
     });
 }
@@ -678,8 +723,11 @@ pub async fn start_recording_raw(
     crate::presentation::companion_timeline::clear_microphone_live_buffers(state).await;
     log::info!("Recording session started: session_id={}", session_id);
 
+    // A disabled microphone must not reuse the previous session's reducer.
+    *state.microphone_stt_event_tx.write().await = None;
     let (system_event_tx, mut system_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<SttTranscriptionEvent>();
+    *state.system_stt_event_tx.write().await = Some(system_event_tx.clone());
     let app_handle_events = app_handle.clone();
     let state_final_events = state.final_transcription.clone();
     let state_history_events = state.history.clone();
@@ -771,6 +819,9 @@ pub async fn start_recording_raw(
                     {
                         log::debug!("Failed to publish companion final snapshot: {}", e);
                     }
+                }
+                SttTranscriptionEvent::Barrier(ack) => {
+                    let _ = ack.send(());
                 }
             }
         }
@@ -987,6 +1038,82 @@ pub async fn start_recording_raw(
     Ok("Recording started".to_string())
 }
 
+/// Drain both reducer queues before invalidating the recording session ID.
+/// Each worker's final callback only enqueues its result; the timeline update
+/// happens on the event receiver and is not synchronous with worker completion.
+async fn drain_stt_event_queue(
+    slot: &Arc<tokio::sync::RwLock<Option<tokio::sync::mpsc::UnboundedSender<SttTranscriptionEvent>>>>,
+    source: &str,
+) -> Result<(), String> {
+    let Some(tx) = slot.write().await.take() else {
+        return Ok(());
+    };
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    tx.send(SttTranscriptionEvent::Barrier(ack_tx))
+        .map_err(|_| format!("Failed to queue {source} final transcription drain"))?;
+    match tokio::time::timeout(std::time::Duration::from_secs(3), ack_rx).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(format!("{source} transcription reducer stopped before drain")),
+        Err(_) => Err(format!("Timed out draining {source} final transcription events")),
+    }
+}
+
+#[cfg(test)]
+mod stt_drain_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stt_drain_barrier_waits_for_prior_final_events() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let slot = Arc::new(tokio::sync::RwLock::new(Some(tx.clone())));
+        tx.send(SttTranscriptionEvent::Final(
+            crate::domain::Transcription::final_result("last word".to_string())
+        )).unwrap();
+        drop(tx);
+        let worker = tokio::spawn(async move {
+            let mut saw_final = false;
+            while let Some(event) = rx.recv().await {
+                match event {
+                    SttTranscriptionEvent::Final(result) => {
+                        assert_eq!(result.text, "last word");
+                        saw_final = true;
+                    }
+                    SttTranscriptionEvent::Barrier(ack) => {
+                        assert!(saw_final);
+                        let _ = ack.send(());
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            panic!("lost final event before Stop barrier");
+        });
+        drain_stt_event_queue(&slot, "test").await.unwrap();
+        worker.await.unwrap();
+    }
+
+    #[test]
+    fn stale_or_muted_microphone_session_cannot_start() {
+        let state = AppState::default();
+        state.active_transcription_session_id.store(41, Ordering::Relaxed);
+        assert!(microphone_session_should_run(&state, 41));
+        state.microphone_transcription_enabled.store(false, Ordering::Relaxed);
+        assert!(!microphone_session_should_run(&state, 41));
+        state.microphone_transcription_enabled.store(true, Ordering::Relaxed);
+        state.active_transcription_session_id.store(42, Ordering::Relaxed);
+        assert!(!microphone_session_should_run(&state, 41));
+        assert!(microphone_session_should_run(&state, 42));
+    }
+
+    #[tokio::test]
+    async fn stt_drain_barrier_reports_closed_receiver() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        let slot = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        assert!(drain_stt_event_queue(&slot, "test").await.is_err());
+    }
+}
+
 /// Stop recording voice
 pub async fn stop_recording_raw(
     state: &AppState,
@@ -998,21 +1125,50 @@ pub async fn stop_recording_raw(
     let session_id = state
         .active_transcription_session_id
         .load(Ordering::Relaxed);
+    let local_stt_enabled = state.config.read().await.stt.provider == SttProviderType::ParakeetUltra;
+    let mic_expected = state.microphone_transcription_enabled.load(Ordering::Relaxed);
 
+    // Always finish the second channel and drain both reducers even if the
+    // system provider reports that its final utterance could not be decoded.
     let result = state
         .transcription_service
         .stop_recording()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string());
 
-    // Best-effort: останавливаем микрофонную транскрибацию (если она была запущена).
-    if let Err(e) = state
-        .microphone_transcription_service
-        .stop_recording()
-        .await
-    {
-        log::debug!("Microphone transcription stop skipped/failed: {}", e);
+    // The mic may still be in Starting while its local model is loading.
+    // Abort that startup rather than leaving a recording to start after Stop.
+    let mic_service = &state.microphone_transcription_service;
+    let mut mic_stop_error = None;
+    match mic_service.get_status().await {
+        RecordingStatus::Recording => {
+            if let Err(e) = mic_service.stop_recording().await {
+                log::warn!("Microphone transcription stop failed: {}", e);
+                mic_stop_error = Some(e.to_string());
+            }
+        }
+        RecordingStatus::Starting => {
+            if let Err(e) = mic_service.abort_starting().await {
+                log::warn!("Microphone startup abort failed: {}", e);
+                mic_stop_error = Some(e.to_string());
+            } else if local_stt_enabled && mic_expected {
+                mic_stop_error = Some("Microphone had not finished starting before Stop".to_string());
+            }
+        }
+        _ if local_stt_enabled && mic_expected => {
+            // An enabled local microphone that never started (or failed earlier)
+            // must not be silently reported as a complete two-channel session.
+            mic_stop_error = Some("Microphone was not recording when local STT stopped".to_string());
+        }
+        _ => {}
     }
+
+    // The STT workers have stopped emitting callbacks. Ensure their finals
+    // reached the canonical timeline before deactivating this session.
+    let (system_drain, microphone_drain) = tokio::join!(
+        drain_stt_event_queue(&state.system_stt_event_tx, "system"),
+        drain_stt_event_queue(&state.microphone_stt_event_tx, "microphone"),
+    );
 
     crate::presentation::companion_timeline::finalize_or_clear_system_live_on_stop(
         state, session_id,
@@ -1038,7 +1194,35 @@ pub async fn stop_recording_raw(
         },
     );
 
-    Ok(result)
+    // Offline local STT must never report a clean Stop if mic data or reducer
+    // events were lost. Keep the legacy cloud mic best-effort semantics.
+    if local_stt_enabled {
+        let mut failures = Vec::new();
+        if let Err(error) = &result {
+            failures.push(format!("system: {error}"));
+        }
+        if let Some(error) = mic_stop_error {
+            failures.push(format!("microphone: {error}"));
+        }
+        if let Err(error) = system_drain {
+            failures.push(error);
+        }
+        if let Err(error) = microphone_drain {
+            failures.push(error);
+        }
+        if !failures.is_empty() {
+            return Err(format!("Local STT Stop did not preserve all finals: {}", failures.join("; ")));
+        }
+    } else {
+        if let Err(error) = system_drain {
+            log::warn!("{}", error);
+        }
+        if let Err(error) = microphone_drain {
+            log::warn!("{}", error);
+        }
+    }
+
+    result
 }
 
 /// Abort recording start while the service is still in `Starting`.
@@ -1339,7 +1523,7 @@ mod snapshot_contract_tests {
 }
 /// Toggle window visibility
 #[tauri::command]
-pub async fn toggle_window(_state: State<'_, AppState>, window: Window) -> Result<(), String> {
+pub async fn toggle_window(state: State<'_, AppState>, window: Window) -> Result<(), String> {
     log::info!("Command: toggle_window");
 
     if window.is_visible().map_err(|e| e.to_string())? {
@@ -1568,10 +1752,12 @@ pub async fn update_stt_config(
 
     let _guard = state.stt_config_guard.lock().await;
 
-    // Выбор провайдера отключён — всегда используем Backend.
-    // Параметр provider оставлен, чтобы не ломать совместимость API.
-    let _ = provider;
-    let provider_type = SttProviderType::Backend;
+    // An explicit choice; do not silently switch offline transcription to cloud.
+    let provider_type = match provider.trim().to_ascii_lowercase().as_str() {
+        "backend" => SttProviderType::Backend,
+        "parakeetultra" => SttProviderType::ParakeetUltra,
+        other => return Err(format!("Unsupported STT provider: {other}")),
+    };
 
     // Снимаем текущее состояние для сравнения после сохранения
     let old_stt = {
@@ -1586,9 +1772,16 @@ pub async fn update_stt_config(
     config.provider = provider_type;
     config.language = language;
 
-    // Whisper/model больше не используем в backend-only архитектуре.
-    let _ = model;
-    config.model = None;
+    // Preserve the model path on partial language updates; clear legacy model
+    // when first switching to Parakeet so auto-discovery works.
+    if provider_type == SttProviderType::ParakeetUltra
+        && old_stt.provider != SttProviderType::ParakeetUltra
+    {
+        config.model = None;
+    }
+    if let Some(model) = model {
+        config.model = (!model.trim().is_empty()).then_some(model);
+    }
 
     // Backend keep-alive deliberately stays disabled: Deepgram/Backend pause+resume is
     // harder to make reliable than reconnecting, and transcription stability is more important.
@@ -1612,6 +1805,27 @@ pub async fn update_stt_config(
     // - Some(Some(v)): устанавливаем v
     if let Some(next) = deepgram_keyterms {
         config.deepgram_keyterms = next;
+    }
+
+    // Do not partially switch only one of the two audio services while a
+    // local-model session is active (including asynchronous mic startup).
+    let local_model_change =
+        (old_stt.provider == SttProviderType::ParakeetUltra
+            || config.provider == SttProviderType::ParakeetUltra)
+            && (old_stt.provider != config.provider
+                || old_stt.model != config.model
+                || old_stt.language != config.language);
+    if local_model_change {
+        let (system_status, mic_status) = tokio::join!(
+            state.transcription_service.get_status(),
+            state.microphone_transcription_service.get_status(),
+        );
+        if system_status != RecordingStatus::Idle || mic_status != RecordingStatus::Idle {
+            return Err(
+                "Stop both audio streams before changing the local STT provider or model"
+                    .to_string(),
+            );
+        }
     }
 
     // Обновляем конфигурацию в сервисе
@@ -1646,7 +1860,8 @@ pub async fn update_stt_config(
     // чтобы state-sync корректно подтягивал актуальный snapshot (включая keyterms и т.д.)
     let stt_changed = config.language != old_stt.language
         || config.deepgram_keyterms != old_stt.deepgram_keyterms
-        || config.provider != old_stt.provider;
+        || config.provider != old_stt.provider
+        || config.model != old_stt.model;
     if stt_changed {
         let revision = AppState::bump_revision(&state.stt_config_revision).await;
         let _ = app_handle.emit(
