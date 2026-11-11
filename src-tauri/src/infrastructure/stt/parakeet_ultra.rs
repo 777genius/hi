@@ -334,6 +334,35 @@ impl SttProvider for ParakeetUltraProvider {
         Ok(())
     }
 
+    // Local pause is an utterance flush, not a model unload. The existing
+    // TranscriptionService TTL releases this provider after an idle interval.
+    async fn pause_stream(&mut self) -> SttResult<()> {
+        self.stop_stream().await
+    }
+
+    async fn resume_stream(
+        &mut self,
+        on_partial: TranscriptionCallback,
+        on_final: TranscriptionCallback,
+        on_error: ErrorCallback,
+        on_connection_quality: ConnectionQualityCallback,
+    ) -> SttResult<()> {
+        if self.model.is_none() {
+            return Err(SttError::Configuration(
+                "Cannot resume unloaded Parakeet Ultra model".to_string()
+            ));
+        }
+        self.start_stream(on_partial, on_final, on_error, on_connection_quality).await
+    }
+
+    fn supports_keep_alive(&self) -> bool {
+        true
+    }
+
+    fn is_connection_alive(&self) -> bool {
+        self.model.is_some() && !self.recording && self.worker.is_none()
+    }
+
     fn name(&self) -> &str {
         "parakeet-ultra-local"
     }
