@@ -707,6 +707,19 @@ fn next_recording_session_id(state: &AppState) -> u64 {
     state.transcription_session_seq.load(Ordering::Relaxed) + 1
 }
 
+/// A device can disappear before TranscriptionService enters Starting.
+/// Release the provisional session and reducer even when no provider was started.
+async fn abandon_failed_recording_start(state: &AppState, session_id: u64) {
+    if state.active_transcription_session_id.compare_exchange(
+        session_id,
+        0,
+        Ordering::SeqCst,
+        Ordering::Relaxed,
+    ).is_ok() {
+        *state.system_stt_event_tx.write().await = None;
+    }
+}
+
 /// Start recording voice on the backend path shared with companion actions.
 pub async fn start_recording_raw(
     state: &AppState,
@@ -961,10 +974,17 @@ pub async fn start_recording_raw(
             cfg.selected_audio_device.clone(),
         )
     };
-    state
+    if let Err(error) = state
         .recreate_audio_capture_with_device(output_device, app_handle.clone())
         .await
-        .map_err(|e| format!("Не удалось инициализировать устройство записи: {}", e))?;
+    {
+        let message = format!("Не удалось инициализировать устройство записи: {}", error);
+        abandon_failed_recording_start(state, session_id).await;
+        // Match the provider-start error contract: otherwise the UI may keep
+        // showing Starting after an unplugged or unavailable audio device.
+        on_error(SttError::Configuration(message.clone()));
+        return Err(message);
+    }
 
     // Start recording (async - WebSocket connect, audio capture start)
     let start_result = state
@@ -983,9 +1003,7 @@ pub async fn start_recording_raw(
     // UI останется в Starting и будет ощущение "подключение идёт, но ничего не происходит".
     // Поэтому здесь явно отправляем error + status=Error тем же контрактом, что и в runtime-ошибках.
     if let Err(e) = start_result {
-        state
-            .active_transcription_session_id
-            .store(0, Ordering::Relaxed);
+        abandon_failed_recording_start(state, session_id).await;
         // Стараемся извлечь исходную причину максимально надёжно (без парсинга строки).
         let stt = e
             .downcast_ref::<SttError>()
@@ -1090,6 +1108,32 @@ mod stt_drain_tests {
         });
         drain_stt_event_queue(&slot, "test").await.unwrap();
         worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_capture_start_releases_its_session_and_event_reducer() {
+        let state = AppState::default();
+        state.active_transcription_session_id.store(41, Ordering::Relaxed);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        *state.system_stt_event_tx.write().await = Some(tx);
+
+        abandon_failed_recording_start(&state, 41).await;
+
+        assert_eq!(state.active_transcription_session_id.load(Ordering::Relaxed), 0);
+        assert!(state.system_stt_event_tx.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_old_failure_does_not_clear_a_new_recording_session() {
+        let state = AppState::default();
+        state.active_transcription_session_id.store(42, Ordering::Relaxed);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        *state.system_stt_event_tx.write().await = Some(tx);
+
+        abandon_failed_recording_start(&state, 41).await;
+
+        assert_eq!(state.active_transcription_session_id.load(Ordering::Relaxed), 42);
+        assert!(state.system_stt_event_tx.read().await.is_some());
     }
 
     #[test]
