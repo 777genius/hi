@@ -1556,7 +1556,7 @@ async fn sse_response(
                         sse_snapshot_bytes(&snapshot)
                     }
                     Ok(Err(_)) => return None,
-                    Err(_) => Bytes::from_static(b": keepalive\n\n"),
+                    Err(_) => Bytes::from_static(b"event: heartbeat\ndata: {}\n\n"),
                 }
             };
 
