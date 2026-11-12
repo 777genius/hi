@@ -21,18 +21,26 @@ async function openKeepAliveConnection(port) {
       socket.destroy();
       reject(new Error('Companion HTTP keep-alive probe timed out'));
     }, 7000);
-    const onError = (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    };
-    socket.once('error', onError);
+    let connected = false;
+    // A forced close on Companion Stop may manifest as ECONNRESET. Keep
+    // the error listener attached so revocation cannot crash the test runner.
+    socket.on('error', (error) => {
+      if (!connected) {
+        clearTimeout(timeout);
+        reject(error);
+      }
+    });
     socket.on('data', (chunk) => {
+      if (connected) return;
       response += chunk.toString();
       if (!response.includes('\r\n\r\n')) return;
       clearTimeout(timeout);
-      socket.off('error', onError);
-      assert.match(response, /^HTTP\/1\.1 200 /, 'keep-alive HTTP probe must succeed');
-      resolve();
+      connected = true;
+      if (!/^HTTP\/1\.1 200 /.test(response)) {
+        reject(new Error('Companion HTTP keep-alive probe did not return 200'));
+      } else {
+        resolve();
+      }
     });
     socket.once('connect', () => {
       socket.write('GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n');
@@ -138,10 +146,13 @@ describe('Companion HTTP/SSE transport (real native Tauri)', () => {
       const stopped = assertInvokeResult(await invoke('disable_companion_mode'), 'disable companion');
       assert.equal(stopped.enabled, false);
       await stream.waitForClose();
-      await Promise.race([
-        oldSocketClosed,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('old HTTP keep-alive socket was not revoked on Stop')), 6000)),
-      ]);
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('old HTTP keep-alive socket was not revoked on Stop')), 6000);
+        oldSocketClosed.then(() => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
 
       const restarted = assertInvokeResult(await invoke('enable_companion_mode'), 're-enable companion');
       assert.equal(restarted.enabled, true);
