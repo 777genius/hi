@@ -154,6 +154,32 @@ describe('Companion HTTP/SSE transport (real native Tauri)', () => {
         'resubscribing after a dropped connection must show the current desktop revision');
       assert.equal(recovered.data.controls.instanceId, afterOfflineChange.data.controls.instanceId);
 
+      // The test-only native STT fixture exercises the actual backend timeline
+      // reducer, full HTTP snapshot, SSE and Tauri desktop command together.
+      // Unlike a synthetic EventSource mock this proves cross-device parity.
+      const injectedText = `companion-native-stt-${Date.now()}`;
+      const injectResponse = await fetch(`${base}/api/e2e/timeline/system`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Companion-Token': started.token },
+        body: JSON.stringify({ text: injectedText, sessionId: 777 }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      assert.equal(injectResponse.status, 200, 'native STT fixture must publish to Companion');
+      let liveTranscript;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        liveTranscript = await stream.nextSnapshot();
+        if (liveTranscript.data.timeline.some((message) => message.text === injectedText)) break;
+      }
+      assert.equal(liveTranscript.data.timeline.filter((message) => message.text === injectedText).length, 1,
+        'mobile SSE receives exactly one finalized STT message');
+      assert.ok(Number(liveTranscript.revision) > Number(recovered.revision), 'new STT final advances revision');
+      const desktopTranscript = assertInvokeResult(await invoke('get_companion_snapshot'), 'desktop STT snapshot');
+      assert.equal(desktopTranscript.data.timeline.filter((message) => message.text === injectedText).length, 1,
+        'desktop and phone must see the same native STT message');
+      const mobileTranscript = await getJson(stateUrl);
+      assert.equal(mobileTranscript.data.timeline.filter((message) => message.text === injectedText).length, 1,
+        'HTTP resync and live SSE must agree on STT timeline');
+
       const oldSocketClosed = new Promise((resolve) => keepAliveSocket.once('close', resolve));
       const stopped = assertInvokeResult(await invoke('disable_companion_mode'), 'disable companion');
       assert.equal(stopped.enabled, false);
