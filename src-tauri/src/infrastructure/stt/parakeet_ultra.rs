@@ -19,6 +19,28 @@ const MODEL_FILE: &str = "parakeet-ultra-Q8_0.gguf";
 /// Handy catalog's pinned Q8_0 model at revision 39eeb55181f0d354fd934f06e92fd8d5037fed8e.
 const MODEL_SHA256: &str = "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59";
 const JOB_QUEUE_CAPACITY: usize = 32;
+const STOP_TAIL_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+// The first inference may lazily compile Metal shaders or fall back to CPU on
+// virtualized macOS runners. A 10s Stop timeout lost valid final utterances.
+// Keep a finite deadline, but allow genuine ongoing local decode to drain.
+const STOP_DECODE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn enqueue_final_tail(
+    tx: &mpsc::Sender<Utterance>,
+    segment: Utterance,
+    max_wait: std::time::Duration,
+) -> SttResult<()> {
+    match tokio::time::timeout(max_wait, tx.send(segment)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(SttError::Processing(format!(
+            "Could not flush Parakeet tail: {error}"
+        ))),
+        Err(_) => Err(SttError::Processing(
+            "Timed out flushing Parakeet tail: decode queue is not draining".into(),
+        )),
+    }
+}
+
 
 /// Each provider instance owns a different loaded model handle: transcribe.cpp
 /// v0.4.x permits only one active decode per loaded model.
@@ -295,17 +317,21 @@ impl SttProvider for ParakeetUltraProvider {
             return Ok(());
         }
         self.recording = false;
+        let mut tail_error = None;
         if let Some(tx) = self.job_tx.take() {
             if let Some(segment) = self.segmenter.take().and_then(|mut s| s.finish()) {
-                tx.send(segment).await.map_err(|error| {
-                    SttError::Processing(format!("Could not flush Parakeet tail: {error}"))
-                })?;
+                if let Err(error) = enqueue_final_tail(&tx, segment, STOP_TAIL_SEND_TIMEOUT).await {
+                    // Never keep Stop blocked behind a stalled decode worker.
+                    // The caller must see the lost-tail error, not a clean Stop.
+                    self.cancelled.store(true, Ordering::Release);
+                    tail_error = Some(error);
+                }
             }
-            drop(tx); // worker drains all queued utterances, then exits
+            drop(tx); // worker drains queued utterances or notices cancellation
         }
         if let Some(mut worker) = self.worker.take() {
             match tokio::time::timeout(
-                std::time::Duration::from_secs(10),
+                STOP_DECODE_DRAIN_TIMEOUT,
                 &mut worker,
             ).await {
                 Ok(Ok(result)) => result?,
@@ -318,12 +344,15 @@ impl SttProvider for ParakeetUltraProvider {
                     self.cancelled.store(true, Ordering::Release);
                     worker.abort();
                     return Err(SttError::Processing(
-                        "Local Parakeet did not finish decoding within 10 seconds".into()
+                        "Local Parakeet did not finish draining within 30 seconds".into()
                     ));
                 }
             }
         }
         self.segmenter = None;
+        if let Some(error) = tail_error {
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -386,6 +415,33 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use crate::domain::SttProviderType;
+
+    #[tokio::test]
+    async fn stop_tail_send_fails_boundedly_instead_of_hanging_when_decode_queue_stalls() {
+        let (tx, _rx) = mpsc::channel::<Utterance>(1);
+        let make_utterance = || Utterance {
+            pcm: vec![1; 480],
+            start_sample: 0,
+            captured_at_ms: 0,
+        };
+        tx.try_send(make_utterance()).expect("fill bounded queue");
+
+        let failure = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            enqueue_final_tail(
+                &tx,
+                make_utterance(),
+                std::time::Duration::from_millis(30),
+            ),
+        )
+        .await
+        .expect("Stop must never hang on the full queue")
+        .expect_err("full and unconsumed queue must report failure");
+        assert!(
+            failure.to_string().contains("Timed out flushing Parakeet tail"),
+            "unexpected error: {failure}"
+        );
+    }
 
     /// Real ASR E2E: run ONLY with two distinct 16 kHz mono PCM16 fixtures and
     /// a pinned Parakeet Ultra Q8 model. The two audio sources decode concurrently.

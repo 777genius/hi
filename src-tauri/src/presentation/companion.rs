@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
-#[cfg(any(unix, target_os = "windows"))]
-use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -16,10 +14,11 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpListener;
 use tokio::sync::{watch, RwLock};
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 
 use crate::domain::RecordingStatus;
 use crate::presentation::events::{
@@ -30,9 +29,10 @@ use crate::presentation::AppState;
 
 const COMPANION_PORT: u16 = 43821;
 const COMPANION_FALLBACK_PORT_CANDIDATES: [u16; 2] = [43822, 43823];
-const COMPANION_PORT_RECLAIM_GRACE_MS: u64 = 350;
 const COMPANION_SSE_RETRY_MS: u64 = 1500;
 const COMPANION_SSE_HEARTBEAT_SECS: u64 = 15;
+const COMPANION_MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
+const COMPANION_REQUEST_BODY_TIMEOUT_SECS: u64 = 45;
 const COMPANION_TOPIC: &str = "companion-ui";
 const COMPANION_ICON_128_PNG: &[u8] = include_bytes!("../../icons/128x128.png");
 const COMPANION_ICON_512_PNG: &[u8] = include_bytes!("../../icons/icon.png");
@@ -243,6 +243,7 @@ pub struct CompanionRuntime {
     pub security_token: Arc<RwLock<String>>,
     pub enabled: Arc<RwLock<bool>>,
     pub port: Arc<RwLock<Option<u16>>>,
+    pub instance_id: Arc<RwLock<Option<String>>>,
     pub action_cache: Arc<RwLock<CompanionActionIdempotencyCache>>,
 }
 
@@ -350,6 +351,11 @@ struct TokenQuery {
     token: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct IdentityQuery {
+    nonce: String,
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct CompanionAiRequestBody {
@@ -419,6 +425,7 @@ pub fn new_runtime() -> CompanionRuntime {
         security_token: Arc::new(RwLock::new(generate_security_token())),
         enabled: Arc::new(RwLock::new(false)),
         port: Arc::new(RwLock::new(None)),
+        instance_id: Arc::new(RwLock::new(None)),
         action_cache: Arc::new(RwLock::new(CompanionActionIdempotencyCache::default())),
     }
 }
@@ -603,9 +610,20 @@ pub async fn enable_mode(app_handle: &AppHandle) -> Result<CompanionServerStatus
         .port();
 
     let token = ensure_persisted_security_token(state.inner()).await?;
-    *runtime.enabled.write().await = true;
-    *runtime.port.write().await = Some(port);
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    // The listener is bound but is not serving yet. Fail closed if we cannot
+    // publish the actual endpoint to the private bridge.
+    crate::infrastructure::ConfigStore::save_companion_bridge_state(
+        &token,
+        Some(port),
+        Some(&instance_id),
+    )
+    .await
+    .map_err(|error| format!("Failed to publish Companion endpoint: {error}"))?;
     *runtime.security_token.write().await = token;
+    *runtime.instance_id.write().await = Some(instance_id);
+    *runtime.port.write().await = Some(port);
+    *runtime.enabled.write().await = true;
 
     let app_handle_for_task = app_handle.clone();
     let task = tauri::async_runtime::spawn(async move {
@@ -644,6 +662,13 @@ pub async fn disable_mode(app_handle: &AppHandle) -> Result<(), String> {
 
     *runtime.enabled.write().await = false;
     *runtime.port.write().await = None;
+    *runtime.instance_id.write().await = None;
+    let token = runtime.security_token.read().await.clone();
+    // A crashed process may leave metadata behind, but an ordinary Stop must
+    // explicitly revoke discovery. Identity verification also rejects staleness.
+    if let Err(error) = crate::infrastructure::ConfigStore::save_companion_bridge_token(&token).await {
+        log::warn!("Failed to invalidate Companion bridge on Stop: {error}");
+    }
 
     drop(_guard);
     let _ = publish_snapshot(app_handle).await;
@@ -818,6 +843,7 @@ async fn route_request(
             json_response(StatusCode::OK, body)
         }
         (Method::HEAD, "/health") | (Method::HEAD, "/api/health") => empty_response(StatusCode::OK),
+        (Method::GET, "/api/identity") => companion_identity_response(&app_handle, req.uri()).await,
         (Method::GET, "/manifest.webmanifest") => {
             companion_manifest_response(&app_handle, req.uri()).await
         }
@@ -1801,6 +1827,53 @@ fn companion_proxy_client() -> &'static reqwest::Client {
     })
 }
 
+/// The identity challenge never contains an access token. It proves that
+/// the listener at the discovered port knows the persisted private token.
+fn companion_identity_proof(token: &str, instance_id: &str, port: u16, nonce: &str) -> String {
+    // Bind proof to the *actual* listener port. A process occupying 43821
+    // cannot relay a valid identity challenge to Companion on fallback 43822.
+    let value = format!("hack-interview-companion/v2:{token}:{instance_id}:{port}:{nonce}");
+    hex::encode(Sha256::digest(value.as_bytes()))
+}
+
+async fn companion_identity_response(
+    app_handle: &AppHandle,
+    uri: &hyper::Uri,
+) -> Response<CompanionBody> {
+    let nonce = uri.query()
+        .and_then(|query| serde_urlencoded::from_str::<IdentityQuery>(query).ok())
+        .map(|query| query.nonce);
+    let Some(nonce) = nonce.filter(|value| {
+        value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) else {
+        return text_response(StatusCode::BAD_REQUEST, "Invalid identity nonce");
+    };
+
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "Companion unavailable");
+    };
+    let runtime = state.companion_runtime.read().await.clone();
+    if !*runtime.enabled.read().await {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "Companion disabled");
+    }
+    let Some(instance_id) = runtime.instance_id.read().await.clone() else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "Companion unavailable");
+    };
+    let token = runtime.security_token.read().await.clone();
+    let Some(port) = *runtime.port.read().await else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "Companion not bound");
+    };
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "service": "hack-interview-companion",
+            "schemaVersion": 2,
+            "instanceId": instance_id,
+            "proof": companion_identity_proof(&token, &instance_id, port, &nonce),
+        }).to_string(),
+    )
+}
+
 fn generate_security_token() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -1857,15 +1930,49 @@ fn has_json_content_type(headers: &hyper::HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+/// Avoid unbounded buffering of uploads from phone/extension clients. The
+/// limit applies to streamed bodies as well as a declared Content-Length.
+async fn collect_bounded_body<B>(
+    mut body: B,
+    max_bytes: usize,
+) -> Result<Vec<u8>, StatusCode>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+{
+    let mut collected = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| StatusCode::BAD_REQUEST)?;
+        if let Ok(chunk) = frame.into_data() {
+            if chunk.len() > max_bytes.saturating_sub(collected.len()) {
+                return Err(StatusCode::PAYLOAD_TOO_LARGE);
+            }
+            collected.extend_from_slice(&chunk);
+        }
+    }
+    Ok(collected)
+}
+
 async fn read_json_body<T: DeserializeOwned>(
     req: Request<Incoming>,
 ) -> Result<T, Response<CompanionBody>> {
-    let collected = req
-        .into_body()
-        .collect()
-        .await
-        .map_err(|_| text_response(StatusCode::BAD_REQUEST, "Failed to read request body"))?;
-    let bytes = collected.to_bytes();
+    let bytes = match timeout(
+        Duration::from_secs(COMPANION_REQUEST_BODY_TIMEOUT_SECS),
+        collect_bounded_body(req.into_body(), COMPANION_MAX_REQUEST_BODY_BYTES),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(StatusCode::PAYLOAD_TOO_LARGE)) => {
+            return Err(text_response(StatusCode::PAYLOAD_TOO_LARGE, "Request body too large"));
+        }
+        Ok(Err(_)) => {
+            return Err(text_response(StatusCode::BAD_REQUEST, "Failed to read request body"));
+        }
+        Err(_) => {
+            return Err(text_response(StatusCode::REQUEST_TIMEOUT, "Request body timed out"));
+        }
+    };
+
     if bytes.is_empty() {
         return serde_json::from_value(serde_json::json!({}))
             .map_err(|_| text_response(StatusCode::BAD_REQUEST, "Malformed JSON"));
@@ -1886,84 +1993,47 @@ async fn emit_invalidation(app_handle: &AppHandle, revision: String) {
     );
 }
 
+/// A port collision is not evidence that the listener belongs to this app.
+/// Never terminate a process merely because it is using our preferred port.
 async fn bind_listener() -> std::io::Result<TcpListener> {
-    match bind_companion_port(COMPANION_PORT).await {
-        Ok(listener) => return Ok(listener),
-        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
-            log::warn!(
-                "Companion fixed port 0.0.0.0:{} is busy; attempting to reclaim it",
-                COMPANION_PORT
-            );
-            match reclaim_companion_port(COMPANION_PORT).await {
-                Ok(pids) if pids.is_empty() => {
-                    log::warn!(
-                        "Companion fixed port {} is busy, but no listener PID was found",
-                        COMPANION_PORT
-                    );
-                }
-                Ok(pids) => {
-                    log::warn!(
-                        "Companion attempted to terminate listener PID(s) {:?} on port {}",
-                        pids,
-                        COMPANION_PORT
-                    );
-                }
-                Err(reclaim_err) => {
-                    log::warn!(
-                        "Companion failed to reclaim fixed port {}: {}",
-                        COMPANION_PORT,
-                        reclaim_err
-                    );
-                }
-            }
+    bind_listener_with_ports(COMPANION_PORT, &COMPANION_FALLBACK_PORT_CANDIDATES).await
+}
 
-            match bind_companion_port(COMPANION_PORT).await {
-                Ok(listener) => return Ok(listener),
-                Err(retry_err) => {
-                    log::warn!(
-                        "Companion fixed port 0.0.0.0:{} is still unavailable after reclaim: {}",
-                        COMPANION_PORT,
-                        retry_err
-                    );
-                }
-            }
-        }
-        Err(err) => {
-            log::warn!(
-                "Companion failed to bind fixed port 0.0.0.0:{}: {}",
-                COMPANION_PORT,
-                err
-            );
-        }
+async fn bind_listener_with_ports(
+    preferred_port: u16,
+    fallback_ports: &[u16],
+) -> std::io::Result<TcpListener> {
+    match bind_companion_port(preferred_port).await {
+        Ok(listener) => return Ok(listener),
+        Err(error) => log::warn!(
+            "Companion preferred port {} unavailable ({}); trying a fallback without interrupting its owner",
+            preferred_port,
+            error
+        ),
     }
 
-    for port in COMPANION_FALLBACK_PORT_CANDIDATES {
+    for &port in fallback_ports {
         match bind_companion_port(port).await {
             Ok(listener) => {
                 log::warn!(
-                    "Companion falling back to port {} because fixed port {} is unavailable",
+                    "Companion falling back to port {} because preferred port {} is unavailable",
                     port,
-                    COMPANION_PORT
+                    preferred_port
                 );
                 return Ok(listener);
             }
-            Err(err) => {
-                log::warn!("Companion failed to bind fallback port {}: {}", port, err);
+            Err(error) => {
+                log::warn!("Companion fallback port {} unavailable: {}", port, error);
             }
         }
     }
 
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .map_err(|err| {
-            log::error!("Companion failed to bind any available port: {}", err);
-            err
-        })?;
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     if let Ok(addr) = listener.local_addr() {
         log::warn!(
-            "Companion falling back to random port {} because fixed port {} is unavailable",
+            "Companion using OS-assigned port {} because preferred port {} is unavailable",
             addr.port(),
-            COMPANION_PORT
+            preferred_port
         );
     }
     Ok(listener)
@@ -1971,122 +2041,6 @@ async fn bind_listener() -> std::io::Result<TcpListener> {
 
 async fn bind_companion_port(port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await
-}
-
-async fn reclaim_companion_port(port: u16) -> Result<Vec<u32>, String> {
-    let pids = find_port_listener_pids(port)?;
-    if pids.is_empty() {
-        return Ok(pids);
-    }
-
-    terminate_port_listener_pids(&pids, false)?;
-    sleep(Duration::from_millis(COMPANION_PORT_RECLAIM_GRACE_MS)).await;
-
-    let remaining = find_port_listener_pids(port)?;
-    if !remaining.is_empty() {
-        terminate_port_listener_pids(&remaining, true)?;
-        sleep(Duration::from_millis(COMPANION_PORT_RECLAIM_GRACE_MS)).await;
-    }
-
-    Ok(pids)
-}
-
-#[cfg(unix)]
-fn find_port_listener_pids(port: u16) -> Result<Vec<u32>, String> {
-    let selector = format!("-iTCP:{}", port);
-    let output = Command::new("lsof")
-        .args(["-nP", "-t", selector.as_str(), "-sTCP:LISTEN"])
-        .output()
-        .map_err(|err| format!("failed to run lsof: {}", err))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pids = parse_process_ids(&stdout);
-
-    if output.status.success() || output.status.code() == Some(1) || !pids.is_empty() {
-        return Ok(pids);
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(format!("lsof failed: {}", stderr.trim()))
-}
-
-#[cfg(target_os = "windows")]
-fn find_port_listener_pids(port: u16) -> Result<Vec<u32>, String> {
-    let script = format!(
-        "Get-NetTCPConnection -LocalPort {} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique",
-        port
-    );
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script.as_str(),
-        ])
-        .output()
-        .map_err(|err| format!("failed to run powershell: {}", err))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pids = parse_process_ids(&stdout);
-
-    if output.status.success() {
-        return Ok(pids);
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(format!("powershell port lookup failed: {}", stderr.trim()))
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn find_port_listener_pids(_port: u16) -> Result<Vec<u32>, String> {
-    Err("port listener PID lookup is not supported on this platform".to_string())
-}
-
-#[cfg(unix)]
-fn terminate_port_listener_pids(pids: &[u32], force: bool) -> Result<(), String> {
-    let signal = if force { "-KILL" } else { "-TERM" };
-    for pid in pids {
-        let status = Command::new("kill")
-            .arg(signal)
-            .arg(pid.to_string())
-            .status()
-            .map_err(|err| format!("failed to run kill for PID {}: {}", pid, err))?;
-        if !status.success() {
-            log::warn!("kill {} {} exited with status {}", signal, pid, status);
-        }
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn terminate_port_listener_pids(pids: &[u32], _force: bool) -> Result<(), String> {
-    for pid in pids {
-        let status = Command::new("taskkill")
-            .arg("/PID")
-            .arg(pid.to_string())
-            .arg("/T")
-            .arg("/F")
-            .status()
-            .map_err(|err| format!("failed to run taskkill for PID {}: {}", pid, err))?;
-        if !status.success() {
-            log::warn!("taskkill /PID {} /T /F exited with status {}", pid, status);
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn terminate_port_listener_pids(_pids: &[u32], _force: bool) -> Result<(), String> {
-    Err("port listener termination is not supported on this platform".to_string())
-}
-
-fn parse_process_ids(output: &str) -> Vec<u32> {
-    let mut pids = output
-        .split_whitespace()
-        .filter_map(|value| value.parse::<u32>().ok())
-        .collect::<Vec<_>>();
-    pids.sort_unstable();
-    pids.dedup();
-    pids
 }
 
 fn sse_snapshot_bytes(snapshot: &CompanionSnapshotEnvelope) -> Bytes {
@@ -2417,6 +2371,75 @@ fn is_usable_companion_ipv4(ip: Ipv4Addr) -> bool {
         || ip.is_link_local()
         || ip.is_multicast()
         || ip.is_broadcast())
+}
+
+#[cfg(test)]
+mod companion_request_body_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn streamed_request_is_rejected_when_the_total_exceeds_the_limit() {
+        let chunks = stream::iter([
+            Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"123"))),
+            Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"456"))),
+        ]);
+        let body = StreamBody::new(chunks);
+
+        let result = collect_bounded_body(body, 5).await;
+
+        assert!(matches!(result, Err(StatusCode::PAYLOAD_TOO_LARGE)));
+    }
+
+    #[tokio::test]
+    async fn request_exactly_at_limit_is_accepted() {
+        let body = Full::new(Bytes::from_static(br#"{"ok":true}"#));
+        let bytes = collect_bounded_body(body, 11).await.unwrap();
+
+        assert_eq!(&bytes, br#"{"ok":true}"#);
+    }
+}
+
+#[cfg(test)]
+mod companion_identity_tests {
+    use super::*;
+
+    #[test]
+    fn proof_binds_nonce_token_and_runtime_instance() {
+        let proof = companion_identity_proof("private-token", "instance-a", 43822, "abcd1234abcd1234abcd1234abcd1234");
+        assert_eq!(proof.len(), 64);
+        assert!(proof.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(proof, companion_identity_proof("private-token", "instance-b", 43822, "abcd1234abcd1234abcd1234abcd1234"));
+        assert_ne!(proof, companion_identity_proof("other-token", "instance-a", 43822, "abcd1234abcd1234abcd1234abcd1234"));
+        assert_ne!(proof, companion_identity_proof("private-token", "instance-a", 43821, "abcd1234abcd1234abcd1234abcd1234"));
+        assert_ne!(proof, companion_identity_proof("private-token", "instance-a", 43822, "ffff1234abcd1234abcd1234abcd1234"));
+    }
+}
+
+#[cfg(test)]
+mod companion_port_fallback_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn occupied_preferred_port_falls_back_without_interrupting_its_owner() {
+        let original_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+        let occupied_port = original_listener.local_addr().unwrap().port();
+
+        // This is a real TCP socket: the original listener stays alive and
+        // reachable after the companion has selected a replacement port.
+        let companion_listener = bind_listener_with_ports(occupied_port, &[])
+            .await
+            .expect("select an OS-assigned fallback port");
+        assert_ne!(companion_listener.local_addr().unwrap().port(), occupied_port);
+
+        let connection = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, occupied_port))
+            .await
+            .expect("existing application must remain reachable");
+        let (_, _) = timeout(Duration::from_secs(2), original_listener.accept())
+            .await
+            .expect("existing listener must not be interrupted")
+            .expect("existing listener accepts TCP");
+        drop(connection);
+    }
 }
 
 #[cfg(test)]

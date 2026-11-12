@@ -1,0 +1,42 @@
+name: Application reliability checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-reliability-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend-and-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      # The workspace depends on a sibling build of @statesync packages.
+      - name: Build state-sync dependency
+        run: |
+          git clone --depth 1 https://github.com/777genius/state-sync.git ../state-sync
+          (cd ../state-sync && pnpm install --frozen-lockfile && pnpm build)
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: TypeScript and Vue typecheck
+        run: pnpm typecheck
+      - name: Run entire frontend regression suite
+        run: pnpm test:run
+      - name: Build production frontend
+        run: pnpm build
+      - name: Cursor extension → real local HTTP capture integration E2E
+        run: pnpm cursor-extension:e2e
