@@ -12,8 +12,8 @@ import {
   toneForCompanionFailure,
 } from './connectionErrors';
 import { isCompanionPageVisible } from './pageVisibility';
-import { createCompanionReconnectScheduler } from './reconnectScheduler';
-import { shouldApplyCompanionSnapshot } from './snapshotEpoch';
+import { createCompanionReconnectScheduler, createCompanionStreamWatchdog } from './reconnectScheduler';
+import { isCompanionSnapshotEnvelope, shouldApplyCompanionSnapshot } from './snapshotEpoch';
 import {
   companionInstallHint,
   createCompanionRequestId,
@@ -98,6 +98,13 @@ const reconnectScheduler = createCompanionReconnectScheduler(
     && (typeof navigator === 'undefined' || navigator.onLine !== false)
   ),
 );
+const streamWatchdog = createCompanionStreamWatchdog(() => {
+  if (!eventSource || componentUnmounted || !pageVisible()) return;
+  disposeEventSource();
+  setPwaLiveDiagnostic('warn', 'SSE heartbeat не поступал, восстанавливаю соединение');
+  setConnection('reconnecting', 'Поток обновлений перестал отвечать, переподключаюсь...');
+  reconnectScheduler.schedule();
+});
 
 const feedMessages = computed(() => buildCompanionConversationFeedMessages(snapshot.value?.data));
 const selectedMessageIdSet = computed(() => new Set(selectedMessageIds.value));
@@ -563,6 +570,7 @@ function abortForHiddenLifecycle(): void {
 }
 
 function disposeEventSource(): void {
+  streamWatchdog.stop();
   const source = eventSource;
   eventSource = null;
   if (!source) return;
@@ -621,8 +629,8 @@ async function refreshSnapshot(): Promise<void> {
   if (response.status === 401 || response.status === 403) {
     throw new Error('Ссылка устарела или companion перезапустился. Открой QR из окна приложения заново.');
   }
-  if (!response.ok || !json) {
-    throw new Error(compactResponseError(raw, `Не удалось получить состояние: ${response.status}`));
+  if (!response.ok || !isCompanionSnapshotEnvelope(json)) {
+    throw new Error(compactResponseError(raw, `Не удалось получить корректное состояние Companion: ${response.status}`));
   }
 
   await applySnapshot(json);
@@ -723,6 +731,9 @@ async function sendAction(
     }
 
     if (json?.snapshot) {
+      if (!isCompanionSnapshotEnvelope(json.snapshot)) {
+        throw new Error('Companion вернул некорректное состояние после команды');
+      }
       await applySnapshot(json.snapshot);
     }
 
@@ -903,9 +914,16 @@ function connectEvents(): void {
   setPwaLiveDiagnostic('pending', 'Live updates подключаются');
   const source = new EventSource(`/events?token=${encodeURIComponent(token)}`);
   eventSource = source;
+  streamWatchdog.start();
+
+  source.addEventListener('heartbeat', () => {
+    if (eventSource !== source) return;
+    streamWatchdog.heartbeat();
+  });
 
   source.onopen = () => {
     if (eventSource !== source) return;
+    streamWatchdog.heartbeat();
     reconnectScheduler.reset();
     setPwaLiveDiagnostic('ok', 'Live updates активны');
     setConnection('connected', 'Связь с компьютером активна');
@@ -918,9 +936,13 @@ function connectEvents(): void {
     if (eventSource !== source) return;
     void (async () => {
       try {
-        const next = JSON.parse(event.data) as TauriSnapshotEnvelope<CompanionSnapshotData>;
+        const next: unknown = JSON.parse(event.data);
+        if (!isCompanionSnapshotEnvelope(next)) {
+          throw new Error('Companion прислал некорректный SSE snapshot');
+        }
         await applySnapshot(next);
         if (eventSource !== source) return;
+        streamWatchdog.heartbeat();
         reconnectScheduler.reset();
         setConnection('connected', 'Связь с компьютером активна');
         if (!actionInFlight.value) {
