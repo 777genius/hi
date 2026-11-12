@@ -78,6 +78,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
   TestEventSource.instances.length = 0;
+  Reflect.deleteProperty(document, 'visibilityState');
   window.history.replaceState({}, '', originalUrl || '/');
 });
 
@@ -188,6 +189,71 @@ it('keeps an ambiguous POST warning after another failed reconnect without repla
   expect(mountPoint.textContent).toContain('Не удалось подтвердить отправку');
 
   await vi.advanceTimersByTimeAsync(3000);
+  await flushUi();
+  expect(mountPoint.textContent).toContain('Не удалось подтвердить отправку');
+  expect(historyClearPosts).toBe(1);
+});
+
+
+it('warns when backgrounding aborts a non-idempotent POST with an unknown desktop result', async () => {
+  vi.useFakeTimers();
+  window.history.replaceState({}, '', '/companion.html?token=mobile-test-token');
+  vi.stubGlobal('EventSource', TestEventSource);
+  let visibility = 'visible';
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => visibility,
+  });
+
+  let historyClearPosts = 0;
+  let abortedPosts = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (String(url).startsWith('/api/state')) {
+      const body = snapshot(2);
+      return {
+        ok: true, status: 200,
+        text: async () => JSON.stringify(body),
+        json: async () => body,
+      } as Response;
+    }
+    if (String(url) === '/api/history/clear') {
+      historyClearPosts += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) return reject(new Error('POST missing abort signal'));
+        signal.addEventListener('abort', () => {
+          abortedPosts += 1;
+          reject(new DOMException('Aborted', 'AbortError'));
+        }, { once: true });
+      });
+    }
+    return {
+      ok: true, status: 200,
+      text: async () => '',
+      json: async () => ({}),
+    } as Response;
+  }));
+
+  mountPoint = document.createElement('div');
+  document.body.appendChild(mountPoint);
+  mountedApp = createApp(CompanionApp);
+  mountedApp.mount(mountPoint);
+  await flushUi();
+
+  const clearHistory = mountPoint.querySelector<HTMLButtonElement>('button[title="Очистить историю"]');
+  expect(clearHistory?.disabled).toBe(false);
+  clearHistory?.click();
+  await flushUi();
+  expect(historyClearPosts).toBe(1);
+
+  visibility = 'hidden';
+  document.dispatchEvent(new Event('visibilitychange'));
+  await flushUi();
+  expect(abortedPosts).toBe(1);
+  expect(mountPoint.textContent).toContain('Не удалось подтвердить отправку');
+
+  visibility = 'visible';
+  document.dispatchEvent(new Event('visibilitychange'));
   await flushUi();
   expect(mountPoint.textContent).toContain('Не удалось подтвердить отправку');
   expect(historyClearPosts).toBe(1);

@@ -761,7 +761,14 @@ async function sendAction(
     const kind = classifyCompanionFailureMessage(message);
 
     if (kind === 'hidden') {
-      setStatus('');
+      // Backgrounding aborts the response, not necessarily the desktop action.
+      // Never make a non-idempotent POST look safely unsent after wake.
+      if (!retryOnRecoverable) {
+        unconfirmedActionWarning = true;
+        setStatus(UNCONFIRMED_ACTION_WARNING, 'warn');
+      } else {
+        setStatus('');
+      }
       return false;
     }
 
