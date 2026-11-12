@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { companionRetryDelayMs, createCompanionReconnectScheduler } from './reconnectScheduler';
+import { companionRetryDelayMs, createCompanionReconnectScheduler, createCompanionStreamWatchdog } from './reconnectScheduler';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -71,5 +71,40 @@ describe('Companion reconnect lifecycle', () => {
     scheduler.schedule();
     expect(reconnect).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('Companion live SSE watchdog', () => {
+  it('fires after a silent half-open connection but not while receiving heartbeats', () => {
+    vi.useFakeTimers();
+    const onStall = vi.fn();
+    const watchdog = createCompanionStreamWatchdog(onStall);
+    watchdog.start();
+
+    vi.advanceTimersByTime(30000);
+    watchdog.heartbeat();
+    vi.advanceTimersByTime(40000);
+    expect(onStall).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(10000);
+    expect(onStall).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stops on hidden page and after an SSE reconnect', () => {
+    vi.useFakeTimers();
+    const onStall = vi.fn();
+    const watchdog = createCompanionStreamWatchdog(onStall);
+    watchdog.start();
+    vi.advanceTimersByTime(32000);
+    watchdog.stop();
+    vi.advanceTimersByTime(120000);
+    expect(onStall).not.toHaveBeenCalled();
+    watchdog.start();
+    vi.advanceTimersByTime(15000);
+    watchdog.heartbeat();
+    vi.advanceTimersByTime(35000);
+    expect(onStall).not.toHaveBeenCalled();
+    watchdog.stop();
   });
 });
