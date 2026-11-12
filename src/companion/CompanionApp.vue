@@ -95,7 +95,8 @@ const reconnectScheduler = createCompanionReconnectScheduler(
     && companionAvailable
     && connectionState.value !== 'disconnected'
     && pageVisible()
-    && (typeof navigator === 'undefined' || navigator.onLine !== false)
+    // navigator.onLine describes WAN connectivity, not reachability of our
+    // local Wi-Fi host. Retry LAN HTTP even without Internet access.
   ),
 );
 const streamWatchdog = createCompanionStreamWatchdog(() => {
@@ -291,11 +292,17 @@ async function applySnapshot(next: TauriSnapshotEnvelope<CompanionSnapshotData>)
 
   const shouldStickBottom = isNearBottom();
   const nextInstanceId = next.data?.controls?.instanceId ?? null;
-  const revisionAdvanced = nextInstanceId !== currentInstanceId.value
-    || nextRevision > currentRevision.value;
+  const epochChanged = !!currentInstanceId.value && !!nextInstanceId
+    && currentInstanceId.value !== nextInstanceId;
+  const revisionAdvanced = epochChanged || nextRevision > currentRevision.value;
   snapshot.value = next;
   currentRevision.value = nextRevision;
   currentInstanceId.value = nextInstanceId;
+  if (epochChanged) {
+    // IDs and sequence numbers can be reused by the new desktop process.
+    // Never send an old selection as context for an unrelated new message.
+    selectedMessageIds.value = [];
+  }
 
   if (shouldStickBottom && revisionAdvanced) {
     await stickToBottomIfNeeded();
@@ -584,10 +591,8 @@ async function requestJson<T>(path: string, init: RequestInit = {}, timeoutMs = 
   json: T | null;
   raw: string;
 }> {
-  if (typeof navigator !== 'undefined' && 'onLine' in navigator && navigator.onLine === false) {
-    throw new Error('Телефон офлайн');
-  }
-
+  // navigator.onLine may be false while the desktop on the same LAN is
+  // still reachable. Let the actual HTTP request and timeout decide.
   const controller = new AbortController();
   requestControllers.add(controller);
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -1005,16 +1010,11 @@ function onOnline(): void {
 }
 
 function onOffline(): void {
-  reconnectScheduler.cancel();
-  abortInFlightRequests();
-  disposeEventSource();
-  if (!pageVisible()) {
-    return;
-  }
-  setConnection('reconnecting', 'Сеть пропала. Жду восстановления...');
-  if (!actionInFlight.value) {
-    setStatus('Похоже, телефон временно офлайн. После возврата сети состояние обновится автоматически.', 'warn');
-  }
+  // Browser "offline" may mean no public Internet while Wi-Fi/LAN still
+  // works. Do not abort a working stream or an in-flight local POST.
+  if (!pageVisible() || connectionState.value === 'connected') return;
+  setConnection('reconnecting', 'Проверяю связь с компьютером по локальной сети...');
+  reconnectScheduler.schedule();
 }
 
 function onPageShow(): void {
@@ -1063,12 +1063,7 @@ async function bootstrap(): Promise<void> {
     return;
   }
 
-  if (typeof navigator !== 'undefined' && 'onLine' in navigator && navigator.onLine === false) {
-    setConnection('reconnecting', 'Телефон офлайн. Жду восстановления сети...');
-    setStatus('Подключи телефон к сети, и companion попробует восстановиться автоматически.', 'warn');
-    return;
-  }
-
+  // The computer can be reachable over local Wi-Fi even without WAN.
   try {
     await resyncConnection({ reconnect: true, successStatusText: 'Связь с компьютером активна' });
   } catch (error) {
