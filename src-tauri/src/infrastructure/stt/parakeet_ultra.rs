@@ -20,6 +20,10 @@ const MODEL_FILE: &str = "parakeet-ultra-Q8_0.gguf";
 const MODEL_SHA256: &str = "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59";
 const JOB_QUEUE_CAPACITY: usize = 32;
 const STOP_TAIL_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+// The first inference may lazily compile Metal shaders or fall back to CPU on
+// virtualized macOS runners. A 10s Stop timeout lost valid final utterances.
+// Keep a finite deadline, but allow genuine ongoing local decode to drain.
+const STOP_DECODE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn enqueue_final_tail(
     tx: &mpsc::Sender<Utterance>,
@@ -327,7 +331,7 @@ impl SttProvider for ParakeetUltraProvider {
         }
         if let Some(mut worker) = self.worker.take() {
             match tokio::time::timeout(
-                std::time::Duration::from_secs(10),
+                STOP_DECODE_DRAIN_TIMEOUT,
                 &mut worker,
             ).await {
                 Ok(Ok(result)) => result?,
@@ -340,7 +344,7 @@ impl SttProvider for ParakeetUltraProvider {
                     self.cancelled.store(true, Ordering::Release);
                     worker.abort();
                     return Err(SttError::Processing(
-                        "Local Parakeet did not finish decoding within 10 seconds".into()
+                        "Local Parakeet did not finish draining within 30 seconds".into()
                     ));
                 }
             }
