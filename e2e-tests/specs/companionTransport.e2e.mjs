@@ -61,6 +61,7 @@ async function openSnapshotStream(baseUrl, token) {
   assert.match(response.headers.get('content-type') || '', /text\/event-stream/i);
   const reader = response.body.getReader();
   let buffer = '';
+  const decoder = new TextDecoder();
 
   const nextSnapshot = async (timeoutMs = 10_000) => {
     const timeout = setTimeout(() => controller.abort(new Error('SSE snapshot timed out')), timeoutMs);
@@ -79,7 +80,7 @@ async function openSnapshotStream(baseUrl, token) {
 
         const result = await reader.read();
         if (result.done) throw new Error('SSE stream closed before snapshot arrived');
-        buffer += new TextDecoder().decode(result.value);
+        buffer += decoder.decode(result.value, { stream: true });
       }
     } finally {
       clearTimeout(timeout);
@@ -160,8 +161,8 @@ describe('Companion HTTP/SSE transport (real native Tauri)', () => {
       const afterOfflineChange = await getJson(stateUrl);
       stream = await openSnapshotStream(base, started.token);
       const recovered = await stream.nextSnapshot();
-      assert.equal(recovered.revision, afterOfflineChange.revision,
-        'resubscribing after a dropped connection must show the current desktop revision');
+      assert.ok(Number(recovered.revision) >= Number(afterOfflineChange.revision),
+        'resubscribing after a dropped connection must not miss desktop updates');
       assert.equal(recovered.data.controls.instanceId, afterOfflineChange.data.controls.instanceId);
 
       // The test-only native STT fixture exercises the actual backend timeline

@@ -30,6 +30,8 @@ export function isCompanionSnapshotEnvelope(value: unknown): value is CompanionS
     && typeof data === 'object'
     && !!data.controls
     && typeof data.controls.companionModeEnabled === 'boolean'
+    && !!data.microphone
+    && typeof data.microphone.appMuted === 'boolean'
     && !!data.recording
     && typeof data.recording.status === 'string'
     && Array.isArray(data.timeline);

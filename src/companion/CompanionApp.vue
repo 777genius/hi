@@ -85,6 +85,9 @@ let statusTimer: number | null = null;
 let resyncPromise: Promise<void> | null = null;
 const requestControllers = new Set<AbortController>();
 let componentUnmounted = false;
+// A timed-out POST may have succeeded. Keep the notice visible after SSE
+// recovers, until a subsequent user action deliberately replaces it.
+let unconfirmedActionWarning = false;
 const reconnectScheduler = createCompanionReconnectScheduler(
   () => {
     void resyncConnection({ reconnect: true }).catch((error) => {
@@ -318,6 +321,7 @@ function clearStatusTimer(): void {
 }
 
 function setStatus(text: string, tone: StatusTone = ''): void {
+  if (!text && unconfirmedActionWarning) return;
   clearStatusTimer();
   actionStatusText.value = text;
   actionStatusTone.value = tone;
@@ -711,6 +715,7 @@ async function sendAction(
   let originalError: unknown = null;
 
   actionInFlight.value = true;
+  unconfirmedActionWarning = false;
   setStatus('Выполняю действие...', 'pending');
 
   try {
@@ -765,6 +770,9 @@ async function sendAction(
       }
     }
 
+    if (!retryOnRecoverable && shouldRecoverCompanionConnection(kind)) {
+      unconfirmedActionWarning = true;
+    }
     setStatus(
       !retryOnRecoverable && shouldRecoverCompanionConnection(kind)
         ? 'Не удалось подтвердить отправку. После восстановления связи проверь ленту перед повтором.'

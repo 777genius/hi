@@ -39,6 +39,7 @@ describe('Companion transport envelope validation', () => {
     data: {
       controls: { companionModeEnabled: true, instanceId: 'server-a' },
       recording: { status: 'Recording' },
+      microphone: { appMuted: false },
       timeline: [],
     },
   };
@@ -50,5 +51,7 @@ describe('Companion transport envelope validation', () => {
     expect(isCompanionSnapshotEnvelope({ ...valid, revision: 'broken' })).toBe(false);
     expect(isCompanionSnapshotEnvelope({ ...valid, revision: '-1' })).toBe(false);
     expect(isCompanionSnapshotEnvelope({ ...valid, data: { ...valid.data, timeline: null } })).toBe(false);
+    expect(isCompanionSnapshotEnvelope({ ...valid, data: { ...valid.data, microphone: null } })).toBe(false);
+    expect(isCompanionSnapshotEnvelope({ ...valid, data: { ...valid.data, microphone: { appMuted: 'no' } } })).toBe(false);
   });
 });
