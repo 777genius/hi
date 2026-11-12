@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
-#[cfg(any(unix, target_os = "windows"))]
-use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -19,7 +17,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpListener;
 use tokio::sync::{watch, RwLock};
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 
 use crate::domain::RecordingStatus;
 use crate::presentation::events::{
@@ -30,7 +28,6 @@ use crate::presentation::AppState;
 
 const COMPANION_PORT: u16 = 43821;
 const COMPANION_FALLBACK_PORT_CANDIDATES: [u16; 2] = [43822, 43823];
-const COMPANION_PORT_RECLAIM_GRACE_MS: u64 = 350;
 const COMPANION_SSE_RETRY_MS: u64 = 1500;
 const COMPANION_SSE_HEARTBEAT_SECS: u64 = 15;
 const COMPANION_TOPIC: &str = "companion-ui";
@@ -1886,84 +1883,47 @@ async fn emit_invalidation(app_handle: &AppHandle, revision: String) {
     );
 }
 
+/// A port collision is not evidence that the listener belongs to this app.
+/// Never terminate a process merely because it is using our preferred port.
 async fn bind_listener() -> std::io::Result<TcpListener> {
-    match bind_companion_port(COMPANION_PORT).await {
-        Ok(listener) => return Ok(listener),
-        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
-            log::warn!(
-                "Companion fixed port 0.0.0.0:{} is busy; attempting to reclaim it",
-                COMPANION_PORT
-            );
-            match reclaim_companion_port(COMPANION_PORT).await {
-                Ok(pids) if pids.is_empty() => {
-                    log::warn!(
-                        "Companion fixed port {} is busy, but no listener PID was found",
-                        COMPANION_PORT
-                    );
-                }
-                Ok(pids) => {
-                    log::warn!(
-                        "Companion attempted to terminate listener PID(s) {:?} on port {}",
-                        pids,
-                        COMPANION_PORT
-                    );
-                }
-                Err(reclaim_err) => {
-                    log::warn!(
-                        "Companion failed to reclaim fixed port {}: {}",
-                        COMPANION_PORT,
-                        reclaim_err
-                    );
-                }
-            }
+    bind_listener_with_ports(COMPANION_PORT, &COMPANION_FALLBACK_PORT_CANDIDATES).await
+}
 
-            match bind_companion_port(COMPANION_PORT).await {
-                Ok(listener) => return Ok(listener),
-                Err(retry_err) => {
-                    log::warn!(
-                        "Companion fixed port 0.0.0.0:{} is still unavailable after reclaim: {}",
-                        COMPANION_PORT,
-                        retry_err
-                    );
-                }
-            }
-        }
-        Err(err) => {
-            log::warn!(
-                "Companion failed to bind fixed port 0.0.0.0:{}: {}",
-                COMPANION_PORT,
-                err
-            );
-        }
+async fn bind_listener_with_ports(
+    preferred_port: u16,
+    fallback_ports: &[u16],
+) -> std::io::Result<TcpListener> {
+    match bind_companion_port(preferred_port).await {
+        Ok(listener) => return Ok(listener),
+        Err(error) => log::warn!(
+            "Companion preferred port {} unavailable ({}); trying a fallback without interrupting its owner",
+            preferred_port,
+            error
+        ),
     }
 
-    for port in COMPANION_FALLBACK_PORT_CANDIDATES {
+    for &port in fallback_ports {
         match bind_companion_port(port).await {
             Ok(listener) => {
                 log::warn!(
-                    "Companion falling back to port {} because fixed port {} is unavailable",
+                    "Companion falling back to port {} because preferred port {} is unavailable",
                     port,
-                    COMPANION_PORT
+                    preferred_port
                 );
                 return Ok(listener);
             }
-            Err(err) => {
-                log::warn!("Companion failed to bind fallback port {}: {}", port, err);
+            Err(error) => {
+                log::warn!("Companion fallback port {} unavailable: {}", port, error);
             }
         }
     }
 
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .map_err(|err| {
-            log::error!("Companion failed to bind any available port: {}", err);
-            err
-        })?;
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     if let Ok(addr) = listener.local_addr() {
         log::warn!(
-            "Companion falling back to random port {} because fixed port {} is unavailable",
+            "Companion using OS-assigned port {} because preferred port {} is unavailable",
             addr.port(),
-            COMPANION_PORT
+            preferred_port
         );
     }
     Ok(listener)
@@ -1971,122 +1931,6 @@ async fn bind_listener() -> std::io::Result<TcpListener> {
 
 async fn bind_companion_port(port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await
-}
-
-async fn reclaim_companion_port(port: u16) -> Result<Vec<u32>, String> {
-    let pids = find_port_listener_pids(port)?;
-    if pids.is_empty() {
-        return Ok(pids);
-    }
-
-    terminate_port_listener_pids(&pids, false)?;
-    sleep(Duration::from_millis(COMPANION_PORT_RECLAIM_GRACE_MS)).await;
-
-    let remaining = find_port_listener_pids(port)?;
-    if !remaining.is_empty() {
-        terminate_port_listener_pids(&remaining, true)?;
-        sleep(Duration::from_millis(COMPANION_PORT_RECLAIM_GRACE_MS)).await;
-    }
-
-    Ok(pids)
-}
-
-#[cfg(unix)]
-fn find_port_listener_pids(port: u16) -> Result<Vec<u32>, String> {
-    let selector = format!("-iTCP:{}", port);
-    let output = Command::new("lsof")
-        .args(["-nP", "-t", selector.as_str(), "-sTCP:LISTEN"])
-        .output()
-        .map_err(|err| format!("failed to run lsof: {}", err))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pids = parse_process_ids(&stdout);
-
-    if output.status.success() || output.status.code() == Some(1) || !pids.is_empty() {
-        return Ok(pids);
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(format!("lsof failed: {}", stderr.trim()))
-}
-
-#[cfg(target_os = "windows")]
-fn find_port_listener_pids(port: u16) -> Result<Vec<u32>, String> {
-    let script = format!(
-        "Get-NetTCPConnection -LocalPort {} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique",
-        port
-    );
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script.as_str(),
-        ])
-        .output()
-        .map_err(|err| format!("failed to run powershell: {}", err))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pids = parse_process_ids(&stdout);
-
-    if output.status.success() {
-        return Ok(pids);
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(format!("powershell port lookup failed: {}", stderr.trim()))
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn find_port_listener_pids(_port: u16) -> Result<Vec<u32>, String> {
-    Err("port listener PID lookup is not supported on this platform".to_string())
-}
-
-#[cfg(unix)]
-fn terminate_port_listener_pids(pids: &[u32], force: bool) -> Result<(), String> {
-    let signal = if force { "-KILL" } else { "-TERM" };
-    for pid in pids {
-        let status = Command::new("kill")
-            .arg(signal)
-            .arg(pid.to_string())
-            .status()
-            .map_err(|err| format!("failed to run kill for PID {}: {}", pid, err))?;
-        if !status.success() {
-            log::warn!("kill {} {} exited with status {}", signal, pid, status);
-        }
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn terminate_port_listener_pids(pids: &[u32], _force: bool) -> Result<(), String> {
-    for pid in pids {
-        let status = Command::new("taskkill")
-            .arg("/PID")
-            .arg(pid.to_string())
-            .arg("/T")
-            .arg("/F")
-            .status()
-            .map_err(|err| format!("failed to run taskkill for PID {}: {}", pid, err))?;
-        if !status.success() {
-            log::warn!("taskkill /PID {} /T /F exited with status {}", pid, status);
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn terminate_port_listener_pids(_pids: &[u32], _force: bool) -> Result<(), String> {
-    Err("port listener termination is not supported on this platform".to_string())
-}
-
-fn parse_process_ids(output: &str) -> Vec<u32> {
-    let mut pids = output
-        .split_whitespace()
-        .filter_map(|value| value.parse::<u32>().ok())
-        .collect::<Vec<_>>();
-    pids.sort_unstable();
-    pids.dedup();
-    pids
 }
 
 fn sse_snapshot_bytes(snapshot: &CompanionSnapshotEnvelope) -> Bytes {
@@ -2417,6 +2261,33 @@ fn is_usable_companion_ipv4(ip: Ipv4Addr) -> bool {
         || ip.is_link_local()
         || ip.is_multicast()
         || ip.is_broadcast())
+}
+
+#[cfg(test)]
+mod companion_port_fallback_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn occupied_preferred_port_falls_back_without_interrupting_its_owner() {
+        let original_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+        let occupied_port = original_listener.local_addr().unwrap().port();
+
+        // This is a real TCP socket: the original listener stays alive and
+        // reachable after the companion has selected a replacement port.
+        let companion_listener = bind_listener_with_ports(occupied_port, &[])
+            .await
+            .expect("select an OS-assigned fallback port");
+        assert_ne!(companion_listener.local_addr().unwrap().port(), occupied_port);
+
+        let connection = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, occupied_port))
+            .await
+            .expect("existing application must remain reachable");
+        let (_, _) = timeout(Duration::from_secs(2), original_listener.accept())
+            .await
+            .expect("existing listener must not be interrupted")
+            .expect("existing listener accepts TCP");
+        drop(connection);
+    }
 }
 
 #[cfg(test)]
