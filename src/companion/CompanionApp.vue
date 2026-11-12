@@ -52,6 +52,7 @@ const ACTION_REQUEST_TIMEOUT_MS = 30000;
 const PWA_CHECK_TIMEOUT_MS = 4500;
 const PWA_INSTALL_HINT_DISMISSED_KEY = 'companionPwaInstallHintDismissed';
 const OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY = 'openaiResponsesWebSearchEnabled';
+const UNCONFIRMED_ACTION_WARNING = 'Не удалось подтвердить отправку. После восстановления связи проверь ленту перед повтором.';
 
 const companionFeedRef = ref<{ scrollEl: HTMLElement | null } | null>(null);
 const snapshot = ref<TauriSnapshotEnvelope<CompanionSnapshotData> | null>(null);
@@ -321,7 +322,9 @@ function clearStatusTimer(): void {
 }
 
 function setStatus(text: string, tone: StatusTone = ''): void {
-  if (!text && unconfirmedActionWarning) return;
+  // A later transient reconnect error must not hide an ambiguous POST result.
+  // Explicit fatal errors can still replace it (e.g. an expired token).
+  if (unconfirmedActionWarning && text !== UNCONFIRMED_ACTION_WARNING && tone !== 'error') return;
   clearStatusTimer();
   actionStatusText.value = text;
   actionStatusTone.value = tone;
@@ -775,7 +778,7 @@ async function sendAction(
     }
     setStatus(
       !retryOnRecoverable && shouldRecoverCompanionConnection(kind)
-        ? 'Не удалось подтвердить отправку. После восстановления связи проверь ленту перед повтором.'
+        ? UNCONFIRMED_ACTION_WARNING
         : message,
       toneForCompanionFailure(kind),
     );

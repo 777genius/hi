@@ -133,3 +133,62 @@ it('CompanionApp retries its initial GET and restores SSE after disconnect witho
   expect(mountPoint.textContent).toContain('Restored from desktop');
   expect(recovered.closed).toBe(false);
 });
+
+
+it('keeps an ambiguous POST warning after another failed reconnect without replaying history clear', async () => {
+  vi.useFakeTimers();
+  window.history.replaceState({}, '', '/companion.html?token=mobile-test-token');
+  vi.stubGlobal('EventSource', TestEventSource);
+  let stateRequests = 0;
+  let historyClearPosts = 0;
+  let failNextState = false;
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    if (String(url).startsWith('/api/state')) {
+      stateRequests += 1;
+      if (failNextState) {
+        failNextState = false;
+        throw new TypeError('Failed to fetch');
+      }
+      const body = snapshot(stateRequests);
+      return {
+        ok: true, status: 200,
+        text: async () => JSON.stringify(body),
+        json: async () => body,
+      } as Response;
+    }
+    if (String(url) === '/api/history/clear') {
+      historyClearPosts += 1;
+      throw new TypeError('Failed to fetch'); // The desktop may still have cleared history.
+    }
+    return {
+      ok: true, status: 200,
+      text: async () => '',
+      json: async () => ({}),
+    } as Response;
+  }));
+
+  mountPoint = document.createElement('div');
+  document.body.appendChild(mountPoint);
+  mountedApp = createApp(CompanionApp);
+  mountedApp.mount(mountPoint);
+  await flushUi();
+
+  const clearHistory = mountPoint.querySelector<HTMLButtonElement>('button[title="Очистить историю"]');
+  expect(clearHistory?.disabled).toBe(false);
+  const initialStateRequests = stateRequests;
+  failNextState = true;
+  clearHistory?.click();
+  await flushUi();
+  expect(historyClearPosts).toBe(1);
+  expect(mountPoint.textContent).toContain('Не удалось подтвердить отправку');
+
+  await vi.advanceTimersByTimeAsync(1500);
+  await flushUi();
+  expect(stateRequests).toBeGreaterThan(initialStateRequests);
+  expect(mountPoint.textContent).toContain('Не удалось подтвердить отправку');
+
+  await vi.advanceTimersByTimeAsync(3000);
+  await flushUi();
+  expect(mountPoint.textContent).toContain('Не удалось подтвердить отправку');
+  expect(historyClearPosts).toBe(1);
+});
