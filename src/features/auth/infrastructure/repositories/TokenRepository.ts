@@ -110,6 +110,9 @@ export class TokenRepository implements ITokenRepository {
     // В Tauri сначала читаем Rust SoT (device_id + session).
     if (isTauri) {
       const snap = await readAuthSessionFromRust();
+      // A failed IPC read is not proof of logout. Preserve the local fallback
+      // until the Rust source-of-truth can be reached again.
+      if (snap !== null) {
       if (snap?.data?.device_id) {
         localStorage.setItem(DEVICE_ID_KEY, snap.data.device_id);
       }
@@ -155,9 +158,10 @@ export class TokenRepository implements ITokenRepository {
             })
           : undefined,
       });
+      }
     }
 
-    // Browser/test fallback
+    // Browser/test fallback (also used after a temporary Tauri IPC failure)
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
 
