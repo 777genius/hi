@@ -14,6 +14,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpListener;
 use tokio::sync::{watch, RwLock};
@@ -242,6 +243,7 @@ pub struct CompanionRuntime {
     pub security_token: Arc<RwLock<String>>,
     pub enabled: Arc<RwLock<bool>>,
     pub port: Arc<RwLock<Option<u16>>>,
+    pub instance_id: Arc<RwLock<Option<String>>>,
     pub action_cache: Arc<RwLock<CompanionActionIdempotencyCache>>,
 }
 
@@ -349,6 +351,11 @@ struct TokenQuery {
     token: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct IdentityQuery {
+    nonce: String,
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct CompanionAiRequestBody {
@@ -418,6 +425,7 @@ pub fn new_runtime() -> CompanionRuntime {
         security_token: Arc::new(RwLock::new(generate_security_token())),
         enabled: Arc::new(RwLock::new(false)),
         port: Arc::new(RwLock::new(None)),
+        instance_id: Arc::new(RwLock::new(None)),
         action_cache: Arc::new(RwLock::new(CompanionActionIdempotencyCache::default())),
     }
 }
@@ -602,9 +610,20 @@ pub async fn enable_mode(app_handle: &AppHandle) -> Result<CompanionServerStatus
         .port();
 
     let token = ensure_persisted_security_token(state.inner()).await?;
-    *runtime.enabled.write().await = true;
-    *runtime.port.write().await = Some(port);
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    // The listener is bound but is not serving yet. Fail closed if we cannot
+    // publish the actual endpoint to the private bridge.
+    crate::infrastructure::ConfigStore::save_companion_bridge_state(
+        &token,
+        Some(port),
+        Some(&instance_id),
+    )
+    .await
+    .map_err(|error| format!("Failed to publish Companion endpoint: {error}"))?;
     *runtime.security_token.write().await = token;
+    *runtime.instance_id.write().await = Some(instance_id);
+    *runtime.port.write().await = Some(port);
+    *runtime.enabled.write().await = true;
 
     let app_handle_for_task = app_handle.clone();
     let task = tauri::async_runtime::spawn(async move {
@@ -643,6 +662,13 @@ pub async fn disable_mode(app_handle: &AppHandle) -> Result<(), String> {
 
     *runtime.enabled.write().await = false;
     *runtime.port.write().await = None;
+    *runtime.instance_id.write().await = None;
+    let token = runtime.security_token.read().await.clone();
+    // A crashed process may leave metadata behind, but an ordinary Stop must
+    // explicitly revoke discovery. Identity verification also rejects staleness.
+    if let Err(error) = crate::infrastructure::ConfigStore::save_companion_bridge_token(&token).await {
+        log::warn!("Failed to invalidate Companion bridge on Stop: {error}");
+    }
 
     drop(_guard);
     let _ = publish_snapshot(app_handle).await;
@@ -817,6 +843,7 @@ async fn route_request(
             json_response(StatusCode::OK, body)
         }
         (Method::HEAD, "/health") | (Method::HEAD, "/api/health") => empty_response(StatusCode::OK),
+        (Method::GET, "/api/identity") => companion_identity_response(&app_handle, req.uri()).await,
         (Method::GET, "/manifest.webmanifest") => {
             companion_manifest_response(&app_handle, req.uri()).await
         }
@@ -1800,6 +1827,48 @@ fn companion_proxy_client() -> &'static reqwest::Client {
     })
 }
 
+/// The identity challenge never contains an access token. It proves that
+/// the listener at the discovered port knows the persisted private token.
+fn companion_identity_proof(token: &str, instance_id: &str, nonce: &str) -> String {
+    let value = format!("hack-interview-companion/v1:{token}:{instance_id}:{nonce}");
+    hex::encode(Sha256::digest(value.as_bytes()))
+}
+
+async fn companion_identity_response(
+    app_handle: &AppHandle,
+    uri: &hyper::Uri,
+) -> Response<CompanionBody> {
+    let nonce = uri.query()
+        .and_then(|query| serde_urlencoded::from_str::<IdentityQuery>(query).ok())
+        .map(|query| query.nonce);
+    let Some(nonce) = nonce.filter(|value| {
+        value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) else {
+        return text_response(StatusCode::BAD_REQUEST, "Invalid identity nonce");
+    };
+
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "Companion unavailable");
+    };
+    let runtime = state.companion_runtime.read().await.clone();
+    if !*runtime.enabled.read().await {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "Companion disabled");
+    }
+    let Some(instance_id) = runtime.instance_id.read().await.clone() else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "Companion unavailable");
+    };
+    let token = runtime.security_token.read().await.clone();
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "service": "hack-interview-companion",
+            "schemaVersion": 1,
+            "instanceId": instance_id,
+            "proof": companion_identity_proof(&token, &instance_id, &nonce),
+        }).to_string(),
+    )
+}
+
 fn generate_security_token() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -2322,6 +2391,21 @@ mod companion_request_body_tests {
         let bytes = collect_bounded_body(body, 11).await.unwrap();
 
         assert_eq!(&bytes, br#"{"ok":true}"#);
+    }
+}
+
+#[cfg(test)]
+mod companion_identity_tests {
+    use super::*;
+
+    #[test]
+    fn proof_binds_nonce_token_and_runtime_instance() {
+        let proof = companion_identity_proof("private-token", "instance-a", "abcd1234abcd1234abcd1234abcd1234");
+        assert_eq!(proof.len(), 64);
+        assert!(proof.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(proof, companion_identity_proof("private-token", "instance-b", "abcd1234abcd1234abcd1234abcd1234"));
+        assert_ne!(proof, companion_identity_proof("other-token", "instance-a", "abcd1234abcd1234abcd1234abcd1234"));
+        assert_ne!(proof, companion_identity_proof("private-token", "instance-a", "ffff1234abcd1234abcd1234abcd1234"));
     }
 }
 
