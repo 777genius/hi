@@ -279,7 +279,7 @@ function identityProof(token, instanceId, port, nonce) {
  * Unauthenticated nonce challenge: no token or editor contents are transmitted
  * until the listener at the chosen URL proves possession of the local token.
  */
-function verifyCompanionIdentity(url, token, expectedInstanceId, timeoutMs = DEFAULT_TIMEOUT_MS) {
+function verifyCompanionIdentity(url, token, expectedInstanceId, timeoutMs = DEFAULT_TIMEOUT_MS, agent) {
   const target = new URL(url);
   if (target.protocol !== 'http:' && target.protocol !== 'https:') {
     throw new CompanionIdentityError('Companion URL must use http(s)');
@@ -292,7 +292,8 @@ function verifyCompanionIdentity(url, token, expectedInstanceId, timeoutMs = DEF
   const maxResponseBytes = 16 * 1024;
 
   return new Promise((resolve, reject) => {
-    const request = client.request(target, { method: 'GET', headers: { Accept: 'application/json' } }, (response) => {
+    let verifiedSocket = null;
+    const request = client.request(target, { method: 'GET', agent, headers: { Accept: 'application/json' } }, (response) => {
       const chunks = [];
       let size = 0;
       response.on('data', (part) => {
@@ -333,9 +334,14 @@ function verifyCompanionIdentity(url, token, expectedInstanceId, timeoutMs = DEF
           reject(new CompanionIdentityError('Companion identity proof mismatch'));
           return;
         }
-        resolve();
+        if (!verifiedSocket) {
+          reject(new CompanionIdentityError('Companion identity connection unavailable'));
+          return;
+        }
+        resolve(verifiedSocket);
       });
     });
+    request.once('socket', (socket) => { verifiedSocket = socket; });
     request.on('error', (error) => reject(
       error instanceof CompanionIdentityError
         ? error
@@ -438,9 +444,6 @@ function postJson(url, body, options = {}) {
   };
 
   const token = nonEmptyString(options.token);
-  if (token) {
-    headers['X-Companion-Token'] = token;
-  }
 
   return new Promise((resolve, reject) => {
     const request = client.request(
@@ -448,6 +451,7 @@ function postJson(url, body, options = {}) {
       {
         method: 'POST',
         headers,
+        agent: options.agent,
       },
       (response) => {
         const chunks = [];
@@ -482,8 +486,16 @@ function postJson(url, body, options = {}) {
     request.setTimeout(timeoutMs, () => {
       request.destroy(new Error(`Backend request timed out after ${timeoutMs}ms`));
     });
-    request.write(bodyText);
-    request.end();
+    request.once('socket', (socket) => {
+      // No auth header or editor bytes are queued until the already-verified
+      // TCP socket is reused. If the listener restarted, fail closed.
+      if (options.expectedSocket && socket !== options.expectedSocket) {
+        request.destroy(new CompanionIdentityError('Companion connection changed after identity verification'));
+        return;
+      }
+      if (token) request.setHeader('X-Companion-Token', token);
+      request.end(bodyText);
+    });
   });
 }
 
@@ -529,16 +541,23 @@ async function captureAndSendActiveEditor(input) {
 
   let lastAuthError = null;
   for (const candidate of tokenCandidates) {
+    const target = new URL(backendUrl);
+    const agent = target.protocol === 'https:'
+      ? new https.Agent({ keepAlive: true, maxSockets: 1 })
+      : new http.Agent({ keepAlive: true, maxSockets: 1 });
     try {
-      await verifyCompanionIdentity(
+      const verifiedSocket = await verifyCompanionIdentity(
         backendUrl,
         candidate.token,
         endpoint.instanceId,
         input.requestTimeoutMs,
+        agent,
       );
       const response = await postJson(backendUrl, payload, {
         token: candidate.token,
         timeoutMs: input.requestTimeoutMs,
+        agent,
+        expectedSocket: verifiedSocket,
       });
 
       return {
@@ -557,6 +576,8 @@ async function captureAndSendActiveEditor(input) {
       }
 
       throw error;
+    } finally {
+      agent.destroy();
     }
   }
 
