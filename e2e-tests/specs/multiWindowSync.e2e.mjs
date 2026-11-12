@@ -3,7 +3,6 @@ import {
   ensureE2E,
   findWindowHandleByLabel,
   invoke,
-  openSettingsWindow,
   waitFor,
 } from '../helpers/tauriE2e.mjs';
 
@@ -13,7 +12,17 @@ describe('multi-window sync (real tauri webdriver)', () => {
     const mainHandle = await findWindowHandleByLabel('main');
 
     await browser.switchToWindow(mainHandle);
-    await openSettingsWindow();
+    // The native WebKitWebDriver elementClick occasionally blocks until Mocha
+    // times out when clicking a button that opens a second Tauri WebView.
+    // The other two E2E specs still cover the real pointer click. This
+    // state-sync spec dispatches the same UI event without driver-click wait.
+    const settingsButton = await $('[data-testid="open-settings"]');
+    await settingsButton.waitForExist({ timeout: 15_000 });
+    await browser.execute(() => {
+      const button = document.querySelector('[data-testid="open-settings"]');
+      if (!button) throw new Error('Settings button disappeared');
+      button.click();
+    });
 
     const settingsHandle = await findWindowHandleByLabel('settings');
     await browser.switchToWindow(settingsHandle);
