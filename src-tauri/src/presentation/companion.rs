@@ -595,7 +595,7 @@ pub async fn enable_mode(app_handle: &AppHandle) -> Result<CompanionServerStatus
     let runtime = state.companion_runtime.read().await.clone();
     if *runtime.enabled.read().await
         && runtime.port.read().await.is_some()
-        && state.companion_server_task.read().await.as_ref().is_some_and(|task| !task.is_finished())
+        && state.companion_server_task.read().await.is_some()
     {
         drop(_guard);
         let _ = publish_snapshot(app_handle).await;
