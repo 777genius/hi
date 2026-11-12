@@ -113,51 +113,51 @@ export class TokenRepository implements ITokenRepository {
       // A failed IPC read is not proof of logout. Preserve the local fallback
       // until the Rust source-of-truth can be reached again.
       if (snap !== null) {
-      if (snap?.data?.device_id) {
-        localStorage.setItem(DEVICE_ID_KEY, snap.data.device_id);
-      }
-
-      const s = snap?.data?.session;
-      if (!s) {
-        // Если в Rust сессии нет — чистим локальный кеш.
-        localStorage.removeItem(STORAGE_KEY);
-        return null;
-      }
-
-      const storedFromRust: StoredSession = {
-        accessToken: s.access_token,
-        refreshToken: s.refresh_token ?? undefined,
-        accessExpiresAt: s.access_expires_at,
-        refreshExpiresAt: s.refresh_expires_at ?? undefined,
-        deviceId: snap.data.device_id,
-        user: s.user
-          ? {
-              id: s.user.id,
-              email: s.user.email,
-              emailVerified: s.user.email_verified,
-            }
-          : undefined,
-      };
-
-      // Обновляем localStorage кеш.
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(storedFromRust));
-
-      return createSession({
-        accessToken: storedFromRust.accessToken,
-        refreshToken: storedFromRust.refreshToken,
-        accessExpiresAt: new Date(storedFromRust.accessExpiresAt),
-        refreshExpiresAt: storedFromRust.refreshExpiresAt
-          ? new Date(storedFromRust.refreshExpiresAt)
-          : undefined,
-        deviceId: storedFromRust.deviceId,
-        user: storedFromRust.user
-          ? createUser({
-              id: storedFromRust.user.id,
-              email: storedFromRust.user.email,
-              emailVerified: storedFromRust.user.emailVerified,
-            })
-          : undefined,
-      });
+        if (snap?.data?.device_id) {
+          localStorage.setItem(DEVICE_ID_KEY, snap.data.device_id);
+        }
+  
+        const s = snap?.data?.session;
+        if (!s) {
+          // Если в Rust сессии нет — чистим локальный кеш.
+          localStorage.removeItem(STORAGE_KEY);
+          return null;
+        }
+  
+        const storedFromRust: StoredSession = {
+          accessToken: s.access_token,
+          refreshToken: s.refresh_token ?? undefined,
+          accessExpiresAt: s.access_expires_at,
+          refreshExpiresAt: s.refresh_expires_at ?? undefined,
+          deviceId: snap.data.device_id,
+          user: s.user
+            ? {
+                id: s.user.id,
+                email: s.user.email,
+                emailVerified: s.user.email_verified,
+              }
+            : undefined,
+        };
+  
+        // Обновляем localStorage кеш.
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(storedFromRust));
+  
+        return createSession({
+          accessToken: storedFromRust.accessToken,
+          refreshToken: storedFromRust.refreshToken,
+          accessExpiresAt: new Date(storedFromRust.accessExpiresAt),
+          refreshExpiresAt: storedFromRust.refreshExpiresAt
+            ? new Date(storedFromRust.refreshExpiresAt)
+            : undefined,
+          deviceId: storedFromRust.deviceId,
+          user: storedFromRust.user
+            ? createUser({
+                id: storedFromRust.user.id,
+                email: storedFromRust.user.email,
+                emailVerified: storedFromRust.user.emailVerified,
+              })
+            : undefined,
+        });
       }
     }
 
