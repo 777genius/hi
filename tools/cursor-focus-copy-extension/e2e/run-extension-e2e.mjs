@@ -343,6 +343,45 @@ try {
     await close(dummy);
   }
 
+  // A valid Companion can close the challenge connection before the POST.
+  // Never put credentials/editor text on a newly opened unverified socket.
+  let unexpectedPostsAfterClose = 0;
+  let closingPort = 0;
+  const closingServer = http.createServer((request, response) => {
+    if (request.method !== 'GET') {
+      unexpectedPostsAfterClose += 1;
+      response.writeHead(500);
+      response.end();
+      return;
+    }
+    const nonce = new URL(request.url, 'http://127.0.0.1').searchParams.get('nonce');
+    response.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Connection': 'close',
+    });
+    response.end(JSON.stringify({
+      service: 'hack-interview-companion',
+      schemaVersion: 2,
+      instanceId,
+      proof: identityProof(companionToken, instanceId, closingPort, nonce),
+    }));
+  });
+  const closingAddress = await listen(closingServer);
+  closingPort = closingAddress.port;
+  try {
+    await assert.rejects(
+      captureAndSendActiveEditor({
+        editor, clipboard,
+        backendUrl: `http://127.0.0.1:${closingPort}/api/focus-copy/ingest`,
+        companionToken, copyToClipboard: false, requestTimeoutMs: 800,
+      }),
+      CompanionIdentityError
+    );
+    assert.equal(unexpectedPostsAfterClose, 0, 'closed socket cannot be replaced for sensitive POST');
+  } finally {
+    await close(closingServer);
+  }
+
   console.log('[PASS] Cursor identity + occupied 43821: unrelated listener received no sensitive POST');
 } finally {
   await close(server);
