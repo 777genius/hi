@@ -55,9 +55,9 @@ const server = http.createServer(async (request, response) => {
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({
       service: 'hack-interview-companion',
-      schemaVersion: 1,
+      schemaVersion: 2,
       instanceId,
-      proof: identityProof(companionToken, instanceId, nonce),
+      proof: identityProof(companionToken, instanceId, address.port, nonce),
     }));
     return;
   }
@@ -277,6 +277,47 @@ try {
       CompanionIdentityError
     );
     assert.ok(unexpectedRequests.every((req) => req.method === 'GET' && !req.token && !req.body));
+
+    // A malicious port owner might relay the challenge to the legitimate
+    // fallback server. Port-bound proof must still reject the response.
+    const originalHandler = dummy.listeners('request')[0];
+    dummy.removeAllListeners('request');
+    dummy.on('request', (request, response) => {
+      unexpectedRequests.push({
+        method: request.method,
+        url: request.url,
+        token: request.headers['x-companion-token'],
+        body: '',
+      });
+      if (request.method !== 'GET') {
+        response.writeHead(500);
+        response.end();
+        return;
+      }
+      http.get(`http://127.0.0.1:${address.port}${request.url}`, (actual) => {
+        response.writeHead(actual.statusCode ?? 500, { 'Content-Type': 'application/json' });
+        actual.pipe(response);
+      }).on('error', () => {
+        response.writeHead(502);
+        response.end();
+      });
+    });
+    try {
+      await assert.rejects(
+        captureAndSendActiveEditor({
+          editor, clipboard, backendUrl: '', companionToken: '',
+          copyToClipboard: false, requestTimeoutMs: 800, ...stale,
+        }),
+        CompanionIdentityError
+      );
+      assert.equal(unexpectedRequests.at(-1).method, 'GET');
+      assert.equal(unexpectedRequests.at(-1).token, undefined);
+      assert.equal(unexpectedRequests.at(-1).body, '');
+      assert.equal(unexpectedRequests.some((req) => req.method === 'POST'), false);
+    } finally {
+      dummy.removeAllListeners('request');
+      dummy.on('request', originalHandler);
+    }
 
     // Disabled, missing or version-1 bridge state must fail closed before
     // opening a network connection.
