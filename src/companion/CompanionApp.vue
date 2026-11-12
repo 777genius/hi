@@ -5,6 +5,7 @@ import type { ConversationFeedMessage } from '@/presentation/conversationFeed';
 import { buildCompanionConversationFeedMessages } from '@/presentation/companionFeed';
 import { createPromptImageDraft, type PromptImageDraft } from '@/utils/promptImages';
 import {
+  canRetryCompanionAction,
   classifyCompanionFailureMessage,
   connectionTextForCompanionFailure,
   normalizeCompanionRequestError,
@@ -703,10 +704,9 @@ async function sendAction(
   }
 
   const requestId = options.requestId ?? createCompanionRequestId();
-  // AI/prompt requests are not guaranteed exactly-once across a desktop
-  // process restart (the server's request-id cache is in memory).
-  const retryOnRecoverable = options.retryOnRecoverable
-    ?? (path !== '/api/ai/request' && path !== '/api/prompt/send');
+  // Request-id de-duplication is in memory and resets with the desktop.
+  // A lost reply must never replay recording, history clearing or AI prompts.
+  const retryOnRecoverable = options.retryOnRecoverable ?? canRetryCompanionAction(path);
   let retryAfterRecover = false;
   let originalError: unknown = null;
 

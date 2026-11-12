@@ -504,6 +504,10 @@ pub async fn build_current_snapshot(
     let state = app_handle
         .try_state::<AppState>()
         .ok_or_else(|| "AppState не доступен".to_string())?;
+    // Keep the GET payload and its revision in the same publish epoch.
+    // Otherwise a racing broadcast can assign a newer revision to old data.
+    let runtime = state.companion_runtime.read().await.clone();
+    let _publish_guard = runtime.publish_lock.lock().await;
     let data = build_snapshot_data(state.inner()).await?;
     let revision = state.companion_revision.read().await.to_string();
     Ok(CompanionSnapshotEnvelope { revision, data })
