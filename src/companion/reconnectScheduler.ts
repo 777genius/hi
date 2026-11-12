@@ -41,3 +41,39 @@ export function createCompanionReconnectScheduler(
 
   return { schedule, cancel, reset };
 }
+
+/**
+ * EventSource does not surface SSE comment keepalives. The server sends a
+ * named heartbeat so a half-open mobile connection can be detected.
+ */
+export const COMPANION_STREAM_STALE_MS = 45_000;
+export const COMPANION_STREAM_WATCHDOG_INTERVAL_MS = 10_000;
+
+export function createCompanionStreamWatchdog(onStall: () => void) {
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let lastActivityAt = 0;
+
+  const stop = () => {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
+
+  const heartbeat = () => {
+    lastActivityAt = Date.now();
+  };
+
+  const start = () => {
+    stop();
+    heartbeat();
+    timer = setInterval(() => {
+      if (Date.now() - lastActivityAt > COMPANION_STREAM_STALE_MS) {
+        stop();
+        onStall();
+      }
+    }, COMPANION_STREAM_WATCHDOG_INTERVAL_MS);
+  };
+
+  return { start, heartbeat, stop };
+}
