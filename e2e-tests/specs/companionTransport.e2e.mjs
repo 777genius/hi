@@ -1,0 +1,129 @@
+import assert from 'node:assert/strict';
+import { ensureE2E, findWindowHandleByLabel, invoke } from '../helpers/tauriE2e.mjs';
+
+function assertInvokeResult(result, name) {
+  if (!result || result.__error) throw new Error(`${name}: ${result?.__error ?? 'empty Tauri result'}`);
+  return result;
+}
+
+async function getJson(url, expectedStatus = 200) {
+  const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(10_000) });
+  assert.equal(response.status, expectedStatus, `unexpected HTTP status from ${new URL(url).pathname}`);
+  return response.json();
+}
+
+async function openSnapshotStream(baseUrl, token) {
+  const controller = new AbortController();
+  const response = await fetch(`${baseUrl}/events?token=${encodeURIComponent(token)}`, {
+    headers: { Accept: 'text/event-stream' },
+    cache: 'no-store',
+    signal: controller.signal,
+  });
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type') || '', /text\/event-stream/i);
+  const reader = response.body.getReader();
+  let buffer = '';
+
+  const nextSnapshot = async (timeoutMs = 10_000) => {
+    const timeout = setTimeout(() => controller.abort(new Error('SSE snapshot timed out')), timeoutMs);
+    try {
+      for (;;) {
+        const separator = buffer.indexOf('\n\n');
+        if (separator !== -1) {
+          const frame = buffer.slice(0, separator);
+          buffer = buffer.slice(separator + 2);
+          const lines = frame.split('\n');
+          if (!lines.includes('event: snapshot')) continue;
+          const json = lines.find((line) => line.startsWith('data: '))?.slice(6);
+          if (!json) throw new Error('SSE snapshot frame has no JSON data');
+          return JSON.parse(json);
+        }
+
+        const result = await reader.read();
+        if (result.done) throw new Error('SSE stream closed before snapshot arrived');
+        buffer += new TextDecoder().decode(result.value);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  const waitForClose = async (timeoutMs = 6_000) => {
+    const timeout = setTimeout(() => controller.abort(new Error('SSE listener stayed open after disable')), timeoutMs);
+    try {
+      for (;;) {
+        const result = await reader.read();
+        if (result.done) return;
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  const close = () => controller.abort();
+  return { nextSnapshot, waitForClose, close };
+}
+
+describe('Companion HTTP/SSE transport (real native Tauri)', () => {
+  it('mirrors desktop state, streams monotonic revisions, and revokes old SSE after restart', async () => {
+    await browser.switchToWindow(await findWindowHandleByLabel('main'));
+    await ensureE2E();
+
+    let stream;
+    let nextStream;
+    try {
+      const started = assertInvokeResult(await invoke('enable_companion_mode'), 'enable companion');
+      assert.equal(started.enabled, true);
+      assert.ok(started.token);
+      assert.ok(Number.isInteger(started.port) && started.port > 0);
+
+      const base = `http://127.0.0.1:${started.port}`;
+      const stateUrl = `${base}/api/state?token=${encodeURIComponent(started.token)}`;
+      const first = await getJson(stateUrl);
+      const desktop = assertInvokeResult(await invoke('get_companion_snapshot'), 'desktop companion snapshot');
+      assert.ok(first.data.controls.instanceId, 'server identity should be published');
+      assert.equal(first.data.controls.instanceId, desktop.data.controls.instanceId);
+      assert.equal(first.data.recording.status, desktop.data.recording.status);
+
+      const missingToken = await fetch(`${base}/api/state`, { signal: AbortSignal.timeout(10_000) });
+      assert.equal(missingToken.status, 401, 'unauthenticated state must stay protected');
+      const invalidToken = await fetch(`${base}/api/state?token=not-companion`, { signal: AbortSignal.timeout(10_000) });
+      assert.equal(invalidToken.status, 403, 'invalid token must stay protected');
+
+      stream = await openSnapshotStream(base, started.token);
+      const initial = await stream.nextSnapshot();
+      assert.equal(initial.data.controls.instanceId, first.data.controls.instanceId);
+
+      // enable() while active emits a fresh snapshot through the real live
+      // HTTP listener without resetting the instance or losing the watch update.
+      const alreadyEnabled = assertInvokeResult(await invoke('enable_companion_mode'), 'enable existing companion');
+      assert.equal(alreadyEnabled.port, started.port);
+      const updated = await stream.nextSnapshot();
+      assert.equal(updated.data.controls.instanceId, initial.data.controls.instanceId);
+      assert.ok(Number(updated.revision) > Number(initial.revision), 'SSE revision should advance');
+
+      const stopped = assertInvokeResult(await invoke('disable_companion_mode'), 'disable companion');
+      assert.equal(stopped.enabled, false);
+      await stream.waitForClose();
+
+      const restarted = assertInvokeResult(await invoke('enable_companion_mode'), 're-enable companion');
+      assert.equal(restarted.enabled, true);
+      assert.equal(restarted.token, started.token, 'the private QR token persists across mode toggles');
+      assert.ok(restarted.port > 0);
+
+      const currentBase = `http://127.0.0.1:${restarted.port}`;
+      const restartedState = await getJson(`${currentBase}/api/state?token=${encodeURIComponent(restarted.token)}`);
+      assert.ok(restartedState.data.controls.instanceId);
+      assert.notEqual(restartedState.data.controls.instanceId, initial.data.controls.instanceId,
+        'restarted listener must begin a new revision epoch');
+      nextStream = await openSnapshotStream(currentBase, restarted.token);
+      const liveRestart = await nextStream.nextSnapshot();
+      assert.equal(liveRestart.data.controls.instanceId, restartedState.data.controls.instanceId);
+    } finally {
+      stream?.close();
+      nextStream?.close();
+      const result = await invoke('disable_companion_mode');
+      if (result?.__error) throw new Error(`cleanup companion: ${result.__error}`);
+    }
+  });
+});
