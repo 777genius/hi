@@ -1,6 +1,8 @@
 import AppKit
 import ApplicationServices
 import Carbon
+import Darwin
+import Dispatch
 import Foundation
 
 @_silgen_name("RunApplicationEventLoop")
@@ -291,8 +293,42 @@ private func visibleKeyboardShortcutFallbackEnabled() -> Bool {
     ProcessInfo.processInfo.environment["FOCUS_COPY_ALLOW_VISIBLE_FALLBACK"] == "1"
 }
 
+/// Browser CDP fallback is on by default. Set FOCUS_COPY_ENABLE_BROWSER_CDP=0 to disable it.
 private func browserCdpDebuggerEnabled() -> Bool {
-    ProcessInfo.processInfo.environment["FOCUS_COPY_ENABLE_BROWSER_CDP"] == "1"
+    ProcessInfo.processInfo.environment["FOCUS_COPY_ENABLE_BROWSER_CDP"] != "0"
+}
+
+private let silentDebuggerFlag = "--silent-debugger-extension-api"
+nonisolated(unsafe) private var silentDebuggerFlagCache: [pid_t: Bool] = [:]
+
+/// chrome.debugger shows a visible "started debugging this browser" bar unless the browser
+/// was launched with --silent-debugger-extension-api. The CDP path is only allowed for such
+/// browsers, so the bar never appears.
+private func browserLaunchedWithSilentDebugger(pid: pid_t) -> Bool {
+    if let cached = silentDebuggerFlagCache[pid] {
+        return cached
+    }
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/ps")
+    process.arguments = ["-o", "args=", "-p", String(pid)]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+
+    var result = false
+    do {
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let args = String(data: data, encoding: .utf8) ?? ""
+        result = args.contains(silentDebuggerFlag)
+    } catch {
+        result = false
+    }
+
+    silentDebuggerFlagCache[pid] = result
+    return result
 }
 
 private func monacoBrowserCacheEnabled() -> Bool {
@@ -574,7 +610,7 @@ private final class FocusTextCopier {
 
     private func copyViaBrowserCdpIfSupported(attemptID: Int) throws -> CopyResult? {
         guard browserCdpDebuggerEnabled() else {
-            logCopy(attemptID, "browser CDP debugger path skipped; set FOCUS_COPY_ENABLE_BROWSER_CDP=1 to enable visible debugger fallback")
+            logCopy(attemptID, "browser CDP debugger path disabled by FOCUS_COPY_ENABLE_BROWSER_CDP=0")
             return nil
         }
 
@@ -589,6 +625,11 @@ private final class FocusTextCopier {
                 attemptID,
                 "browser CDP path skipped for bundle=\(app.bundleIdentifier ?? "nil"), name=\(app.localizedName ?? "nil")"
             )
+            return nil
+        }
+
+        guard browserLaunchedWithSilentDebugger(pid: app.processIdentifier) else {
+            logCopy(attemptID, "browser CDP path skipped: pid=\(app.processIdentifier) was not launched with \(silentDebuggerFlag) (would show a debugger bar); run pnpm copy-helper:brave:restart-cdp")
             return nil
         }
 
@@ -2621,6 +2662,22 @@ private func writeNativeMessagingResponse(_ object: [String: Any]) {
 }
 
 private let runner = HotkeyRunner()
+private nonisolated(unsafe) var parentWatchdog: DispatchSourceTimer?
+
+private func watchParentProcess() {
+    let parentPID = getppid()
+    guard parentPID > 1 else { return }
+    let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+    timer.schedule(deadline: .now() + 2, repeating: 2)
+    timer.setEventHandler {
+        if getppid() != parentPID {
+            log("Parent process \(parentPID) exited; stopping helper")
+            exit(0)
+        }
+    }
+    timer.resume()
+    parentWatchdog = timer
+}
 
 do {
     if CommandLine.arguments.contains("--browser-cache-native-host") {
@@ -2644,6 +2701,7 @@ do {
         exit(0)
     }
 
+    watchParentProcess()
     try runner.run()
 } catch {
     log("Fatal: \(error)")

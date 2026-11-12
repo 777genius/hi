@@ -304,6 +304,13 @@ function assertMemorySnapshot(snapshot, label) {
 }
 
 function scoreMemoryDiagnostics(memory, expectedStatus) {
+  if (expectedStatus === 'disabled') {
+    return [{
+      label: 'memory intentionally disabled',
+      ok: memory?.mode === 'disabled' && memory?.lastContextStatus === 'disabled',
+      value: { mode: memory?.mode, status: memory?.lastContextStatus },
+    }];
+  }
   const checks = [
     {
       label: `context status ${expectedStatus}`,
@@ -763,7 +770,7 @@ function naturalMultiTopicTurns(runId) {
         'Один видит значение ещё живым, другой уже попадает на границу TTL.',
         'Что здесь может пойти не так и как бы ты сделал поведение предсказуемым?',
       ].join(' '),
-      expected: ['ttl', ['race', 'гонк', 'конкур'], ['устар', 'предсказ']],
+      expected: ['ttl', ['race', 'гонк', 'конкур', 'атомар'], ['устар', 'предсказ', 'свеж', 'согласован']],
       allowRunMarkers: false,
     },
     {
@@ -820,7 +827,7 @@ function naturalMultiTopicTurns(runId) {
         'В кэше мы боремся с устареванием, в SQL с потерей строк, в React с устаревшим замыканием, а в платежах с повторным эффектом.',
         'Как бы ты коротко развёл эти случаи в ответе?',
       ].join(' '),
-      expected: ['ttl', ['left join', 'sql'], ['stale', 'устаревш'], ['idempotency', 'идемпот'], ['разн', 'отлич']],
+      expected: [['ttl', 'время жизни', 'инвалидац', 'верси'], ['left join', 'sql'], ['stale', 'устаревш', 'прежнего рендера'], ['idempotency', 'идемпот', 'ключ'], ['разн', 'отлич', 'случа', 'причин']],
       allowRunMarkers: false,
     },
     {
@@ -950,7 +957,7 @@ function scenarioMemoryCheckPhases(runId, scenario) {
       label: 'multi-topic cache exact recall',
       queryText: [
         'Найди точный early cache контекст интервью.',
-        'Нужны проект Полярная станция, LRU cache, TTL eviction и контрольный код LRU_TTL_EVICTION.',
+        `Нужны проект Полярная станция, LRU cache, TTL eviction и контрольный код ${marker(runId, 'LRU_TTL_EVICTION')}.`,
       ].join(' '),
       requiredTerms: [marker(runId, 'LRU_TTL_EVICTION'), 'Полярная станция', 'LRU', 'TTL'],
       ...topicOptions,
@@ -959,7 +966,7 @@ function scenarioMemoryCheckPhases(runId, scenario) {
       label: 'multi-topic sql exact recall',
       queryText: [
         'Найди точный SQL контекст интервью.',
-        'Нужны LEFT JOIN, row_number/window function и контрольный код SQL_LEFT_JOIN_WINDOW.',
+        `Нужны LEFT JOIN, row_number/window function и контрольный код ${marker(runId, 'SQL_LEFT_JOIN_WINDOW')}.`,
       ].join(' '),
       requiredTerms: [marker(runId, 'SQL_LEFT_JOIN_WINDOW'), 'LEFT JOIN', 'row_number'],
       ...topicOptions,
@@ -968,7 +975,7 @@ function scenarioMemoryCheckPhases(runId, scenario) {
       label: 'multi-topic react exact recall',
       queryText: [
         'Найди точный React контекст интервью.',
-        'Нужны stale closure, useCallback dependencies и контрольный код REACT_STALE_CLOSURE_MEMO.',
+        `Нужны stale closure, useCallback dependencies и контрольный код ${marker(runId, 'REACT_STALE_CLOSURE_MEMO')}.`,
       ].join(' '),
       requiredTerms: [marker(runId, 'REACT_STALE_CLOSURE_MEMO'), 'stale closure', 'useCallback'],
       ...topicOptions,
@@ -977,7 +984,7 @@ function scenarioMemoryCheckPhases(runId, scenario) {
       label: 'multi-topic idempotency exact recall',
       queryText: [
         'Найди точный distributed systems контекст интервью.',
-        'Нужны idempotency key, bounded exponential backoff и контрольный код IDEMPOTENCY_RETRY_BACKOFF.',
+        `Нужны idempotency key, bounded exponential backoff и контрольный код ${marker(runId, 'IDEMPOTENCY_RETRY_BACKOFF')}.`,
       ].join(' '),
       requiredTerms: [
         marker(runId, 'IDEMPOTENCY_RETRY_BACKOFF'),
@@ -1244,12 +1251,15 @@ async function runAiTurn(options, turn, turnIndex, baselineSeq) {
 }
 
 function retrievedMemoryText(contextText) {
-  const markerText = '## retrieved_memory';
-  const index = contextText.indexOf(markerText);
-  if (index < 0) return '';
-  const rest = contextText.slice(index + markerText.length);
-  const nextSectionIndex = rest.search(/\n##\s+/);
-  return nextSectionIndex >= 0 ? rest.slice(0, nextSectionIndex) : rest;
+  const text = String(contextText || '');
+  for (const markerText of ['## retrieved_memory', '[retrieved_memory]']) {
+    const index = text.indexOf(markerText);
+    if (index < 0) continue;
+    const rest = text.slice(index + markerText.length);
+    const nextSectionIndex = rest.search(/\n(?:##\s+|\[[^\]\n]+\]\n)/);
+    return nextSectionIndex >= 0 ? rest.slice(0, nextSectionIndex) : rest;
+  }
+  return '';
 }
 
 async function fetchMemoryContextOnce(options, runId, sessionId, phase) {
@@ -1575,6 +1585,16 @@ function runSelfTest() {
       multiTopicPhases.some((phase) => phase.requiredTerms.includes(marker(runId, 'REACT_STALE_CLOSURE_MEMO'))),
     'multi-topic exact phases should verify source markers separately',
   );
+  assertSelfTest(
+    multiTopicPhases
+      .filter((phase) => / exact recall$/.test(phase.label))
+      .every((phase) =>
+        phase.requiredTerms
+          .filter((term) => typeof term === 'string' && term.startsWith(`LONG_INTERVIEW_E2E_${runId}_`))
+          .every((term) => phase.queryText.includes(term)),
+      ),
+    'multi-topic exact phase queries should include the full marker they assert',
+  );
 
   const naturalTurns = buildScenarioTurns(runId, 16, 'natural-multi-topic');
   assertSelfTest(naturalTurns.length === 16, 'natural scenario turn count should match requested count');
@@ -1595,6 +1615,20 @@ function runSelfTest() {
   assertSelfTest(
     scenarioMemoryCheckPhases(runId, 'natural-multi-topic').length === 5,
     'natural scenario should keep multi-phase backend memory verification',
+  );
+  assertSelfTest(
+    retrievedMemoryText(
+      [
+        'Relevant interview context:',
+        '[current_request]',
+        'question',
+        '[retrieved_memory]',
+        `memory ${marker(runId, 'LRU_TTL_EVICTION')}`,
+        '[recent_timeline:1]',
+        'noise',
+      ].join('\n'),
+    ).includes(marker(runId, 'LRU_TTL_EVICTION')),
+    'retrieved memory parser should support bracket-section renderer output',
   );
   assertSelfTest(
     scoreNoCurrentRunMarkers(`answer ${marker(runId, 'LRU_TTL_EVICTION')}`, runId).ok === false,

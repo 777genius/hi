@@ -10,6 +10,10 @@ MACOS_DIR="$CONTENTS_DIR/MacOS"
 PRODUCT_NAME="MacOSFocusCopyHelper"
 BINARY_NAME="Telegram"
 RELEASE_BINARY="$HELPER_DIR/.build/release/$PRODUCT_NAME"
+SIGNING_IDENTITY="${FOCUS_COPY_SIGNING_IDENTITY:-}"
+if [[ -z "$SIGNING_IDENTITY" && -d "$APP_DIR" ]]; then
+  SIGNING_IDENTITY="$(codesign -dvvv "$APP_DIR" 2>&1 | sed -n 's/^Authority=\(Developer ID Application:.*\)$/\1/p' | head -n 1)"
+fi
 
 swift build -c release --package-path "$HELPER_DIR"
 
@@ -44,6 +48,10 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+if [[ -n "$SIGNING_IDENTITY" ]]; then
+  codesign --force --sign "$SIGNING_IDENTITY" --options runtime "$APP_DIR"
+fi
 
 echo "Built $APP_DIR"
 

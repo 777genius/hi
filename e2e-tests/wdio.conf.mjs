@@ -11,6 +11,7 @@ let tauriDriver;
 let exit = false;
 
 function resolveAppBinaryPath() {
+  if (process.env.TAURI_E2E_APP_PATH) return path.resolve(process.env.TAURI_E2E_APP_PATH);
   const base = path.resolve(__dirname, '../src-tauri/target/debug');
   // На Windows бинарь с .exe
   if (process.platform === 'win32') {
@@ -21,13 +22,30 @@ function resolveAppBinaryPath() {
 
 export const config = {
   hostname: '127.0.0.1',
-  port: 4444,
+  port: process.platform === 'darwin' ? 4445 : 4444,
+  // undici 6 + Node 26 rejects the manually supplied Content-Length on POST.
+  // The HTTP client computes it correctly when omitted.
+  transformRequest: (request) => {
+    request.headers?.delete('content-length');
+    return request;
+  },
+
+  services: process.platform === 'darwin'
+    ? [['tauri', {
+      appBinaryPath: resolveAppBinaryPath(),
+      driverProvider: 'embedded',
+      embeddedPort: 4445,
+      startTimeout: 90_000,
+      windowLabel: 'main',
+    }]]
+    : [],
 
   specs: [path.resolve(__dirname, './specs/**/*.e2e.mjs')],
 
   maxInstances: 1,
   capabilities: [
     {
+      browserName: 'tauri',
       maxInstances: 1,
       'tauri:options': {
         application: resolveAppBinaryPath(),
@@ -43,8 +61,13 @@ export const config = {
   },
 
   onPrepare: () => {
+    if (process.env.E2E_SKIP_BUILD === '1') return;
     // Собираем debug бинарь без бандла, чтобы путь был стабильным.
-    const res = spawnSync('pnpm', ['tauri', 'build', '--debug', '--no-bundle', '--ci'], {
+    const buildArgs = ['tauri', 'build', '--debug', '--no-bundle', '--ci'];
+    if (process.platform === 'darwin') {
+      buildArgs.push('--features', 'wdio', '--config', 'src-tauri/tauri.wdio.conf.json');
+    }
+    const res = spawnSync('pnpm', buildArgs, {
       cwd: path.resolve(__dirname, '..'),
       stdio: 'inherit',
       shell: true,
@@ -60,6 +83,7 @@ export const config = {
   },
 
   beforeSession: () => {
+    if (process.platform === 'darwin') return;
     // Запускаем tauri-driver, который проксирует WebDriver запросы в нативный драйвер (WebKitWebDriver на Linux).
     const driverBin =
       process.env.TAURI_DRIVER_PATH ??
@@ -81,7 +105,7 @@ export const config = {
   },
 
   afterSession: () => {
-    closeTauriDriver();
+    if (process.platform !== 'darwin') closeTauriDriver();
   },
 };
 

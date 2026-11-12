@@ -2,6 +2,26 @@
 
 Эти тесты запускают **реальное Tauri приложение** и управляют окнами через WebDriver.
 
+На macOS `pnpm e2e:tauri` собирает debug приложение с `wdio` feature и
+использует встроенный WebDriver сервер WebdriverIO. Тестовый плагин не входит
+в обычную сборку. По умолчанию запускается read-only desktop smoke; для всех
+старых сценариев синхронизации можно задать `E2E_ALL_SPECS=1`. На Linux и
+Windows сохраняется штатный `tauri-driver`.
+
+Для инспекции настоящего окна тест сохраняет карту видимых элементов (текст,
+роль, `data-testid`, CSS-классы, координаты и доступность кнопок):
+
+```bash
+E2E_SNAPSHOT_PATH=/tmp/hackinterview-desktop.json pnpm e2e:tauri
+```
+
+Результат: `/tmp/hackinterview-desktop-main.json` и
+`/tmp/hackinterview-desktop-settings.json`. Для скриншотов добавь
+`E2E_SCREENSHOT_DIR=/tmp/hackinterview-screens`. Через WebDriver можно также читать
+DOM, нажимать элементы и вызывать разрешённые Tauri-команды.
+Для повторного запуска уже собранного тестового бинаря без пересборки укажи
+`E2E_SKIP_BUILD=1 TAURI_E2E_APP_PATH=/path/to/Telegram`.
+
 ## Companion audio smoke на macOS
 
 Для проверки реального companion/STT без WebDriver есть отдельный smoke-тест через локальный companion HTTP API:

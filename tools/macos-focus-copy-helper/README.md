@@ -28,6 +28,9 @@ pnpm copy-helper:stop
 pnpm copy-helper:build
 ```
 
+If a Developer ID certificate is available, set `FOCUS_COPY_SIGNING_IDENTITY` on the first build.
+Later builds reuse the existing bundle's Developer ID, so macOS keeps the same Accessibility identity.
+
 The app bundle is created at:
 
 ```text
