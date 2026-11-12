@@ -87,12 +87,22 @@ async function openSnapshotStream(baseUrl, token) {
   };
 
   const waitForClose = async (timeoutMs = 6_000) => {
-    const timeout = setTimeout(() => controller.abort(new Error('SSE listener stayed open after disable')), timeoutMs);
+    let deadlineExceeded = false;
+    const timeout = setTimeout(() => {
+      deadlineExceeded = true;
+      controller.abort(new Error('SSE listener stayed open after disable'));
+    }, timeoutMs);
     try {
       for (;;) {
         const result = await reader.read();
         if (result.done) return;
       }
+    } catch (error) {
+      if (deadlineExceeded) throw new Error('SSE listener stayed open after disable', { cause: error });
+      // Abrupt server-side revocation may surface as ECONNRESET/undici
+      // "terminated" rather than a clean EOF, and is equally valid.
+      if (/terminated|socket|reset|aborted|closed/i.test(String(error))) return;
+      throw error;
     } finally {
       clearTimeout(timeout);
     }
