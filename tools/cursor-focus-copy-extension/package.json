@@ -42,8 +42,8 @@
       "properties": {
         "clipboardTools.backendUrl": {
           "type": "string",
-          "default": "http://127.0.0.1:43821/api/focus-copy/ingest",
-          "description": "Local service endpoint."
+          "default": "",
+          "description": "Optional explicit Companion endpoint override. Empty uses the active port from the private bridge. Server identity is always verified before sending."
         },
         "clipboardTools.accessToken": {
           "type": "string",
