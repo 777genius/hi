@@ -4,7 +4,7 @@ import { isCompanionSnapshotEnvelope, shouldApplyCompanionSnapshot } from './sna
 
 function snapshot(revision: string, instanceId?: string): TauriSnapshotEnvelope<CompanionSnapshotData> {
   return {
-    revision,
+    revision: revision as TauriSnapshotEnvelope<CompanionSnapshotData>['revision'],
     data: {
       controls: { instanceId } as CompanionSnapshotData['controls'],
     } as CompanionSnapshotData,
