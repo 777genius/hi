@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import net from 'node:net';
 import { ensureE2E, findWindowHandleByLabel, invoke } from '../helpers/tauriE2e.mjs';
 
 function assertInvokeResult(result, name) {
@@ -10,6 +11,35 @@ async function getJson(url, expectedStatus = 200) {
   const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(10_000) });
   assert.equal(response.status, expectedStatus, `unexpected HTTP status from ${new URL(url).pathname}`);
   return response.json();
+}
+
+async function openKeepAliveConnection(port) {
+  const socket = net.connect({ port, host: '127.0.0.1' });
+  await new Promise((resolve, reject) => {
+    let response = '';
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error('Companion HTTP keep-alive probe timed out'));
+    }, 7000);
+    const onError = (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    };
+    socket.once('error', onError);
+    socket.on('data', (chunk) => {
+      response += chunk.toString();
+      if (!response.includes('\r\n\r\n')) return;
+      clearTimeout(timeout);
+      socket.off('error', onError);
+      assert.match(response, /^HTTP\/1\.1 200 /, 'keep-alive HTTP probe must succeed');
+      resolve();
+    });
+    socket.once('connect', () => {
+      socket.write('GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n');
+    });
+  });
+  if (socket.destroyed) throw new Error('Companion closed keep-alive socket before Stop');
+  return socket;
 }
 
 async function openSnapshotStream(baseUrl, token) {
@@ -71,6 +101,7 @@ describe('Companion HTTP/SSE transport (real native Tauri)', () => {
 
     let stream;
     let nextStream;
+    let keepAliveSocket;
     try {
       const started = assertInvokeResult(await invoke('enable_companion_mode'), 'enable companion');
       assert.equal(started.enabled, true);
@@ -91,6 +122,7 @@ describe('Companion HTTP/SSE transport (real native Tauri)', () => {
       assert.equal(invalidToken.status, 403, 'invalid token must stay protected');
 
       stream = await openSnapshotStream(base, started.token);
+      keepAliveSocket = await openKeepAliveConnection(started.port);
       const initial = await stream.nextSnapshot();
       assert.equal(initial.data.controls.instanceId, first.data.controls.instanceId);
 
@@ -102,9 +134,14 @@ describe('Companion HTTP/SSE transport (real native Tauri)', () => {
       assert.equal(updated.data.controls.instanceId, initial.data.controls.instanceId);
       assert.ok(Number(updated.revision) > Number(initial.revision), 'SSE revision should advance');
 
+      const oldSocketClosed = new Promise((resolve) => keepAliveSocket.once('close', resolve));
       const stopped = assertInvokeResult(await invoke('disable_companion_mode'), 'disable companion');
       assert.equal(stopped.enabled, false);
       await stream.waitForClose();
+      await Promise.race([
+        oldSocketClosed,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('old HTTP keep-alive socket was not revoked on Stop')), 6000)),
+      ]);
 
       const restarted = assertInvokeResult(await invoke('enable_companion_mode'), 're-enable companion');
       assert.equal(restarted.enabled, true);
@@ -122,6 +159,7 @@ describe('Companion HTTP/SSE transport (real native Tauri)', () => {
     } finally {
       stream?.close();
       nextStream?.close();
+      keepAliveSocket?.destroy();
       const result = await invoke('disable_companion_mode');
       if (result?.__error) throw new Error(`cleanup companion: ${result.__error}`);
     }
