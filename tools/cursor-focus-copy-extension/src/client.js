@@ -1,10 +1,12 @@
+const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const os = require('os');
 const path = require('path');
 
-const DEFAULT_BACKEND_URL = 'http://127.0.0.1:43821/api/focus-copy/ingest';
+// There is no safe fixed default: Companion may have bound a fallback port.
+const DEFAULT_BACKEND_URL = '';
 const DEFAULT_TIMEOUT_MS = 3000;
 
 class BackendHttpError extends Error {
@@ -13,6 +15,21 @@ class BackendHttpError extends Error {
     this.name = 'BackendHttpError';
     this.statusCode = statusCode;
     this.responseText = responseText;
+  }
+}
+
+class CompanionEndpointNotFoundError extends Error {
+  constructor(message, searchedPaths) {
+    super(message);
+    this.name = 'CompanionEndpointNotFoundError';
+    this.searchedPaths = searchedPaths;
+  }
+}
+
+class CompanionIdentityError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'CompanionIdentityError';
   }
 }
 
@@ -219,6 +236,117 @@ function candidateConfigPaths(env = process.env, platform = process.platform) {
   ];
 }
 
+function discoverCompanionEndpoint(options = {}) {
+  const paths = candidateConfigPaths(options.env || process.env, options.platform || process.platform);
+  const fsImpl = options.fsImpl || fs;
+  for (const configPath of paths) {
+    try {
+      const bridge = JSON.parse(fsImpl.readFileSync(configPath, 'utf8'));
+      const port = bridge.companionPort;
+      const instanceId = nonEmptyString(bridge.instanceId);
+      if (
+        bridge.schemaVersion === 2 &&
+        bridge.companionActive === true &&
+        Number.isInteger(port) &&
+        port >= 1 &&
+        port <= 65535 &&
+        instanceId &&
+        instanceId.length <= 128
+      ) {
+        return {
+          url: `http://127.0.0.1:${port}/api/focus-copy/ingest`,
+          instanceId,
+          path: configPath,
+        };
+      }
+    } catch (_error) {
+      // Absent or stale metadata is never grounds for guessing a fixed port.
+    }
+  }
+  throw new CompanionEndpointNotFoundError(
+    'No active Companion endpoint in the private bridge file',
+    paths
+  );
+}
+
+function identityProof(token, instanceId, nonce) {
+  return crypto.createHash('sha256')
+    .update(`hack-interview-companion/v1:${token}:${instanceId}:${nonce}`)
+    .digest('hex');
+}
+
+/**
+ * Unauthenticated nonce challenge: no token or editor contents are transmitted
+ * until the listener at the chosen URL proves possession of the local token.
+ */
+function verifyCompanionIdentity(url, token, expectedInstanceId, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const target = new URL(url);
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    throw new CompanionIdentityError('Companion URL must use http(s)');
+  }
+  const nonce = crypto.randomBytes(16).toString('hex');
+  target.pathname = '/api/identity';
+  target.search = new URLSearchParams({ nonce }).toString();
+  target.hash = '';
+  const client = target.protocol === 'https:' ? https : http;
+  const maxResponseBytes = 16 * 1024;
+
+  return new Promise((resolve, reject) => {
+    const request = client.request(target, { method: 'GET', headers: { Accept: 'application/json' } }, (response) => {
+      const chunks = [];
+      let size = 0;
+      response.on('data', (part) => {
+        size += part.length;
+        if (size > maxResponseBytes) {
+          request.destroy(new CompanionIdentityError('Companion identity response too large'));
+          return;
+        }
+        chunks.push(Buffer.from(part));
+      });
+      response.on('end', () => {
+        if (response.statusCode !== 200) {
+          reject(new CompanionIdentityError('Companion identity challenge was rejected'));
+          return;
+        }
+        let data;
+        try {
+          data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        } catch {
+          reject(new CompanionIdentityError('Invalid Companion identity response'));
+          return;
+        }
+        const instanceId = nonEmptyString(data?.instanceId);
+        if (
+          data?.service !== 'hack-interview-companion' ||
+          data?.schemaVersion !== 1 ||
+          !instanceId ||
+          (expectedInstanceId && instanceId !== expectedInstanceId) ||
+          typeof data?.proof !== 'string'
+        ) {
+          reject(new CompanionIdentityError('Companion identity mismatch'));
+          return;
+        }
+        const actual = Buffer.from(data.proof, 'hex');
+        const expected = Buffer.from(identityProof(token, instanceId, nonce), 'hex');
+        if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+          reject(new CompanionIdentityError('Companion identity proof mismatch'));
+          return;
+        }
+        resolve();
+      });
+    });
+    request.on('error', (error) => reject(
+      error instanceof CompanionIdentityError
+        ? error
+        : new CompanionIdentityError('Companion identity challenge failed')
+    ));
+    request.setTimeout(timeoutMs, () => {
+      request.destroy(new CompanionIdentityError('Companion identity challenge timed out'));
+    });
+    request.end();
+  });
+}
+
 function candidateLogPaths(env = process.env, platform = process.platform) {
   return [];
 }
@@ -382,7 +510,15 @@ async function captureAndSendActiveEditor(input) {
     readLogTokens: input.readLogTokens,
   });
 
-  const backendUrl = nonEmptyString(input.backendUrl) || DEFAULT_BACKEND_URL;
+  const explicitUrl = nonEmptyString(input.backendUrl);
+  const endpoint = explicitUrl
+    ? { url: explicitUrl, instanceId: null }
+    : discoverCompanionEndpoint({
+      env: input.env,
+      fsImpl: input.fsImpl,
+      platform: input.platform,
+    });
+  const backendUrl = endpoint.url;
   if (tokenCandidates.length === 0) {
     throw new CompanionTokenNotFoundError(
       'Companion token not found',
@@ -393,6 +529,12 @@ async function captureAndSendActiveEditor(input) {
   let lastAuthError = null;
   for (const candidate of tokenCandidates) {
     try {
+      await verifyCompanionIdentity(
+        backendUrl,
+        candidate.token,
+        endpoint.instanceId,
+        input.requestTimeoutMs,
+      );
       const response = await postJson(backendUrl, payload, {
         token: candidate.token,
         timeoutMs: input.requestTimeoutMs,
@@ -406,8 +548,8 @@ async function captureAndSendActiveEditor(input) {
       };
     } catch (error) {
       if (
-        error instanceof BackendHttpError &&
-        (error.statusCode === 401 || error.statusCode === 403)
+        error instanceof CompanionIdentityError ||
+        (error instanceof BackendHttpError && (error.statusCode === 401 || error.statusCode === 403))
       ) {
         lastAuthError = error;
         continue;
@@ -422,6 +564,8 @@ async function captureAndSendActiveEditor(input) {
 
 module.exports = {
   BackendHttpError,
+  CompanionIdentityError,
+  CompanionEndpointNotFoundError,
   CompanionTokenNotFoundError,
   DEFAULT_BACKEND_URL,
   DEFAULT_TIMEOUT_MS,
@@ -431,6 +575,9 @@ module.exports = {
   candidateLogPaths,
   discoverCompanionTokenCandidates,
   discoverCompanionToken,
+  discoverCompanionEndpoint,
+  identityProof,
+  verifyCompanionIdentity,
   postJson,
   readTokensFromLogFile,
 };
