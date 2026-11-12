@@ -1,5 +1,7 @@
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+use super::atomic_file::write_atomic;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{AppConfig, SttConfig, UiPreferences};
@@ -18,33 +20,6 @@ pub struct PostUpdateMarker {
 pub struct ConfigStore;
 
 impl ConfigStore {
-    async fn write_file_atomic(path: &Path, contents: &str) -> Result<()> {
-        // Пишем во временный файл и только потом атомарно подменяем.
-        // На Windows rename может падать, если цель уже существует, поэтому делаем best-effort remove.
-        let mut tmp = path.to_path_buf();
-        tmp.set_extension("tmp");
-
-        tokio::fs::write(&tmp, contents).await?;
-
-        // Best-effort: если файл уже был — убираем, иначе rename может упасть на Windows.
-        let _ = tokio::fs::remove_file(path).await;
-
-        match tokio::fs::rename(&tmp, path).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                // Фоллбек на прямую запись (на случай нестандартных FS ограничений).
-                log::warn!(
-                    "Atomic rename failed for {:?}: {}. Falling back to direct write.",
-                    path,
-                    e
-                );
-                tokio::fs::write(path, contents).await?;
-                let _ = tokio::fs::remove_file(&tmp).await;
-                Ok(())
-            }
-        }
-    }
-
     /// Получить директорию конфигурации приложения
     fn config_dir() -> Result<PathBuf> {
         let config_dir =
@@ -73,7 +48,7 @@ impl ConfigStore {
         let path = Self::config_path()?;
 
         let json = serde_json::to_string_pretty(config)?;
-        tokio::fs::write(path, json).await?;
+        write_atomic(&path, &json).await?;
 
         log::debug!("STT config saved to disk");
         Ok(())
@@ -112,7 +87,7 @@ impl ConfigStore {
         let path = Self::app_config_path()?;
 
         let json = serde_json::to_string_pretty(config)?;
-        tokio::fs::write(path, json).await?;
+        write_atomic(&path, &json).await?;
 
         log::info!("App config saved to disk");
         Ok(())
@@ -136,20 +111,8 @@ impl ConfigStore {
                 std::fs::create_dir_all(parent)?;
             }
 
-            Self::write_file_atomic(&path, &json).await?;
+            write_atomic(&path, &json).await?;
 
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-
-                let permissions = std::fs::Permissions::from_mode(0o600);
-                if let Err(error) = tokio::fs::set_permissions(&path, permissions).await {
-                    log::warn!(
-                        "Failed to tighten companion bridge file permissions: {}",
-                        error
-                    );
-                }
-            }
         }
 
         log::debug!("Companion bridge token saved to disk");
@@ -236,7 +199,7 @@ impl ConfigStore {
             created_at_ms: chrono::Utc::now().timestamp_millis(),
         };
         let json = serde_json::to_string_pretty(&marker)?;
-        Self::write_file_atomic(&path, &json).await?;
+        write_atomic(&path, &json).await?;
         Ok(())
     }
 
@@ -269,7 +232,7 @@ impl ConfigStore {
     pub async fn save_ui_preferences(prefs: &UiPreferences) -> Result<()> {
         let path = Self::ui_preferences_path()?;
         let json = serde_json::to_string_pretty(prefs)?;
-        tokio::fs::write(path, json).await?;
+        write_atomic(&path, &json).await?;
         log::info!("UI preferences saved to disk");
         Ok(())
     }

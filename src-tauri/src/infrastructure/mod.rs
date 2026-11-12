@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod audio;
+pub(crate) mod atomic_file;
 pub mod auth_store; // Auth session + device_id (Rust SoT)
 pub mod auto_paste; // Автоматическая вставка текста
 pub mod clipboard; // Кроссплатформенная работа с clipboard
