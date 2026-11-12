@@ -22,7 +22,7 @@ export function shouldApplyCompanionSnapshot(
 export function isCompanionSnapshotEnvelope(value: unknown): value is CompanionSnapshot {
   if (!value || typeof value !== 'object') return false;
   const envelope = value as Partial<CompanionSnapshot>;
-  if (typeof envelope.revision !== 'string' || !/^\\d+$/.test(envelope.revision)) return false;
+  if (typeof envelope.revision !== 'string' || !/^[0-9]+$/.test(envelope.revision)) return false;
   const revision = Number(envelope.revision);
   if (!Number.isSafeInteger(revision)) return false;
   const data = envelope.data;
