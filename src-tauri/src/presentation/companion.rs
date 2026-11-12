@@ -815,33 +815,46 @@ async fn serve_listener(app_handle: AppHandle, listener: TcpListener) -> Result<
         .port();
     log::info!("Companion server listening on http://127.0.0.1:{port}");
 
+    // The listener owns every accepted HTTP/SSE task. Dropping this JoinSet
+    // on Companion Stop aborts old keep-alive sessions as well as the listener.
+    // This prevents a stale socket from becoming authenticated again after
+    // the server is enabled with its persisted token.
+    let mut connections = tokio::task::JoinSet::new();
     let mut consecutive_accept_errors = 0_u32;
     loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(connection) => {
-                consecutive_accept_errors = 0;
-                connection
+        tokio::select! {
+            finished = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = finished {
+                    log::debug!("Companion connection task exited: {}", error);
+                }
             }
-            Err(error) => {
-                // A transient accept failure should not permanently disconnect
-                // every phone while the desktop app continues running.
-                consecutive_accept_errors = (consecutive_accept_errors + 1).min(5);
-                let delay_ms = 200_u64 * (1_u64 << consecutive_accept_errors);
-                log::warn!("Companion listener accept failed (retrying in {}ms): {}", delay_ms, error);
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                continue;
+            accepted = listener.accept() => {
+                let (stream, peer) = match accepted {
+                    Ok(connection) => {
+                        consecutive_accept_errors = 0;
+                        connection
+                    }
+                    Err(error) => {
+                        // A transient accept error must not permanently detach
+                        // every phone while the desktop application is alive.
+                        consecutive_accept_errors = (consecutive_accept_errors + 1).min(5);
+                        let delay_ms = 200_u64 * (1_u64 << consecutive_accept_errors);
+                        log::warn!("Companion listener accept failed (retrying in {}ms): {}", delay_ms, error);
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        continue;
+                    }
+                };
+                log::debug!("Companion server accepted connection from {}", peer);
+                let app_handle_for_conn = app_handle.clone();
+                connections.spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let service = service_fn(move |req| route_request(app_handle_for_conn.clone(), req));
+                    if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
+                        log::debug!("Companion connection error: {}", err);
+                    }
+                });
             }
-        };
-        log::debug!("Companion server accepted connection from {}", peer);
-
-        let app_handle_for_conn = app_handle.clone();
-        tauri::async_runtime::spawn(async move {
-            let io = TokioIo::new(stream);
-            let service = service_fn(move |req| route_request(app_handle_for_conn.clone(), req));
-            if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
-                log::debug!("Companion connection error: {}", err);
-            }
-        });
+        }
     }
 }
 
