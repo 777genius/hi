@@ -93,16 +93,35 @@ impl ConfigStore {
         Ok(())
     }
 
-    /// Сохранить bridge-файл для локальных интеграций, которым нужен companion token.
+    /// The bridge's server endpoint must match the currently bound listener.
+    /// Token-only saves deliberately invalidate any stale endpoint from an old process.
     pub async fn save_companion_bridge_token(token: &str) -> Result<()> {
+        Self::save_companion_bridge_state(token, None, None).await
+    }
+
+    /// Publish the actual bound port and a per-start identity, never a fixed
+    /// assumption about 43821. An inactive bridge is intentionally not routable.
+    pub async fn save_companion_bridge_state(
+        token: &str,
+        port: Option<u16>,
+        instance_id: Option<&str>,
+    ) -> Result<()> {
+        let active = matches!((port, instance_id), (Some(1..=u16::MAX), Some(id)) if !id.is_empty());
+        if (port.is_some() || instance_id.is_some()) && !active {
+            anyhow::bail!("Invalid active companion bridge endpoint");
+        }
+
         let paths = Self::companion_bridge_token_paths()?;
         let updated_at_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
         let json = serde_json::to_string_pretty(&serde_json::json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "companionAccessToken": token,
+            "companionActive": active,
+            "companionPort": if active { port } else { None },
+            "instanceId": if active { instance_id } else { None },
             "updatedAtMs": updated_at_ms,
         }))?;
 
@@ -110,12 +129,10 @@ impl ConfigStore {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-
             write_atomic(&path, &json).await?;
-
         }
 
-        log::debug!("Companion bridge token saved to disk");
+        log::debug!("Companion bridge endpoint state saved");
         Ok(())
     }
 
