@@ -8,14 +8,16 @@ use crate::infrastructure::audio::{VadProcessor, VadResult};
 const SAMPLE_RATE: usize = 16_000;
 const FRAME_SAMPLES: usize = 480; // 30 ms
 const FRAME_MS: usize = 30;
-const SILENCE_MS: usize = 700;
+const SILENCE_MS: usize = 450;
 const PRE_ROLL_MS: usize = 150;
 const TAIL_MS: usize = 150;
-const MAX_UTTERANCE_MS: usize = 20_000;
+const MAX_UTTERANCE_MS: usize = 6_000;
+const PREVIEW_INTERVAL_MS: usize = 2_000;
 const MIN_VOICED_FRAMES: usize = 3; // reject clicks / extremely short noise
 const PRE_ROLL_SAMPLES: usize = SAMPLE_RATE * PRE_ROLL_MS / 1000;
 const TAIL_SAMPLES: usize = SAMPLE_RATE * TAIL_MS / 1000;
 const MAX_UTTERANCE_SAMPLES: usize = SAMPLE_RATE * MAX_UTTERANCE_MS / 1000;
+const PREVIEW_INTERVAL_SAMPLES: usize = SAMPLE_RATE * PREVIEW_INTERVAL_MS / 1000;
 const SILENCE_FRAMES: usize = SILENCE_MS.div_ceil(FRAME_MS);
 
 #[derive(Debug)]
@@ -23,6 +25,7 @@ pub struct Utterance {
     pub pcm: Vec<i16>,
     pub start_sample: u64,
     pub captured_at_ms: i64,
+    pub is_final: bool,
 }
 
 pub struct UtteranceSegmenter {
@@ -34,6 +37,7 @@ pub struct UtteranceSegmenter {
     utterance_start: u64,
     voiced_frames: usize,
     quiet_frames: usize,
+    last_preview_samples: usize,
 }
 
 impl UtteranceSegmenter {
@@ -47,6 +51,7 @@ impl UtteranceSegmenter {
             utterance_start: 0,
             voiced_frames: 0,
             quiet_frames: 0,
+            last_preview_samples: 0,
         })
     }
 
@@ -70,6 +75,10 @@ impl UtteranceSegmenter {
                 matches!(state, VadResult::Speech),
             ) {
                 result.push(utterance);
+            } else if matches!(state, VadResult::Speech) {
+                if let Some(preview) = self.preview() {
+                    result.push(preview);
+                }
             }
         }
         if complete_frames > 0 {
@@ -89,6 +98,7 @@ impl UtteranceSegmenter {
                 self.active.extend_from_slice(frame);
                 self.voiced_frames = 1;
                 self.quiet_frames = 0;
+                self.last_preview_samples = 0;
             } else {
                 self.pre_roll.extend(frame.iter().copied());
                 while self.pre_roll.len() > PRE_ROLL_SAMPLES {
@@ -116,10 +126,26 @@ impl UtteranceSegmenter {
         None
     }
 
+    fn preview(&mut self) -> Option<Utterance> {
+        if self.active.len().saturating_sub(self.last_preview_samples)
+            < PREVIEW_INTERVAL_SAMPLES
+        {
+            return None;
+        }
+        self.last_preview_samples = self.active.len();
+        Some(Utterance {
+            pcm: self.active.clone(),
+            start_sample: self.utterance_start,
+            captured_at_ms: chrono::Utc::now().timestamp_millis(),
+            is_final: false,
+        })
+    }
+
     fn finish_utterance(&mut self, trim_silence: bool) -> Option<Utterance> {
         let mut pcm = std::mem::take(&mut self.active);
         let voiced_frames = std::mem::take(&mut self.voiced_frames);
         let quiet_frames = std::mem::take(&mut self.quiet_frames);
+        self.last_preview_samples = 0;
         self.pre_roll.clear();
 
         if voiced_frames < MIN_VOICED_FRAMES {
@@ -140,6 +166,7 @@ impl UtteranceSegmenter {
             pcm,
             start_sample: self.utterance_start,
             captured_at_ms: chrono::Utc::now().timestamp_millis(),
+            is_final: true,
         })
     }
 
@@ -171,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn ends_at_720_ms_and_keeps_preroll_and_150_ms_tail() {
+    fn ends_after_short_pause_and_keeps_preroll_and_150_ms_tail() {
         let mut s = UtteranceSegmenter::new().unwrap();
         for _ in 0..5 {
             s.accept_frame(&QUIET, false);
@@ -201,6 +228,25 @@ mod tests {
             }
         }
         assert_eq!(finals, 3);
+    }
+
+    #[test]
+    fn previews_continuous_speech_before_six_second_final() {
+        let mut s = UtteranceSegmenter::new().unwrap();
+        let mut previews = Vec::new();
+        let mut final_utterance = None;
+        for _ in 0..MAX_UTTERANCE_MS / FRAME_MS {
+            if let Some(final_result) = s.accept_frame(&FRAME, true) {
+                final_utterance = Some(final_result);
+            } else if let Some(preview) = s.preview() {
+                previews.push(preview);
+            }
+        }
+        assert_eq!(previews.len(), 2);
+        assert!(previews.iter().all(|preview| !preview.is_final));
+        assert_eq!(previews[0].start_sample, 0);
+        assert!(previews[0].pcm.len() < previews[1].pcm.len());
+        assert_eq!(final_utterance.unwrap().pcm.len(), MAX_UTTERANCE_SAMPLES);
     }
 
     #[test]

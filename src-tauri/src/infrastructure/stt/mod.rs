@@ -5,6 +5,7 @@ mod backend_messages;
 mod deepgram;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod parakeet_ultra;
+mod local_glossary;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod utterance_segmenter;
 mod whisper_local;

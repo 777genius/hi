@@ -396,4 +396,7 @@ impl AudioCapture for MacosOutputAudioCapture {
     fn config(&self) -> AudioConfig {
         self.audio_config
     }
+    fn supports_quiet_refresh(&self) -> bool {
+        true
+    }
 }

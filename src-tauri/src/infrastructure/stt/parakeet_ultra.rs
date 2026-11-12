@@ -14,6 +14,7 @@ use crate::domain::{
     SttResult, Transcription, TranscriptionCallback,
 };
 use super::utterance_segmenter::{Utterance, UtteranceSegmenter};
+use super::local_glossary::LocalGlossary;
 
 const MODEL_FILE: &str = "parakeet-ultra-Q8_0.gguf";
 /// Handy catalog's pinned Q8_0 model at revision 39eeb55181f0d354fd934f06e92fd8d5037fed8e.
@@ -166,7 +167,7 @@ impl SttProvider for ParakeetUltraProvider {
 
     async fn start_stream(
         &mut self,
-        _on_partial: TranscriptionCallback,
+        on_partial: TranscriptionCallback,
         on_final: TranscriptionCallback,
         on_error: ErrorCallback,
         on_connection_quality: ConnectionQualityCallback,
@@ -199,6 +200,7 @@ impl SttProvider for ParakeetUltraProvider {
                 }
             };
             let opts = transcribe_cpp::RunOptions::default(); // automatic RU/EN/UK detection
+            let glossary = LocalGlossary::load();
             while let Some(job) = rx.blocking_recv() {
                 if cancelled.load(Ordering::Acquire) {
                     break;
@@ -220,16 +222,21 @@ impl SttProvider for ParakeetUltraProvider {
                         }
                         let text = result.text.trim();
                         if !text.is_empty() {
-                            let mut transcription =
-                                Transcription::final_result(text.to_string())
-                                    .with_timing(
-                                        job.start_sample as f64 / 16_000.0,
-                                        duration_s,
-                                    );
+                            let corrected = glossary.correct(text);
+                            let mut transcription = if job.is_final {
+                                Transcription::final_result(corrected)
+                            } else {
+                                Transcription::partial(corrected)
+                            }
+                            .with_timing(job.start_sample as f64 / 16_000.0, duration_s);
                             transcription.language = result.language;
                             // Preserve capture chronology, not decoder completion time.
                             transcription.timestamp = job.captured_at_ms;
-                            on_final(transcription);
+                            if job.is_final {
+                                on_final(transcription);
+                            } else {
+                                on_partial(transcription);
+                            }
                         }
                     }
                     Err(error) => {
@@ -280,6 +287,12 @@ impl SttProvider for ParakeetUltraProvider {
         let jobs = segmenter.accept(chunk)?;
         if let Some(tx) = &self.job_tx {
             for job in jobs {
+                // A preview is superseded by the next preview or final result.
+                // Keep the decode queue available for final utterances when the
+                // model is slower than real time on a busy machine.
+                if !job.is_final && tx.capacity() < JOB_QUEUE_CAPACITY {
+                    continue;
+                }
                 tx.try_send(job).map_err(|error| {
                     SttError::Processing(format!(
                         "Local STT decode queue unavailable or full: {error}"
@@ -468,9 +481,17 @@ mod tests {
         let system_text=a.join(" ").to_lowercase();
         let mic_text=b.join(" ").to_lowercase();
         // Real FLEURS RU and UK speech from the transcribe.cpp fixtures.
-        assert!(system_text.contains("добавил") || system_text.contains("следует"),
+        let system_expected = std::env::var("LOCAL_STT_EXPECT_SYSTEM").ok();
+        let mic_expected = std::env::var("LOCAL_STT_EXPECT_MIC").ok();
+        assert!(system_expected.as_deref().map_or_else(
+            || system_text.contains("добавил") || system_text.contains("следует"),
+            |term| system_text.contains(&term.to_lowercase()),
+        ),
             "unexpected RU system transcription: {system_text}");
-        assert!(mic_text.contains("управління") || mic_text.contains("маріанськ") || mic_text.contains("україн"),
+        assert!(mic_expected.as_deref().map_or_else(
+            || mic_text.contains("управління") || mic_text.contains("маріанськ") || mic_text.contains("україн"),
+            |term| mic_text.contains(&term.to_lowercase()),
+        ),
             "unexpected UK mic transcription: {mic_text}");
         assert!(!mic_text.contains("он добавил"), "audio channels mixed");
 

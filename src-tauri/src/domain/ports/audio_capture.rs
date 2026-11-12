@@ -51,4 +51,8 @@ pub trait AudioCapture: Send + Sync {
 
     /// Get current audio configuration
     fn config(&self) -> AudioConfig;
+
+    fn supports_quiet_refresh(&self) -> bool {
+        false
+    }
 }
