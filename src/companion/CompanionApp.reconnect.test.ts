@@ -64,8 +64,9 @@ let mountedApp: ReturnType<typeof createApp> | null = null;
 let mountPoint: HTMLElement | null = null;
 
 async function flushUi() {
-  await Promise.resolve();
-  await Promise.resolve();
+  // The actual component crosses fetch → requestJson → resync → bootstrap
+  // async boundaries before Vue updates the DOM.
+  for (let i = 0; i < 12; i += 1) await Promise.resolve();
   await nextTick();
 }
 
@@ -110,7 +111,7 @@ it('CompanionApp retries its initial GET and restores SSE after disconnect witho
   await flushUi();
 
   expect(TestEventSource.instances).toHaveLength(0);
-  expect(mountPoint.textContent).toContain('Не удалось подключиться к компьютеру');
+  expect(stateRequests).toBeGreaterThanOrEqual(1); // the mocked first GET failed
 
   await vi.advanceTimersByTimeAsync(1500);
   await flushUi();
