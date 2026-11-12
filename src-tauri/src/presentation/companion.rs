@@ -30,6 +30,8 @@ const COMPANION_PORT: u16 = 43821;
 const COMPANION_FALLBACK_PORT_CANDIDATES: [u16; 2] = [43822, 43823];
 const COMPANION_SSE_RETRY_MS: u64 = 1500;
 const COMPANION_SSE_HEARTBEAT_SECS: u64 = 15;
+const COMPANION_MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
+const COMPANION_REQUEST_BODY_TIMEOUT_SECS: u64 = 45;
 const COMPANION_TOPIC: &str = "companion-ui";
 const COMPANION_ICON_128_PNG: &[u8] = include_bytes!("../../icons/128x128.png");
 const COMPANION_ICON_512_PNG: &[u8] = include_bytes!("../../icons/icon.png");
@@ -1854,15 +1856,49 @@ fn has_json_content_type(headers: &hyper::HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+/// Avoid unbounded buffering of uploads from phone/extension clients. The
+/// limit applies to streamed bodies as well as a declared Content-Length.
+async fn collect_bounded_body<B>(
+    mut body: B,
+    max_bytes: usize,
+) -> Result<Vec<u8>, StatusCode>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+{
+    let mut collected = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| StatusCode::BAD_REQUEST)?;
+        if let Ok(chunk) = frame.into_data() {
+            if chunk.len() > max_bytes.saturating_sub(collected.len()) {
+                return Err(StatusCode::PAYLOAD_TOO_LARGE);
+            }
+            collected.extend_from_slice(&chunk);
+        }
+    }
+    Ok(collected)
+}
+
 async fn read_json_body<T: DeserializeOwned>(
     req: Request<Incoming>,
 ) -> Result<T, Response<CompanionBody>> {
-    let collected = req
-        .into_body()
-        .collect()
-        .await
-        .map_err(|_| text_response(StatusCode::BAD_REQUEST, "Failed to read request body"))?;
-    let bytes = collected.to_bytes();
+    let bytes = match timeout(
+        Duration::from_secs(COMPANION_REQUEST_BODY_TIMEOUT_SECS),
+        collect_bounded_body(req.into_body(), COMPANION_MAX_REQUEST_BODY_BYTES),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(StatusCode::PAYLOAD_TOO_LARGE)) => {
+            return Err(text_response(StatusCode::PAYLOAD_TOO_LARGE, "Request body too large"));
+        }
+        Ok(Err(_)) => {
+            return Err(text_response(StatusCode::BAD_REQUEST, "Failed to read request body"));
+        }
+        Err(_) => {
+            return Err(text_response(StatusCode::REQUEST_TIMEOUT, "Request body timed out"));
+        }
+    };
+
     if bytes.is_empty() {
         return serde_json::from_value(serde_json::json!({}))
             .map_err(|_| text_response(StatusCode::BAD_REQUEST, "Malformed JSON"));
@@ -2261,6 +2297,32 @@ fn is_usable_companion_ipv4(ip: Ipv4Addr) -> bool {
         || ip.is_link_local()
         || ip.is_multicast()
         || ip.is_broadcast())
+}
+
+#[cfg(test)]
+mod companion_request_body_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn streamed_request_is_rejected_when_the_total_exceeds_the_limit() {
+        let chunks = stream::iter([
+            Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"123"))),
+            Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"456"))),
+        ]);
+        let body = StreamBody::new(chunks);
+
+        let result = collect_bounded_body(body, 5).await;
+
+        assert!(matches!(result, Err(StatusCode::PAYLOAD_TOO_LARGE)));
+    }
+
+    #[tokio::test]
+    async fn request_exactly_at_limit_is_accepted() {
+        let body = Full::new(Bytes::from_static(br#"{"ok":true}"#));
+        let bytes = collect_bounded_body(body, 11).await.unwrap();
+
+        assert_eq!(&bytes, br#"{"ok":true}"#);
+    }
 }
 
 #[cfg(test)]
