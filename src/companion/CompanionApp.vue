@@ -12,6 +12,8 @@ import {
   toneForCompanionFailure,
 } from './connectionErrors';
 import { isCompanionPageVisible } from './pageVisibility';
+import { createCompanionReconnectScheduler } from './reconnectScheduler';
+import { shouldApplyCompanionSnapshot } from './snapshotEpoch';
 import {
   companionInstallHint,
   createCompanionRequestId,
@@ -57,6 +59,7 @@ const connectionText = ref(companionAvailable ? 'Подключаюсь к ко�
 const actionStatusText = ref('');
 const actionStatusTone = ref<StatusTone>('');
 const currentRevision = ref(0);
+const currentInstanceId = ref<string | null>(null);
 const actionInFlight = ref(false);
 const syncInFlight = ref(false);
 const aiQuestion = ref('');
@@ -80,6 +83,21 @@ let displayModeChangeHandler: (() => void) | null = null;
 let statusTimer: number | null = null;
 let resyncPromise: Promise<void> | null = null;
 const requestControllers = new Set<AbortController>();
+let componentUnmounted = false;
+const reconnectScheduler = createCompanionReconnectScheduler(
+  () => {
+    void resyncConnection({ reconnect: true }).catch((error) => {
+      handleResyncFailure(error, 'Пытаюсь восстановить связь с компьютером...');
+    });
+  },
+  () => (
+    !componentUnmounted
+    && companionAvailable
+    && connectionState.value !== 'disconnected'
+    && pageVisible()
+    && (typeof navigator === 'undefined' || navigator.onLine !== false)
+  ),
+);
 
 const feedMessages = computed(() => buildCompanionConversationFeedMessages(snapshot.value?.data));
 const selectedMessageIdSet = computed(() => new Set(selectedMessageIds.value));
@@ -260,14 +278,17 @@ async function stickToBottomIfNeeded(): Promise<void> {
 
 async function applySnapshot(next: TauriSnapshotEnvelope<CompanionSnapshotData>): Promise<void> {
   const nextRevision = statusRevision(next);
-  if (nextRevision < currentRevision.value) {
+  if (!shouldApplyCompanionSnapshot(next, currentRevision.value, currentInstanceId.value)) {
     return;
   }
 
   const shouldStickBottom = isNearBottom();
-  const revisionAdvanced = nextRevision > currentRevision.value;
+  const nextInstanceId = next.data?.controls?.instanceId ?? null;
+  const revisionAdvanced = nextInstanceId !== currentInstanceId.value
+    || nextRevision > currentRevision.value;
   snapshot.value = next;
   currentRevision.value = nextRevision;
+  currentInstanceId.value = nextInstanceId;
 
   if (shouldStickBottom && revisionAdvanced) {
     await stickToBottomIfNeeded();
@@ -513,16 +534,22 @@ function handleResyncFailure(error: unknown, fallbackText: string): void {
   const message = error instanceof Error ? error.message : String(error);
   const kind = classifyCompanionFailureMessage(message);
   if (kind === 'hidden') {
+    // A rapid hidden → visible transition may reuse an aborted in-flight GET.
+    reconnectScheduler.schedule();
     return;
   }
   if (kind === 'expired') {
     disposeEventSource();
+    reconnectScheduler.cancel();
   }
   setConnection(
     kind === 'expired' ? 'disconnected' : 'reconnecting',
     connectionTextForCompanionFailure(kind, fallbackText),
   );
   setStatus(message, toneForCompanionFailure(kind));
+  if (kind !== 'expired') {
+    reconnectScheduler.schedule();
+  }
 }
 
 function abortInFlightRequests(): void {
@@ -614,7 +641,7 @@ async function resyncConnection(options: {
     try {
       await refreshSnapshot();
 
-      if (!pageVisible()) {
+      if (componentUnmounted || !pageVisible()) {
         return;
       }
 
@@ -632,11 +659,16 @@ async function resyncConnection(options: {
   })();
 
   resyncPromise = task;
-  void task.finally(() => {
-    if (resyncPromise === task) {
-      resyncPromise = null;
-    }
-  });
+  // .finally() returns a *new* rejected promise when GET fails; attaching
+  // both outcomes keeps cleanup from generating an unhandled rejection.
+  void task.then(
+    () => {
+      if (resyncPromise === task) resyncPromise = null;
+    },
+    () => {
+      if (resyncPromise === task) resyncPromise = null;
+    },
+  );
 
   return task;
 }
@@ -663,7 +695,10 @@ async function sendAction(
   }
 
   const requestId = options.requestId ?? createCompanionRequestId();
-  const retryOnRecoverable = options.retryOnRecoverable ?? true;
+  // AI/prompt requests are not guaranteed exactly-once across a desktop
+  // process restart (the server's request-id cache is in memory).
+  const retryOnRecoverable = options.retryOnRecoverable
+    ?? (path !== '/api/ai/request' && path !== '/api/prompt/send');
   let retryAfterRecover = false;
   let originalError: unknown = null;
 
@@ -714,9 +749,17 @@ async function sendAction(
     if (shouldRecoverCompanionConnection(kind)) {
       disposeEventSource();
       setConnection('reconnecting', connectionTextForCompanionFailure(kind, 'Пытаюсь восстановить связь с компьютером...'));
+      if (!retryOnRecoverable) {
+        reconnectScheduler.schedule();
+      }
     }
 
-    setStatus(message, toneForCompanionFailure(kind));
+    setStatus(
+      !retryOnRecoverable && shouldRecoverCompanionConnection(kind)
+        ? 'Не удалось подтвердить отправку. После восстановления связи проверь ленту перед повтором.'
+        : message,
+      toneForCompanionFailure(kind),
+    );
 
     if (
       shouldRecoverCompanionConnection(kind)
@@ -863,6 +906,7 @@ function connectEvents(): void {
 
   source.onopen = () => {
     if (eventSource !== source) return;
+    reconnectScheduler.reset();
     setPwaLiveDiagnostic('ok', 'Live updates активны');
     setConnection('connected', 'Связь с компьютером активна');
     if (!actionInFlight.value) {
@@ -877,6 +921,7 @@ function connectEvents(): void {
         const next = JSON.parse(event.data) as TauriSnapshotEnvelope<CompanionSnapshotData>;
         await applySnapshot(next);
         if (eventSource !== source) return;
+        reconnectScheduler.reset();
         setConnection('connected', 'Связь с компьютером активна');
         if (!actionInFlight.value) {
           setStatus('');
@@ -902,26 +947,25 @@ function connectEvents(): void {
       disposeEventSource();
       return;
     }
-    void (async () => {
-      setPwaLiveDiagnostic('warn', 'Live updates временно недоступны');
-      setConnection('reconnecting', 'Пытаюсь переподключиться к компьютеру...');
-      try {
-        await resyncConnection({ reconnect: true });
-      } catch (error) {
-        handleResyncFailure(error, 'Пытаюсь переподключиться к компьютеру...');
-      }
-    })();
+    // Close the browser's own EventSource retry loop: a single bounded
+    // scheduler owns reconnects, including first load and malformed frames.
+    disposeEventSource();
+    setPwaLiveDiagnostic('warn', 'Live updates временно недоступны');
+    setConnection('reconnecting', 'Пытаюсь переподключиться к компьютеру...');
+    reconnectScheduler.schedule();
   };
 }
 
 function onVisibilityChange(): void {
   if (document.visibilityState === 'hidden') {
+    reconnectScheduler.cancel();
     abortForHiddenLifecycle();
     disposeEventSource();
     return;
   }
 
   if (document.visibilityState === 'visible') {
+    reconnectScheduler.cancel();
     void resyncConnection({ reconnect: true }).catch((error) => {
       handleResyncFailure(error, 'Связь с компьютером временно потеряна');
     });
@@ -932,12 +976,14 @@ function onOnline(): void {
   if (!pageVisible()) {
     return;
   }
+  reconnectScheduler.cancel();
   void resyncConnection({ reconnect: true }).catch((error) => {
     handleResyncFailure(error, 'Пытаюсь восстановить связь с компьютером...');
   });
 }
 
 function onOffline(): void {
+  reconnectScheduler.cancel();
   abortInFlightRequests();
   disposeEventSource();
   if (!pageVisible()) {
@@ -953,12 +999,14 @@ function onPageShow(): void {
   if (!pageVisible()) {
     return;
   }
+  reconnectScheduler.cancel();
   void resyncConnection({ reconnect: true }).catch((error) => {
     handleResyncFailure(error, 'Обновляю состояние после возврата на страницу');
   });
 }
 
 function onPageHide(): void {
+  reconnectScheduler.cancel();
   abortForHiddenLifecycle();
   disposeEventSource();
 }
@@ -1043,6 +1091,8 @@ watch(
 );
 
 onUnmounted(() => {
+  componentUnmounted = true;
+  reconnectScheduler.cancel();
   clearStatusTimer();
   cleanupPwaDisplayModeListener();
   scrollEl.value?.removeEventListener('scroll', updateFeedScrolledState);
