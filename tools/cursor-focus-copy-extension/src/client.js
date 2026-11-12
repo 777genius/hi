@@ -269,9 +269,9 @@ function discoverCompanionEndpoint(options = {}) {
   );
 }
 
-function identityProof(token, instanceId, nonce) {
+function identityProof(token, instanceId, port, nonce) {
   return crypto.createHash('sha256')
-    .update(`hack-interview-companion/v1:${token}:${instanceId}:${nonce}`)
+    .update(`hack-interview-companion/v2:${token}:${instanceId}:${port}:${nonce}`)
     .digest('hex');
 }
 
@@ -318,7 +318,7 @@ function verifyCompanionIdentity(url, token, expectedInstanceId, timeoutMs = DEF
         const instanceId = nonEmptyString(data?.instanceId);
         if (
           data?.service !== 'hack-interview-companion' ||
-          data?.schemaVersion !== 1 ||
+          data?.schemaVersion !== 2 ||
           !instanceId ||
           (expectedInstanceId && instanceId !== expectedInstanceId) ||
           typeof data?.proof !== 'string'
@@ -327,7 +327,8 @@ function verifyCompanionIdentity(url, token, expectedInstanceId, timeoutMs = DEF
           return;
         }
         const actual = Buffer.from(data.proof, 'hex');
-        const expected = Buffer.from(identityProof(token, instanceId, nonce), 'hex');
+        const port = Number(target.port || (target.protocol === 'https:' ? 443 : 80));
+        const expected = Buffer.from(identityProof(token, instanceId, port, nonce), 'hex');
         if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
           reject(new CompanionIdentityError('Companion identity proof mismatch'));
           return;
