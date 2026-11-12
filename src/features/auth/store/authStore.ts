@@ -14,9 +14,10 @@ export const useAuthStore = defineStore('auth', () => {
   const error = ref<string | null>(null);
   const pendingEmail = ref<string | null>(null);
   const userEmail = ref<string | null>(null); // Email текущего пользователя
+  const localAccess = ref(false);
 
   // Computed
-  const isAuthenticated = computed(() => status.value === 'authenticated');
+  const isAuthenticated = computed(() => localAccess.value || status.value === 'authenticated');
   const needsVerification = computed(() => status.value === 'needs_verification');
   const isLoading = computed(() => status.value === 'loading');
   const accessToken = computed(() => session.value?.accessToken);
@@ -34,6 +35,15 @@ export const useAuthStore = defineStore('auth', () => {
     pendingEmail.value = null;
     error.value = null;
     status.value = 'authenticated';
+  }
+
+  function setLocalAccess(): void {
+    session.value = null;
+    userEmail.value = null;
+    pendingEmail.value = null;
+    error.value = null;
+    localAccess.value = true;
+    status.value = 'unauthenticated';
   }
 
   function setUnauthenticated(): void {
@@ -84,6 +94,7 @@ export const useAuthStore = defineStore('auth', () => {
     error,
     pendingEmail,
     userEmail,
+    localAccess,
 
     // Computed
     isAuthenticated,
@@ -94,6 +105,7 @@ export const useAuthStore = defineStore('auth', () => {
     // Mutations
     setLoading,
     setAuthenticated,
+    setLocalAccess,
     setUnauthenticated,
     setNeedsVerification,
     setError,

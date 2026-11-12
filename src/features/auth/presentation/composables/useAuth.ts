@@ -3,6 +3,8 @@ import { useAuthStore } from '../../store/authStore';
 import { getAuthContainer } from '../../infrastructure/di/authContainer';
 import { AuthError, AuthErrorCode } from '../../domain/errors';
 import { useAuthState } from './useAuthState';
+import { invoke } from '@tauri-apps/api/core';
+import { isTauriAvailable } from '../../../../utils/tauri';
 
 /**
  * Основной composable для авторизации
@@ -85,6 +87,18 @@ export function useAuth() {
     // статус на unauthenticated (пустой store на диске) и сломать e2e сценарии.
     if (import.meta.env.VITE_E2E === '1' && store.status === 'authenticated') {
       return;
+    }
+
+    if (isTauriAvailable()) {
+      try {
+        const snapshot = await invoke<{ data: { local_no_auth?: boolean } }>('get_auth_state_snapshot');
+        if (snapshot.data.local_no_auth === true) {
+          store.setLocalAccess();
+          return;
+        }
+      } catch {
+        // Without an explicit local-mode response, use normal authentication.
+      }
     }
 
     if (!options.silent) {

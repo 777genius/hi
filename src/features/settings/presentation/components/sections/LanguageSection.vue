@@ -4,7 +4,7 @@
  * Полный список языков Deepgram Nova-3 (~45 языков).
  */
 
-import { computed, watch } from 'vue';
+import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import SettingGroup from '../shared/SettingGroup.vue';
 import FlagIcon from '@/presentation/components/FlagIcon.vue';
@@ -12,7 +12,7 @@ import { useSettings } from '../../composables/useSettings';
 import { STT_LANGUAGES } from '@/i18n.locales';
 
 const { t } = useI18n();
-const { language, syncLocale } = useSettings();
+const { language } = useSettings();
 
 interface SttLanguageOption {
   value: string;
@@ -28,9 +28,6 @@ const languageOptions = computed<SttLanguageOption[]>(() =>
 
 const isMulti = computed(() => language.value === 'multi');
 
-watch(language, () => {
-  syncLocale({ persist: false });
-});
 </script>
 
 <template>

@@ -6,6 +6,10 @@ import App from './App.vue';
 import './assets/style.css';
 import { installE2eHooks } from './e2e/e2eHooks';
 
+if (import.meta.env.VITE_E2E === '1') {
+  void import('@wdio/tauri-plugin');
+}
+
 const pinia = createPinia();
 const app = createApp(App);
 

@@ -1205,6 +1205,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  stopHaikuWaitTimer();
   store.cleanup();
   chatStore.cleanup();
   appConfigStore.stopSync();
@@ -1355,6 +1356,25 @@ const minimizeWindow = async () => {
 };
 
 const haikuHoverArmed = ref(true);
+const haikuStopInFlight = ref(false);
+const haikuRequestPending = ref(false);
+const haikuWaitSeconds = ref(0);
+let haikuWaitTimer: ReturnType<typeof setInterval> | null = null;
+let haikuWaitStartedAt = 0;
+
+function stopHaikuWaitTimer(): void {
+  if (haikuWaitTimer) clearInterval(haikuWaitTimer);
+  haikuWaitTimer = null;
+}
+
+function startHaikuWaitTimer(): void {
+  stopHaikuWaitTimer();
+  haikuWaitStartedAt = Date.now();
+  haikuWaitSeconds.value = 0;
+  haikuWaitTimer = setInterval(() => {
+    haikuWaitSeconds.value = Math.floor((Date.now() - haikuWaitStartedAt) / 1000);
+  }, 1000);
+}
 
 const onHaikuHover = async () => {
   try {
@@ -1386,17 +1406,26 @@ const onHaikuPointerEnter = async () => {
   // Запускаем только при "входе извне". Если курсор уже был над кнопкой,
   // или мы только что отменили запрос — не триггерим повторно.
   if (!haikuHoverArmed.value) return;
-  if (chatStore.isHaikuStreaming) return;
+  if (chatStore.isHaikuStreaming || haikuRequestPending.value) return;
   haikuHoverArmed.value = false;
-  await onHaikuHover();
+  haikuRequestPending.value = true;
+  startHaikuWaitTimer();
+  try {
+    await onHaikuHover();
+  } finally {
+    haikuRequestPending.value = false;
+    if (!chatStore.isHaikuStreaming) stopHaikuWaitTimer();
+  }
 };
 
 const onHaikuPointerLeave = () => {
   haikuHoverArmed.value = true;
 };
 
-const onHaikuClick = async () => {
+const stopHaikuGeneration = async () => {
   if (!chatStore.isHaikuStreaming) return;
+  if (haikuStopInFlight.value) return;
+  haikuStopInFlight.value = true;
   chatStore.cancelActiveHaikuStreams();
   try {
     const response = await invoke<CompanionActionResponse>(CMD_CANCEL_HAIKU_STREAMS);
@@ -1409,6 +1438,24 @@ const onHaikuClick = async () => {
   // Требуем реальный выход курсора, чтобы следующий запуск был только "снаружи".
   haikuHoverArmed.value = false;
 };
+
+const onHaikuStopHover = async () => {
+  await stopHaikuGeneration();
+};
+
+const onHaikuStopClick = async () => {
+  await stopHaikuGeneration();
+};
+
+watch(
+  () => chatStore.isHaikuStreaming,
+  (streaming) => {
+    if (!streaming) {
+      haikuStopInFlight.value = false;
+      if (!haikuRequestPending.value) stopHaikuWaitTimer();
+    }
+  }
+);
 
 const onMicToggleClick = async () => {
   try {
@@ -1565,8 +1612,17 @@ const onChatMouseDown = (e: MouseEvent) => {
         class="permission-warning-overlay no-drag"
       >
         <div class="permission-warning-card">
-          <div class="permission-warning-title">
-            Ожидаем разрешения
+          <div class="permission-warning-heading">
+            <div class="permission-warning-title">Ожидаем разрешения</div>
+            <button
+              class="permission-warning-minimize no-drag"
+              type="button"
+              :aria-label="t('main.minimize')"
+              :title="t('main.minimize')"
+              @click="minimizeWindow"
+            >
+              <span class="mdi mdi-window-minimize" aria-hidden="true" />
+            </button>
           </div>
 
           <div v-if="shouldShowSystemAudioPermissionWarning" class="permission-warning-item">
@@ -1843,6 +1899,7 @@ const onChatMouseDown = (e: MouseEvent) => {
         <ConversationFeed
           ref="conversationFeedRef"
           :messages="chatStore.messages"
+          :assistant-streaming="chatStore.isHaikuStreaming"
           :empty-text="store.displayText"
           :selecting="lassoActive"
           :editing-message-id="editingMessageId"
@@ -2038,25 +2095,45 @@ const onChatMouseDown = (e: MouseEvent) => {
               </button>
             </template>
           </v-tooltip>
-          <v-tooltip :text="chatStore.isHaikuStreaming ? 'Отменить генерацию' : 'Отправить в AI'" location="top">
-            <template #activator="{ props: tp }">
-              <button
-                v-bind="tp"
-                class="haiku-button no-drag"
-                :class="{ loading: chatStore.isHaikuStreaming }"
-                :disabled="!chatStore.canRequestHaiku && !chatStore.isHaikuStreaming"
-                @pointerenter="onHaikuPointerEnter"
-                @pointerleave="onHaikuPointerLeave"
-                @mouseenter="onHaikuPointerEnter"
-                @mouseleave="onHaikuPointerLeave"
-                @mousemove="onHaikuPointerEnter"
-                @click="onHaikuClick"
-              >
-                <span v-if="chatStore.isHaikuStreaming" class="haiku-spinner" />
-                <span v-else class="mdi mdi-robot haiku-icon" />
-              </button>
-            </template>
-          </v-tooltip>
+          <div class="haiku-control-group">
+            <span v-if="haikuRequestPending || chatStore.isHaikuStreaming" class="haiku-wait-label">
+              {{ haikuRequestPending ? 'Отправляю…' : `AI отвечает · ${haikuWaitSeconds} с` }}
+            </span>
+            <v-tooltip :text="chatStore.isHaikuStreaming ? 'Генерация ответа...' : 'Отправить в AI'" location="top">
+              <template #activator="{ props: tp }">
+                <button
+                  v-bind="tp"
+                  class="haiku-button no-drag"
+                  data-testid="haiku-generate-button"
+                  :class="{ loading: chatStore.isHaikuStreaming }"
+                  :disabled="!chatStore.canRequestHaiku && !chatStore.isHaikuStreaming"
+                  @pointerenter="onHaikuPointerEnter"
+                  @pointerleave="onHaikuPointerLeave"
+                  @mouseenter="onHaikuPointerEnter"
+                  @mouseleave="onHaikuPointerLeave"
+                  @mousemove="onHaikuPointerEnter"
+                >
+                  <span v-if="chatStore.isHaikuStreaming" class="haiku-spinner" />
+                  <span v-else class="mdi mdi-robot haiku-icon" />
+                </button>
+              </template>
+            </v-tooltip>
+            <v-tooltip v-if="chatStore.isHaikuStreaming" text="Наведи, чтобы остановить ответ" location="top">
+              <template #activator="{ props: tp }">
+                <button
+                  v-bind="tp"
+                  class="haiku-stop-button no-drag"
+                  data-testid="haiku-stop-button"
+                  :disabled="haikuStopInFlight"
+                  @pointerenter="onHaikuStopHover"
+                  @mouseenter="onHaikuStopHover"
+                  @click.stop="onHaikuStopClick"
+                >
+                  <span class="mdi mdi-stop"></span>
+                </button>
+              </template>
+            </v-tooltip>
+          </div>
         </div>
         <div class="controls-right no-drag">
           <v-tooltip v-if="chatStore.selectedCount > 0" text="Снять выделение" location="top">
@@ -2180,7 +2257,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 .permission-warning-overlay {
   position: absolute;
-  inset: 0;
+  inset: 64px 0 0;
   z-index: 20;
   display: flex;
   align-items: center;
@@ -2207,7 +2284,32 @@ const onChatMouseDown = (e: MouseEvent) => {
   font-size: 15px;
   font-weight: 700;
   color: var(--color-text);
+}
+
+.permission-warning-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   margin-bottom: 10px;
+}
+
+.permission-warning-minimize {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.permission-warning-minimize:hover {
+  background: rgba(128, 128, 128, 0.2);
 }
 
 .permission-warning-item {
@@ -2458,6 +2560,27 @@ const onChatMouseDown = (e: MouseEvent) => {
   flex-shrink: 0;
 }
 
+.haiku-control-group {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.haiku-wait-label {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(20, 20, 24, 0.9);
+  color: #fff;
+  font-size: 11px;
+  pointer-events: none;
+}
+
 .haiku-button {
   width: 48px;
   height: 48px;
@@ -2491,6 +2614,39 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 .haiku-button.loading {
   background: rgba(244, 67, 54, 0.18);
+}
+
+.haiku-stop-button {
+  position: absolute;
+  left: calc(100% + 5px);
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(244, 67, 54, 0.62);
+  background: rgba(244, 67, 54, 0.94);
+  color: rgba(255, 255, 255, 0.96);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  opacity: 0.94;
+  transform: translateY(-50%);
+  transition: opacity 0.12s ease, transform 0.12s ease, background 0.12s ease;
+  z-index: 3;
+}
+
+.haiku-stop-button:hover:not(:disabled) {
+  opacity: 1;
+  background: rgba(220, 38, 38, 1);
+  transform: translateY(-50%) scale(1.08);
+}
+
+.haiku-stop-button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .haiku-icon {
@@ -3468,6 +3624,14 @@ const onChatMouseDown = (e: MouseEvent) => {
     height: 28px;
   }
 
+  .haiku-stop-button {
+    left: calc(100% + 4px);
+    width: 22px;
+    height: 22px;
+    border-radius: 7px;
+    font-size: 13px;
+  }
+
   .record-button {
     width: 58px;
     height: 58px;
@@ -3540,6 +3704,14 @@ const onChatMouseDown = (e: MouseEvent) => {
     height: 38px;
     border-radius: 10px;
     font-size: 17px;
+  }
+
+  .haiku-stop-button {
+    left: calc(100% + 3px);
+    width: 20px;
+    height: 20px;
+    border-radius: 7px;
+    font-size: 12px;
   }
 
   .record-button {

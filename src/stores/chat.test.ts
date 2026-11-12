@@ -16,11 +16,11 @@ const DEFAULT_PROMPT = `Ты — ассистент на техническом 
 1) Если есть свежий "ЗАПРОС:" — ответь на него, используя "ОС:", "МИКРОФОН:" и "ПОМОЩНИК:" как контекст.
 2) Если "ЗАПРОС:" нет — найди последний явный или неявный вопрос/задачу: в первую очередь из строк "ОС:". Если строк "ОС:" нет — используй строки "МИКРОФОН:".
 3) Дать лучший краткий ответ по делу (без воды), можно с короткими примерами/шагами.
-4) Если вопрос неясен из-за распознавания — задай 1 уточняющий вопрос и предложи 1-2 вероятные интерпретации.
+4) Если речь распознана неточно, выбери наиболее вероятный смысл и ответь прямо, без уточняющих вопросов.
 5) Возможно в вопросах не будет "?". Ты должен понимать где вопросы.
 
 Формат ответа:
-- Сначала 3–7 буллетов с ответом (каждый пункт начинай с "- ").
+- По умолчанию отвечай коротким связным абзацем. Список нужен только для действительно нескольких пунктов или если его попросили.
 - Затем (если нужно) короткий пример кода.
 - Не пересказывай весь контекст и не цитируй теги "ОС:"/"МИКРОФОН:"/"ПОМОЩНИК:"/"ЗАПРОС:".
 
@@ -227,6 +227,20 @@ describe('chat store (selection + context)', () => {
     expect(store.haikuMessages[0]?.insertAfterId).toBe('stt:1:3:c');
   });
 
+  it('keeps an assistant response before speech recorded after the response began', () => {
+    const store = useChatStore();
+    transcriptionProxy.finalUtterances.push({ id: 'question', sessionId: 1, text: 'Question', timestamp: 100 });
+    store.hydrateFromCompanionSnapshot(companionSnapshot([{
+      id: 'answer', kind: 'haiku', role: 'incoming', status: 'final', text: 'Answer',
+      createdAtMs: 200, seq: 1, insertAfterId: 'question',
+    }, {
+      id: 'later-speech', kind: 'mic', role: 'outgoing', status: 'final', text: 'Later speech',
+      createdAtMs: 300, seq: 2,
+    }]));
+
+    expect(store.messages.map((message) => message.id)).toEqual(['question', 'answer', 'later-speech']);
+  });
+
   it('selection ignores non-final and assistant messages', () => {
     transcriptionProxy.finalUtterances.push({ id: 'stt:1:1:a', sessionId: 1, text: 'alpha', timestamp: 1 });
     transcriptionProxy.partialText = 'live alpha';
@@ -356,25 +370,25 @@ describe('chat store (selection + context)', () => {
     invokeMock.mockResolvedValueOnce('r-web-1').mockResolvedValueOnce('r-web-2');
 
     const store = useChatStore();
-    expect(store.openaiResponsesWebSearchEnabled).toBe(true);
+    expect(store.openaiResponsesWebSearchEnabled).toBe(false);
 
     await store.requestHaikuFromAnchor();
     expect(invokeMock).toHaveBeenCalledWith(
       'start_haiku_stream',
       expect.objectContaining({
-        openaiResponsesWebSearch: true,
+        openaiResponsesWebSearch: false,
       })
     );
 
     store.toggleOpenAiResponsesWebSearch();
-    expect(store.openaiResponsesWebSearchEnabled).toBe(false);
+    expect(store.openaiResponsesWebSearchEnabled).toBe(true);
 
     await store.sendPromptToLlm({ text: 'fresh docs?', images: [] });
     expect(invokeMock).toHaveBeenLastCalledWith(
       'start_haiku_chat_stream',
       expect.objectContaining({
         questionText: 'fresh docs?',
-        openaiResponsesWebSearch: false,
+        openaiResponsesWebSearch: true,
       })
     );
   });

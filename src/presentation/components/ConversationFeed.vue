@@ -4,7 +4,7 @@ import type { ConversationFeedMessage } from '../conversationFeed';
 import { renderMarkdownToSafeHtml } from '@/utils/markdown';
 import { highlightMessage, highlightRawCodeBlock, messageHasCode } from '@/utils/codeHighlight';
 import { isCodeBlockExpandedFromTarget, toggleCodeBlockCollapseFromTarget } from '../feedCodeBlocks';
-import { DEFAULT_SCROLL_BOTTOM_THRESHOLD_PX, isNearScrollBottom, scrollElementToBottom } from '../feedScroll';
+import { DEFAULT_SCROLL_BOTTOM_THRESHOLD_PX, isNearScrollBottom, scrollBottomRemaining, scrollElementToBottom } from '../feedScroll';
 
 type HighlightEntry = { sourceText: string; html: string; expanded: boolean };
 type HighlightCandidate = { id: string; text: string; forceCode: boolean; expanded: boolean };
@@ -19,6 +19,7 @@ const props = withDefaults(defineProps<{
   anchorMode?: 'tail' | 'fixed';
   anchorSttIndex?: number;
   messagesClickable?: boolean;
+  assistantStreaming?: boolean;
   isSelected?: (id: string) => boolean;
   isOutOfContext?: (message: ConversationFeedMessage) => boolean;
 }>(), {
@@ -27,6 +28,7 @@ const props = withDefaults(defineProps<{
   anchorMode: 'tail',
   anchorSttIndex: 0,
   messagesClickable: false,
+  assistantStreaming: false,
   isSelected: () => false,
   isOutOfContext: () => false,
 });
@@ -50,6 +52,10 @@ const activeCandidateByMessageId = reactive<Record<string, string>>({});
 let scrollStateFrame: number | null = null;
 let shouldStickToBottomAfterRender = false;
 let stickToBottomScheduled = false;
+let resumeAfterUserScroll = false;
+let frozenScrollTop: number | null = null;
+let userScrollIntent = false;
+let wasNearBottom = true;
 
 defineExpose({
   scrollEl,
@@ -185,7 +191,9 @@ function expandCollapsedMessage(message: ConversationFeedMessage, event: MouseEv
 }
 
 function renderHaikuMarkdown(text: string): string {
-  return renderMarkdownToSafeHtml(String(text ?? ''));
+  const answer = String(text ?? '').trim();
+  const singleBullet = answer.match(/^[-*•]\s+([^\n]+)$/);
+  return renderMarkdownToSafeHtml(singleBullet ? singleBullet[1] : answer);
 }
 
 function candidateList(message: ConversationFeedMessage) {
@@ -348,7 +356,24 @@ function scheduleScrollStateUpdate(): void {
 }
 
 function onScroll(): void {
+  const element = scrollEl.value;
+  if (element && !shouldStickToBottomAfterRender && !props.assistantStreaming) {
+    wasNearBottom = isNearBottom(element);
+  }
+  if (props.assistantStreaming && userScrollIntent && element && !resumeAfterUserScroll) {
+    frozenScrollTop = element.scrollTop;
+  }
+  if (props.assistantStreaming && userScrollIntent && element && !resumeAfterUserScroll &&
+      scrollBottomRemaining(element) <= 2) {
+    resumeAfterUserScroll = true;
+    frozenScrollTop = null;
+    wasNearBottom = true;
+  }
   updateScrollToBottomVisibility();
+}
+
+function onUserScrollIntent(): void {
+  userScrollIntent = true;
 }
 
 function scrollToBottom(behavior: ScrollBehavior = 'smooth'): void {
@@ -359,15 +384,33 @@ function scrollToBottom(behavior: ScrollBehavior = 'smooth'): void {
     top: element.scrollHeight,
     behavior,
   });
+  wasNearBottom = true;
+  if (props.assistantStreaming) {
+    resumeAfterUserScroll = true;
+    frozenScrollTop = null;
+  }
   scheduleScrollStateUpdate();
 }
 
 function rememberStickToBottomIfCurrentlyPinned(): void {
-  const element = scrollEl.value;
-  if (!element || !isNearBottom(element)) return;
+  if (props.assistantStreaming && !resumeAfterUserScroll) return;
+  if (props.assistantStreaming && resumeAfterUserScroll) {
+    shouldStickToBottomAfterRender = true;
+    scheduleStickToBottomAfterRender();
+    return;
+  }
+  if (!scrollEl.value || !wasNearBottom) return;
   shouldStickToBottomAfterRender = true;
   scheduleStickToBottomAfterRender();
 }
+
+watch(() => props.assistantStreaming, (streaming) => {
+  resumeAfterUserScroll = false;
+  userScrollIntent = false;
+  frozenScrollTop = streaming ? (scrollEl.value?.scrollTop ?? null) : null;
+  shouldStickToBottomAfterRender = false;
+  if (streaming) wasNearBottom = false;
+}, { flush: 'sync' });
 
 function scheduleStickToBottomAfterRender(): void {
   if (stickToBottomScheduled) return;
@@ -380,6 +423,7 @@ function scheduleStickToBottomAfterRender(): void {
     const element = scrollEl.value;
     if (!element) return;
     scrollElementToBottom(element);
+    wasNearBottom = true;
     scheduleScrollStateUpdate();
   });
 }
@@ -389,6 +433,7 @@ watch(
   (element, previous) => {
     previous?.removeEventListener('scroll', onScroll);
     element?.addEventListener('scroll', onScroll, { passive: true });
+    if (element) wasNearBottom = isNearBottom(element);
     scheduleScrollStateUpdate();
   },
   { immediate: true }
@@ -398,6 +443,13 @@ watch(
   () => [props.messages, props.emptyText],
   () => {
     rememberStickToBottomIfCurrentlyPinned();
+    if (props.assistantStreaming && !resumeAfterUserScroll && frozenScrollTop !== null) {
+      void nextTick(() => {
+        if (props.assistantStreaming && !resumeAfterUserScroll && scrollEl.value) {
+          scrollEl.value.scrollTop = frozenScrollTop!;
+        }
+      });
+    }
   },
   { deep: true, flush: 'pre' }
 );
@@ -443,8 +495,11 @@ onUnmounted(() => {
     <div
       ref="scrollEl"
       class="chat-scroll"
-      :class="{ selecting }"
+      :class="{ 'scroll-frozen': assistantStreaming && !resumeAfterUserScroll, selecting }"
       @mousedown="emit('scroll-mousedown', $event)"
+      @wheel.passive="onUserScrollIntent"
+      @touchmove.passive="onUserScrollIntent"
+      @keydown="onUserScrollIntent"
       @click.capture="onScrollClickCapture"
     >
       <slot name="overlay" />
@@ -589,6 +644,10 @@ onUnmounted(() => {
   flex-direction: column;
   gap: var(--spacing-xs);
   position: relative;
+}
+
+.chat-scroll.scroll-frozen {
+  overflow-anchor: none;
 }
 
 .chat-scroll::after {

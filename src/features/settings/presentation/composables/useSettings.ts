@@ -14,7 +14,7 @@ import {
   readUiPreferencesFromStorage,
   writeUiPreferencesCacheToStorage,
 } from '@/windowing/stateSync';
-import { sttLangToUiLocale, normalizeSttLanguage, normalizeUiTheme } from '@/i18n.locales';
+import { normalizeUiLocale, normalizeSttLanguage, normalizeUiTheme } from '@/i18n.locales';
 import { useSettingsStore } from '../../store/settingsStore';
 import { tauriSettingsService } from '../../infrastructure/adapters/TauriSettingsService';
 import { useAppConfigStore } from '@/stores/appConfig';
@@ -130,7 +130,7 @@ export function useSettings() {
 
         // STT-язык: берём из localStorage (сохранённый ранее) или дефолт
         const storedSttLang = normalizeSttLanguage(localStorage.getItem('sttLanguage') || localStorage.getItem('uiLocale'));
-        const uiLocale = sttLangToUiLocale(storedSttLang);
+        const uiLocale = normalizeUiLocale(localStorage.getItem('uiLocale'));
         locale.value = uiLocale;
         localStorage.setItem('uiLocale', uiLocale);
         localStorage.setItem('sttLanguage', storedSttLang);
@@ -178,7 +178,7 @@ export function useSettings() {
           const sttLang = normalizeSttLanguage(sttConfigStoreInstance.language);
           store.setLanguage(sttLang, { persist: false });
           store.setDeepgramKeyterms(sttConfigStoreInstance.deepgramKeyterms ?? '');
-          const fallbackLocale = sttLangToUiLocale(sttLang);
+          const fallbackLocale = normalizeUiLocale(localStorage.getItem('uiLocale'));
           locale.value = fallbackLocale;
           localStorage.setItem('uiLocale', fallbackLocale);
           localStorage.setItem('sttLanguage', sttLang);
@@ -203,10 +203,10 @@ export function useSettings() {
       store.setDeepgramApiKey('');
       store.setAssemblyaiApiKey('');
 
-      // Синхронизируем UI-локаль: STT-язык из store.language маппим на UI-локаль
+      // Язык интерфейса независим от языка распознавания.
       const sttLang = normalizeSttLanguage(store.language);
       store.setLanguage(sttLang, { persist: false });
-      const uiLocale = sttLangToUiLocale(sttLang);
+      const uiLocale = normalizeUiLocale(localStorage.getItem('uiLocale'));
       locale.value = uiLocale;
       localStorage.setItem('uiLocale', uiLocale);
       localStorage.setItem('sttLanguage', sttLang);
@@ -427,15 +427,10 @@ export function useSettings() {
     }
   }
 
-  /**
-   * Синхронизировать локаль UI с выбранным STT-языком.
-   * STT-язык (store.language) отправляется в бэкенд как есть,
-   * а UI переключается на ближайшую поддерживаемую локаль (fallback).
-   * Например: ja → en, uk → uk, be → ru
-   */
+  /** Сохранить выбранный язык интерфейса отдельно от языка распознавания. */
   function syncLocale(opts?: { persist?: boolean }): void {
     const shouldPersist = opts?.persist ?? true;
-    const uiLocale = sttLangToUiLocale(store.language);
+    const uiLocale = normalizeUiLocale(localStorage.getItem('uiLocale'));
     const prev = localStorage.getItem('uiLocale');
 
     locale.value = uiLocale;
@@ -460,7 +455,7 @@ export function useSettings() {
   }
 
   function persistUiPreferences(): void {
-    const uiLocale = sttLangToUiLocale(store.language);
+    const uiLocale = normalizeUiLocale(localStorage.getItem('uiLocale'));
 
     // Применяем локально (preview уже мог быть, но это идемпотентно)
     locale.value = uiLocale;

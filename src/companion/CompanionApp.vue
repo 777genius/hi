@@ -48,7 +48,7 @@ const REQUEST_TIMEOUT_MS = 9000;
 const ACTION_REQUEST_TIMEOUT_MS = 30000;
 const PWA_CHECK_TIMEOUT_MS = 4500;
 const PWA_INSTALL_HINT_DISMISSED_KEY = 'companionPwaInstallHintDismissed';
-const OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY = 'openaiResponsesWebSearchEnabled';
+const OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY = 'openaiResponsesWebSearchEnabledV2';
 
 const companionFeedRef = ref<{ scrollEl: HTMLElement | null } | null>(null);
 const snapshot = ref<TauriSnapshotEnvelope<CompanionSnapshotData> | null>(null);
@@ -61,7 +61,7 @@ const actionInFlight = ref(false);
 const syncInFlight = ref(false);
 const aiQuestion = ref('');
 const aiComposerOpen = ref(false);
-const openaiResponsesWebSearchEnabled = ref(readStoredBoolean(OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY, true));
+const openaiResponsesWebSearchEnabled = ref(readStoredBoolean(OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY, false));
 const promptImages = ref<PromptImageDraft[]>([]);
 const promptFileInputRef = ref<HTMLInputElement | null>(null);
 const pwaStandalone = ref(false);
