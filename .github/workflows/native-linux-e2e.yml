@@ -1,0 +1,81 @@
+name: Native Linux Tauri WebDriver E2E
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'e2e-tests/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/native-linux-e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'e2e-tests/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/native-linux-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tauri-webdriver-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-window-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      CARGO_BUILD_JOBS: '2'
+      RUST_BACKTRACE: '1'
+      WEBKIT_DISABLE_COMPOSITING_MODE: '1'
+      # WebDriver tests must not depend on or send traffic to production APIs.
+      VITE_API_URL: http://127.0.0.1:9
+      VOICE_TO_TEXT_BACKEND_URL: ws://127.0.0.1:9
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native Tauri and WebDriver dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            webkit2gtk-driver \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            libssl-dev \
+            libasound2-dev \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
+            librsvg2-dev \
+            build-essential \
+            pkg-config \
+            xvfb
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: Build state-sync dependency
+        run: |
+          git clone --depth 1 https://github.com/777genius/state-sync.git ../state-sync
+          (cd ../state-sync && pnpm install --frozen-lockfile && pnpm build)
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install native WebDriver adapter
+        run: |
+          cargo install tauri-driver --locked
+          command -v tauri-driver
+          command -v WebKitWebDriver
+      - name: E2E real Tauri windows and state-sync under Xvfb
+        run: xvfb-run -a -s '-screen 0 1920x1080x24' pnpm e2e:tauri
