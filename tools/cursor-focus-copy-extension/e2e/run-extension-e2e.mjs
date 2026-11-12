@@ -198,7 +198,111 @@ try {
   });
   assert.equal(bridgeToken, 'bridge-token');
 
-  console.log('[PASS] Cursor extension e2e copied active file and posted backend payload');
+
+  assert.equal(DEFAULT_BACKEND_URL, '', 'never guess a fixed port');
+  assert.deepEqual(observedMethods.slice(0, 2), ['GET', 'POST'], 'verify before POST');
+
+  // Real collision: another listener owns the legacy preferred port.
+  const unexpectedRequests = [];
+  const dummy = http.createServer(async (request, response) => {
+    unexpectedRequests.push({
+      method: request.method,
+      url: request.url,
+      token: request.headers['x-companion-token'],
+      body: await readRequestBody(request),
+    });
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ service: 'unrelated-app', proof: 'invalid' }));
+  });
+
+  await listen(dummy, 43821);
+  try {
+    const bridgeFile = '/tmp/clipboard-tools-e2e/bridge.json';
+    const fakeBridge = (bridge) => ({
+      env: { CLIPBOARD_TOOLS_CONFIG_PATH: bridgeFile },
+      fsImpl: {
+        readFileSync(file) {
+          assert.equal(file, bridgeFile);
+          return JSON.stringify(bridge);
+        },
+      },
+    });
+    const activeBridge = {
+      schemaVersion: 2,
+      companionAccessToken: companionToken,
+      companionPort: address.port,
+      companionActive: true,
+      instanceId,
+    };
+    const options = fakeBridge(activeBridge);
+
+    assert.equal(
+      discoverCompanionEndpoint(options).url,
+      backendUrl,
+      'active endpoint comes from the bridge'
+    );
+
+    receivedRequest = null;
+    const fallback = await captureAndSendActiveEditor({
+      editor, clipboard, backendUrl: '', companionToken: '',
+      copyToClipboard: false, requestTimeoutMs: 800, ...options,
+    });
+    assert.equal(fallback.tokenSource, 'config');
+    assert.equal(fallback.response.body.messageId, 'focus-copy:test');
+    assert.equal(receivedRequest?.body.text, expectedText);
+    assert.deepEqual(unexpectedRequests, [], 'occupied 43821 must receive no request');
+
+    // Stale bridge points to the wrong listener: challenge may be sent, but
+    // no sensitive POST or bearer token must reach the unrelated server.
+    const stale = fakeBridge({ ...activeBridge, companionPort: 43821 });
+    await assert.rejects(
+      captureAndSendActiveEditor({
+        editor, clipboard, backendUrl: '', companionToken: '',
+        copyToClipboard: false, requestTimeoutMs: 800, ...stale,
+      }),
+      CompanionIdentityError
+    );
+    assert.equal(unexpectedRequests.length, 1);
+    assert.equal(unexpectedRequests[0].method, 'GET');
+    assert.equal(unexpectedRequests[0].token, undefined);
+    assert.equal(unexpectedRequests[0].body, '');
+
+    // Even a user-configured URL cannot send secrets to an unverified server.
+    await assert.rejects(
+      captureAndSendActiveEditor({
+        editor, clipboard,
+        backendUrl: 'http://127.0.0.1:43821/api/focus-copy/ingest',
+        companionToken, requestTimeoutMs: 800, copyToClipboard: false,
+      }),
+      CompanionIdentityError
+    );
+    assert.ok(unexpectedRequests.every((req) => req.method === 'GET' && !req.token && !req.body));
+
+    // Disabled, missing or version-1 bridge state must fail closed before
+    // opening a network connection.
+    const observedBefore = observedMethods.length;
+    const unexpectedBefore = unexpectedRequests.length;
+    for (const badBridge of [
+      { ...activeBridge, companionActive: false },
+      { ...activeBridge, instanceId: null },
+      { ...activeBridge, companionPort: null },
+      { companionAccessToken: companionToken, schemaVersion: 1 },
+    ]) {
+      await assert.rejects(
+        captureAndSendActiveEditor({
+          editor, clipboard, backendUrl: '', companionToken: '',
+          copyToClipboard: false, ...fakeBridge(badBridge),
+        }),
+        CompanionEndpointNotFoundError
+      );
+    }
+    assert.equal(observedMethods.length, observedBefore);
+    assert.equal(unexpectedRequests.length, unexpectedBefore);
+  } finally {
+    await close(dummy);
+  }
+
+  console.log('[PASS] Cursor identity + occupied 43821: unrelated listener received no sensitive POST');
 } finally {
   await close(server);
 }
