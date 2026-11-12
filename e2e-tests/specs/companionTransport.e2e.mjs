@@ -142,6 +142,18 @@ describe('Companion HTTP/SSE transport (real native Tauri)', () => {
       assert.equal(updated.data.controls.instanceId, initial.data.controls.instanceId);
       assert.ok(Number(updated.revision) > Number(initial.revision), 'SSE revision should advance');
 
+      // Simulate the phone dropping Wi-Fi/TCP while desktop state changes.
+      // A fresh GET + new SSE subscription must catch up without replaying
+      // the disconnected stream's historical events.
+      stream.close();
+      assertInvokeResult(await invoke('enable_companion_mode'), 'publish while phone disconnected');
+      const afterOfflineChange = await getJson(stateUrl);
+      stream = await openSnapshotStream(base, started.token);
+      const recovered = await stream.nextSnapshot();
+      assert.equal(recovered.revision, afterOfflineChange.revision,
+        'resubscribing after a dropped connection must show the current desktop revision');
+      assert.equal(recovered.data.controls.instanceId, afterOfflineChange.data.controls.instanceId);
+
       const oldSocketClosed = new Promise((resolve) => keepAliveSocket.once('close', resolve));
       const stopped = assertInvokeResult(await invoke('disable_companion_mode'), 'disable companion');
       assert.equal(stopped.enabled, false);
