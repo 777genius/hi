@@ -69,22 +69,31 @@ impl AuthStore {
             .ok_or_else(|| anyhow::anyhow!("Invalid auth store path (bad filename)"))?;
         let tmp = parent.join(format!("{}.tmp.{}", file_name, uuid::Uuid::new_v4()));
 
-        tokio::fs::write(&tmp, contents).await?;
-        let _ = tokio::fs::remove_file(path).await;
+        // Keep the original file intact until the replacement is completely
+        // written and synced. Deleting it before rename creates a crash window
+        // in which auth data disappears permanently.
+        let result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .await?;
+            use tokio::io::AsyncWriteExt;
+            file.write_all(contents.as_bytes()).await?;
+            file.sync_all().await?;
+            drop(file);
 
-        match tokio::fs::rename(&tmp, path).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                log::warn!(
-                    "Atomic rename failed for {:?}: {}. Falling back to direct write.",
-                    path,
-                    e
-                );
-                tokio::fs::write(path, contents).await?;
-                let _ = tokio::fs::remove_file(&tmp).await;
-                Ok(())
-            }
+            // On supported filesystems, replacement is atomic. On an error,
+            // return it instead of truncating the existing auth file.
+            tokio::fs::rename(&tmp, path).await?;
+            Ok::<(), std::io::Error>(())
         }
+        .await;
+
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
+        result.map_err(Into::into)
     }
 
     /// Загружает хранилище с диска или создаёт новое (с device_id).
@@ -123,5 +132,43 @@ impl AuthStore {
         data.session = None;
         Self::save(&data).await?;
         Ok(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_root() -> PathBuf {
+        std::env::temp_dir().join(format!("hackinterview-auth-store-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn atomic_write_replaces_existing_auth_data() {
+        let root = test_root();
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let path = root.join("auth_store.json");
+        tokio::fs::write(&path, "old auth").await.unwrap();
+
+        AuthStore::write_file_atomic(&path, "new auth").await.unwrap();
+
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "new auth");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "no temporary files remain");
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_replacement_preserves_original_and_cleans_temp_file() {
+        let root = test_root();
+        let target = root.join("auth_store.json");
+        tokio::fs::create_dir_all(&target).await.unwrap();
+
+        // A directory cannot be replaced by a JSON file. Verify that the
+        // failure leaves the original target intact and does not fall back to
+        // a destructive direct write.
+        assert!(AuthStore::write_file_atomic(&target, "new auth").await.is_err());
+        assert!(target.is_dir());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }
