@@ -6,11 +6,20 @@ const require = createRequire(import.meta.url);
 const {
   captureAndSendActiveEditor,
   discoverCompanionToken,
+  DEFAULT_BACKEND_URL,
+  discoverCompanionEndpoint,
+  CompanionEndpointNotFoundError,
+  CompanionIdentityError,
+  identityProof,
 } = require('../src/client.js');
 
-function listen(server) {
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve(server.address()));
+function listen(server, port = 0) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      server.removeListener('error', reject);
+      resolve(server.address());
+    });
   });
 }
 
@@ -33,8 +42,26 @@ const expectedText = `function answer() {
 }
 `;
 let receivedRequest = null;
+const observedMethods = [];
+const companionToken = 'test-token';
+const instanceId = 'test-instance-001';
 
 const server = http.createServer(async (request, response) => {
+  observedMethods.push(request.method);
+  if (request.method === 'GET' && request.url?.startsWith('/api/identity?')) {
+    const nonce = new URL(request.url, 'http://127.0.0.1').searchParams.get('nonce');
+    assert.match(nonce, /^[0-9a-f]{32}$/);
+    assert.equal(request.headers['x-companion-token'], undefined, 'identity GET must not send token');
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({
+      service: 'hack-interview-companion',
+      schemaVersion: 1,
+      instanceId,
+      proof: identityProof(companionToken, instanceId, nonce),
+    }));
+    return;
+  }
+
   const rawBody = await readRequestBody(request);
   receivedRequest = {
     method: request.method,
@@ -47,7 +74,6 @@ const server = http.createServer(async (request, response) => {
   response.writeHead(200, { 'Content-Type': 'application/json' });
   response.end(JSON.stringify({ ok: true, messageId: 'focus-copy:test', characterCount: receivedRequest.body.characterCount }));
 });
-
 const address = await listen(server);
 
 try {
