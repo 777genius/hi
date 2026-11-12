@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CompanionSnapshotData, TauriSnapshotEnvelope } from '@/windowing/stateSync';
-import { shouldApplyCompanionSnapshot } from './snapshotEpoch';
+import { isCompanionSnapshotEnvelope, shouldApplyCompanionSnapshot } from './snapshotEpoch';
 
 function snapshot(revision: string, instanceId?: string): TauriSnapshotEnvelope<CompanionSnapshotData> {
   return {
@@ -30,5 +30,25 @@ describe('Companion snapshot epochs', () => {
   it('rejects corrupt revisions rather than reverting the phone to an empty snapshot', () => {
     expect(shouldApplyCompanionSnapshot(snapshot('invalid', 'server-a'), 1, 'server-a')).toBe(false);
     expect(shouldApplyCompanionSnapshot(snapshot('-5', 'server-a'), 1, 'server-a')).toBe(false);
+  });
+});
+
+describe('Companion transport envelope validation', () => {
+  const valid = {
+    revision: '5',
+    data: {
+      controls: { companionModeEnabled: true, instanceId: 'server-a' },
+      recording: { status: 'Recording' },
+      timeline: [],
+    },
+  };
+
+  it('requires the state fields needed for mobile synchronization', () => {
+    expect(isCompanionSnapshotEnvelope(valid)).toBe(true);
+    expect(isCompanionSnapshotEnvelope({})).toBe(false);
+    expect(isCompanionSnapshotEnvelope({ revision: '2', data: {} })).toBe(false);
+    expect(isCompanionSnapshotEnvelope({ ...valid, revision: 'broken' })).toBe(false);
+    expect(isCompanionSnapshotEnvelope({ ...valid, revision: '-1' })).toBe(false);
+    expect(isCompanionSnapshotEnvelope({ ...valid, data: { ...valid.data, timeline: null } })).toBe(false);
   });
 });
