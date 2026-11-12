@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canRetryCompanionAction,
   classifyCompanionFailureMessage,
   connectionTextForCompanionFailure,
   normalizeCompanionRequestError,
@@ -63,5 +64,23 @@ describe('companion failure classification', () => {
     expect(shouldRecoverCompanionConnection(kind)).toBe(false);
     expect(connectionTextForCompanionFailure(kind, 'fallback'))
       .toBe('Ссылка устарела. Открой QR из окна приложения заново.');
+  });
+});
+
+describe('Companion ambiguous HTTP response retries', () => {
+  it('retries explicit state assignments without repeating non-idempotent operations', () => {
+    for (const path of [
+      '/api/microphone/app/mute',
+      '/api/microphone/unmute',
+      '/api/desktop/blackout/disable',
+    ]) expect(canRetryCompanionAction(path)).toBe(true);
+    for (const path of [
+      '/api/record/start',
+      '/api/record/stop',
+      '/api/history/clear',
+      '/api/context/clear',
+      '/api/ai/request',
+      '/api/prompt/send',
+    ]) expect(canRetryCompanionAction(path)).toBe(false);
   });
 });

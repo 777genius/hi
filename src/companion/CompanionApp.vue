@@ -5,6 +5,7 @@ import type { ConversationFeedMessage } from '@/presentation/conversationFeed';
 import { buildCompanionConversationFeedMessages } from '@/presentation/companionFeed';
 import { createPromptImageDraft, type PromptImageDraft } from '@/utils/promptImages';
 import {
+  canRetryCompanionAction,
   classifyCompanionFailureMessage,
   connectionTextForCompanionFailure,
   normalizeCompanionRequestError,
@@ -12,6 +13,8 @@ import {
   toneForCompanionFailure,
 } from './connectionErrors';
 import { isCompanionPageVisible } from './pageVisibility';
+import { createCompanionReconnectScheduler, createCompanionStreamWatchdog } from './reconnectScheduler';
+import { isCompanionSnapshotEnvelope, shouldApplyCompanionSnapshot } from './snapshotEpoch';
 import {
   companionInstallHint,
   createCompanionRequestId,
@@ -49,6 +52,7 @@ const ACTION_REQUEST_TIMEOUT_MS = 30000;
 const PWA_CHECK_TIMEOUT_MS = 4500;
 const PWA_INSTALL_HINT_DISMISSED_KEY = 'companionPwaInstallHintDismissed';
 const OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY = 'openaiResponsesWebSearchEnabled';
+const UNCONFIRMED_ACTION_WARNING = 'Не удалось подтвердить отправку. После восстановления связи проверь ленту перед повтором.';
 
 const companionFeedRef = ref<{ scrollEl: HTMLElement | null } | null>(null);
 const snapshot = ref<TauriSnapshotEnvelope<CompanionSnapshotData> | null>(null);
@@ -57,6 +61,7 @@ const connectionText = ref(companionAvailable ? 'Подключаюсь к ко�
 const actionStatusText = ref('');
 const actionStatusTone = ref<StatusTone>('');
 const currentRevision = ref(0);
+const currentInstanceId = ref<string | null>(null);
 const actionInFlight = ref(false);
 const syncInFlight = ref(false);
 const aiQuestion = ref('');
@@ -80,6 +85,32 @@ let displayModeChangeHandler: (() => void) | null = null;
 let statusTimer: number | null = null;
 let resyncPromise: Promise<void> | null = null;
 const requestControllers = new Set<AbortController>();
+let componentUnmounted = false;
+// A timed-out POST may have succeeded. Keep the notice visible after SSE
+// recovers, until a subsequent user action deliberately replaces it.
+let unconfirmedActionWarning = false;
+const reconnectScheduler = createCompanionReconnectScheduler(
+  () => {
+    void resyncConnection({ reconnect: true }).catch((error) => {
+      handleResyncFailure(error, 'Пытаюсь восстановить связь с компьютером...');
+    });
+  },
+  () => (
+    !componentUnmounted
+    && companionAvailable
+    && connectionState.value !== 'disconnected'
+    && pageVisible()
+    // navigator.onLine describes WAN connectivity, not reachability of our
+    // local Wi-Fi host. Retry LAN HTTP even without Internet access.
+  ),
+);
+const streamWatchdog = createCompanionStreamWatchdog(() => {
+  if (!eventSource || componentUnmounted || !pageVisible()) return;
+  disposeEventSource();
+  setPwaLiveDiagnostic('warn', 'SSE heartbeat не поступал, восстанавливаю соединение');
+  setConnection('reconnecting', 'Поток обновлений перестал отвечать, переподключаюсь...');
+  reconnectScheduler.schedule();
+});
 
 const feedMessages = computed(() => buildCompanionConversationFeedMessages(snapshot.value?.data));
 const selectedMessageIdSet = computed(() => new Set(selectedMessageIds.value));
@@ -260,14 +291,23 @@ async function stickToBottomIfNeeded(): Promise<void> {
 
 async function applySnapshot(next: TauriSnapshotEnvelope<CompanionSnapshotData>): Promise<void> {
   const nextRevision = statusRevision(next);
-  if (nextRevision < currentRevision.value) {
+  if (!shouldApplyCompanionSnapshot(next, currentRevision.value, currentInstanceId.value)) {
     return;
   }
 
   const shouldStickBottom = isNearBottom();
-  const revisionAdvanced = nextRevision > currentRevision.value;
+  const nextInstanceId = next.data?.controls?.instanceId ?? null;
+  const epochChanged = !!currentInstanceId.value && !!nextInstanceId
+    && currentInstanceId.value !== nextInstanceId;
+  const revisionAdvanced = epochChanged || nextRevision > currentRevision.value;
   snapshot.value = next;
   currentRevision.value = nextRevision;
+  currentInstanceId.value = nextInstanceId;
+  if (epochChanged) {
+    // IDs and sequence numbers can be reused by the new desktop process.
+    // Never send an old selection as context for an unrelated new message.
+    selectedMessageIds.value = [];
+  }
 
   if (shouldStickBottom && revisionAdvanced) {
     await stickToBottomIfNeeded();
@@ -282,6 +322,9 @@ function clearStatusTimer(): void {
 }
 
 function setStatus(text: string, tone: StatusTone = ''): void {
+  // A later transient reconnect error must not hide an ambiguous POST result.
+  // Explicit fatal errors can still replace it (e.g. an expired token).
+  if (unconfirmedActionWarning && text !== UNCONFIRMED_ACTION_WARNING && tone !== 'error') return;
   clearStatusTimer();
   actionStatusText.value = text;
   actionStatusTone.value = tone;
@@ -513,21 +556,22 @@ function handleResyncFailure(error: unknown, fallbackText: string): void {
   const message = error instanceof Error ? error.message : String(error);
   const kind = classifyCompanionFailureMessage(message);
   if (kind === 'hidden') {
+    // A rapid hidden → visible transition may reuse an aborted in-flight GET.
+    reconnectScheduler.schedule();
     return;
   }
   if (kind === 'expired') {
     disposeEventSource();
+    reconnectScheduler.cancel();
   }
   setConnection(
     kind === 'expired' ? 'disconnected' : 'reconnecting',
     connectionTextForCompanionFailure(kind, fallbackText),
   );
   setStatus(message, toneForCompanionFailure(kind));
-}
-
-function abortInFlightRequests(): void {
-  abortCompanionRequests(requestControllers);
-  requestControllers.clear();
+  if (kind !== 'expired') {
+    reconnectScheduler.schedule();
+  }
 }
 
 function abortForHiddenLifecycle(): void {
@@ -536,6 +580,7 @@ function abortForHiddenLifecycle(): void {
 }
 
 function disposeEventSource(): void {
+  streamWatchdog.stop();
   const source = eventSource;
   eventSource = null;
   if (!source) return;
@@ -549,10 +594,8 @@ async function requestJson<T>(path: string, init: RequestInit = {}, timeoutMs = 
   json: T | null;
   raw: string;
 }> {
-  if (typeof navigator !== 'undefined' && 'onLine' in navigator && navigator.onLine === false) {
-    throw new Error('Телефон офлайн');
-  }
-
+  // navigator.onLine may be false while the desktop on the same LAN is
+  // still reachable. Let the actual HTTP request and timeout decide.
   const controller = new AbortController();
   requestControllers.add(controller);
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -594,8 +637,8 @@ async function refreshSnapshot(): Promise<void> {
   if (response.status === 401 || response.status === 403) {
     throw new Error('Ссылка устарела или companion перезапустился. Открой QR из окна приложения заново.');
   }
-  if (!response.ok || !json) {
-    throw new Error(compactResponseError(raw, `Не удалось получить состояние: ${response.status}`));
+  if (!response.ok || !isCompanionSnapshotEnvelope(json)) {
+    throw new Error(compactResponseError(raw, `Не удалось получить корректное состояние Companion: ${response.status}`));
   }
 
   await applySnapshot(json);
@@ -614,7 +657,7 @@ async function resyncConnection(options: {
     try {
       await refreshSnapshot();
 
-      if (!pageVisible()) {
+      if (componentUnmounted || !pageVisible()) {
         return;
       }
 
@@ -632,11 +675,16 @@ async function resyncConnection(options: {
   })();
 
   resyncPromise = task;
-  void task.finally(() => {
-    if (resyncPromise === task) {
-      resyncPromise = null;
-    }
-  });
+  // .finally() returns a *new* rejected promise when GET fails; attaching
+  // both outcomes keeps cleanup from generating an unhandled rejection.
+  void task.then(
+    () => {
+      if (resyncPromise === task) resyncPromise = null;
+    },
+    () => {
+      if (resyncPromise === task) resyncPromise = null;
+    },
+  );
 
   return task;
 }
@@ -663,11 +711,14 @@ async function sendAction(
   }
 
   const requestId = options.requestId ?? createCompanionRequestId();
-  const retryOnRecoverable = options.retryOnRecoverable ?? true;
+  // Request-id de-duplication is in memory and resets with the desktop.
+  // A lost reply must never replay recording, history clearing or AI prompts.
+  const retryOnRecoverable = options.retryOnRecoverable ?? canRetryCompanionAction(path);
   let retryAfterRecover = false;
   let originalError: unknown = null;
 
   actionInFlight.value = true;
+  unconfirmedActionWarning = false;
   setStatus('Выполняю действие...', 'pending');
 
   try {
@@ -688,6 +739,9 @@ async function sendAction(
     }
 
     if (json?.snapshot) {
+      if (!isCompanionSnapshotEnvelope(json.snapshot)) {
+        throw new Error('Companion вернул некорректное состояние после команды');
+      }
       await applySnapshot(json.snapshot);
     }
 
@@ -707,16 +761,34 @@ async function sendAction(
     const kind = classifyCompanionFailureMessage(message);
 
     if (kind === 'hidden') {
-      setStatus('');
+      // Backgrounding aborts the response, not necessarily the desktop action.
+      // Never make a non-idempotent POST look safely unsent after wake.
+      if (!retryOnRecoverable) {
+        unconfirmedActionWarning = true;
+        setStatus(UNCONFIRMED_ACTION_WARNING, 'warn');
+      } else {
+        setStatus('');
+      }
       return false;
     }
 
     if (shouldRecoverCompanionConnection(kind)) {
       disposeEventSource();
       setConnection('reconnecting', connectionTextForCompanionFailure(kind, 'Пытаюсь восстановить связь с компьютером...'));
+      if (!retryOnRecoverable) {
+        reconnectScheduler.schedule();
+      }
     }
 
-    setStatus(message, toneForCompanionFailure(kind));
+    if (!retryOnRecoverable && shouldRecoverCompanionConnection(kind)) {
+      unconfirmedActionWarning = true;
+    }
+    setStatus(
+      !retryOnRecoverable && shouldRecoverCompanionConnection(kind)
+        ? UNCONFIRMED_ACTION_WARNING
+        : message,
+      toneForCompanionFailure(kind),
+    );
 
     if (
       shouldRecoverCompanionConnection(kind)
@@ -860,9 +932,17 @@ function connectEvents(): void {
   setPwaLiveDiagnostic('pending', 'Live updates подключаются');
   const source = new EventSource(`/events?token=${encodeURIComponent(token)}`);
   eventSource = source;
+  streamWatchdog.start();
+
+  source.addEventListener('heartbeat', () => {
+    if (eventSource !== source) return;
+    streamWatchdog.heartbeat();
+  });
 
   source.onopen = () => {
     if (eventSource !== source) return;
+    streamWatchdog.heartbeat();
+    reconnectScheduler.reset();
     setPwaLiveDiagnostic('ok', 'Live updates активны');
     setConnection('connected', 'Связь с компьютером активна');
     if (!actionInFlight.value) {
@@ -874,9 +954,14 @@ function connectEvents(): void {
     if (eventSource !== source) return;
     void (async () => {
       try {
-        const next = JSON.parse(event.data) as TauriSnapshotEnvelope<CompanionSnapshotData>;
+        const next: unknown = JSON.parse(event.data);
+        if (!isCompanionSnapshotEnvelope(next)) {
+          throw new Error('Companion прислал некорректный SSE snapshot');
+        }
         await applySnapshot(next);
         if (eventSource !== source) return;
+        streamWatchdog.heartbeat();
+        reconnectScheduler.reset();
         setConnection('connected', 'Связь с компьютером активна');
         if (!actionInFlight.value) {
           setStatus('');
@@ -902,26 +987,25 @@ function connectEvents(): void {
       disposeEventSource();
       return;
     }
-    void (async () => {
-      setPwaLiveDiagnostic('warn', 'Live updates временно недоступны');
-      setConnection('reconnecting', 'Пытаюсь переподключиться к компьютеру...');
-      try {
-        await resyncConnection({ reconnect: true });
-      } catch (error) {
-        handleResyncFailure(error, 'Пытаюсь переподключиться к компьютеру...');
-      }
-    })();
+    // Close the browser's own EventSource retry loop: a single bounded
+    // scheduler owns reconnects, including first load and malformed frames.
+    disposeEventSource();
+    setPwaLiveDiagnostic('warn', 'Live updates временно недоступны');
+    setConnection('reconnecting', 'Пытаюсь переподключиться к компьютеру...');
+    reconnectScheduler.schedule();
   };
 }
 
 function onVisibilityChange(): void {
   if (document.visibilityState === 'hidden') {
+    reconnectScheduler.cancel();
     abortForHiddenLifecycle();
     disposeEventSource();
     return;
   }
 
   if (document.visibilityState === 'visible') {
+    reconnectScheduler.cancel();
     void resyncConnection({ reconnect: true }).catch((error) => {
       handleResyncFailure(error, 'Связь с компьютером временно потеряна');
     });
@@ -932,33 +1016,32 @@ function onOnline(): void {
   if (!pageVisible()) {
     return;
   }
+  reconnectScheduler.cancel();
   void resyncConnection({ reconnect: true }).catch((error) => {
     handleResyncFailure(error, 'Пытаюсь восстановить связь с компьютером...');
   });
 }
 
 function onOffline(): void {
-  abortInFlightRequests();
-  disposeEventSource();
-  if (!pageVisible()) {
-    return;
-  }
-  setConnection('reconnecting', 'Сеть пропала. Жду восстановления...');
-  if (!actionInFlight.value) {
-    setStatus('Похоже, телефон временно офлайн. После возврата сети состояние обновится автоматически.', 'warn');
-  }
+  // Browser "offline" may mean no public Internet while Wi-Fi/LAN still
+  // works. Do not abort a working stream or an in-flight local POST.
+  if (!pageVisible() || connectionState.value === 'connected') return;
+  setConnection('reconnecting', 'Проверяю связь с компьютером по локальной сети...');
+  reconnectScheduler.schedule();
 }
 
 function onPageShow(): void {
   if (!pageVisible()) {
     return;
   }
+  reconnectScheduler.cancel();
   void resyncConnection({ reconnect: true }).catch((error) => {
     handleResyncFailure(error, 'Обновляю состояние после возврата на страницу');
   });
 }
 
 function onPageHide(): void {
+  reconnectScheduler.cancel();
   abortForHiddenLifecycle();
   disposeEventSource();
 }
@@ -993,12 +1076,7 @@ async function bootstrap(): Promise<void> {
     return;
   }
 
-  if (typeof navigator !== 'undefined' && 'onLine' in navigator && navigator.onLine === false) {
-    setConnection('reconnecting', 'Телефон офлайн. Жду восстановления сети...');
-    setStatus('Подключи телефон к сети, и companion попробует восстановиться автоматически.', 'warn');
-    return;
-  }
-
+  // The computer can be reachable over local Wi-Fi even without WAN.
   try {
     await resyncConnection({ reconnect: true, successStatusText: 'Связь с компьютером активна' });
   } catch (error) {
@@ -1043,6 +1121,8 @@ watch(
 );
 
 onUnmounted(() => {
+  componentUnmounted = true;
+  reconnectScheduler.cancel();
   clearStatusTimer();
   cleanupPwaDisplayModeListener();
   scrollEl.value?.removeEventListener('scroll', updateFeedScrolledState);
