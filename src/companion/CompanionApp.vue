@@ -566,11 +566,6 @@ function handleResyncFailure(error: unknown, fallbackText: string): void {
   }
 }
 
-function abortInFlightRequests(): void {
-  abortCompanionRequests(requestControllers);
-  requestControllers.clear();
-}
-
 function abortForHiddenLifecycle(): void {
   abortCompanionRequests(requestControllers, 'hidden');
   requestControllers.clear();
