@@ -80,7 +80,7 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                     let app_clone = app.clone();
                     tauri::async_runtime::spawn(async move {
                         if let Some(state) = app_clone.try_state::<crate::presentation::state::AppState>() {
-                            let is_authenticated = *state.is_authenticated.read().await;
+                            let is_authenticated = state.has_local_access().await;
                             if !is_authenticated {
                                 if let Some(auth) = app_clone.get_webview_window("auth") {
                                     let _ = crate::presentation::commands::show_webview_window_on_active_monitor(&auth);

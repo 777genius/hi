@@ -73,14 +73,9 @@ pub fn focus_copy_helper_executable() -> PathBuf {
         .join("MacOS")
         .join("Telegram");
 
-    if app_executable.exists() {
-        app_executable
-    } else {
-        helper_root
-            .join(".build")
-            .join("release")
-            .join("MacOSFocusCopyHelper")
-    }
+    // Accessibility is granted to the app bundle. Starting the bare Swift
+    // build makes macOS treat it as a different, untrusted process.
+    app_executable
 }
 
 #[cfg(target_os = "macos")]

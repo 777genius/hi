@@ -50,7 +50,17 @@ fn spawn_companion_delta_writer(
 ) -> CompanionDeltaWriter {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let handle = tauri::async_runtime::spawn(async move {
-        while let Some(delta_text) = rx.recv().await {
+        let mut last_publish: Option<std::time::Instant> = None;
+        while let Some(mut delta_text) = rx.recv().await {
+            if let Some(last) = last_publish {
+                let interval = std::time::Duration::from_millis(50);
+                if let Some(wait) = interval.checked_sub(last.elapsed()) {
+                    tokio::time::sleep(wait).await;
+                }
+            }
+            while let Ok(next) = rx.try_recv() {
+                delta_text.push_str(&next);
+            }
             if let Some(state) = app_handle.try_state::<AppState>() {
                 crate::presentation::companion_timeline::append_haiku_candidate_delta(
                     state.inner(),
@@ -61,6 +71,7 @@ fn spawn_companion_delta_writer(
                 .await;
                 let _ =
                     crate::presentation::companion::publish_snapshot_sse_only(&app_handle).await;
+                last_publish = Some(std::time::Instant::now());
             }
         }
     });
@@ -966,6 +977,20 @@ pub async fn start_recording_raw(
         .await
         .map_err(|e| format!("Не удалось инициализировать устройство записи: {}", e))?;
 
+    // Local Parakeet loads a separate microphone model. Start both sources in
+    // parallel so the microphone is ready at the same time as system audio.
+    if state
+        .microphone_transcription_enabled
+        .load(Ordering::Relaxed)
+    {
+        spawn_microphone_transcription_start(
+            state.microphone_transcription_service.clone(),
+            app_handle.clone(),
+            session_id,
+            microphone_device,
+        );
+    }
+
     // Start recording (async - WebSocket connect, audio capture start)
     let start_result = state
         .transcription_service
@@ -1009,20 +1034,6 @@ pub async fn start_recording_raw(
     state
         .transcription_session_seq
         .store(session_id, Ordering::Relaxed);
-
-    // Best-effort: параллельно запускаем транскрибацию с микрофона.
-    // Важно: микрофон можно отключить из UI; при этом системный звук продолжает работать.
-    if state
-        .microphone_transcription_enabled
-        .load(Ordering::Relaxed)
-    {
-        spawn_microphone_transcription_start(
-            state.microphone_transcription_service.clone(),
-            app_handle.clone(),
-            session_id,
-            microphone_device,
-        );
-    }
 
     // Emit Recording status after successful start
     log::debug!("Emitting status: Recording (stopped_via_hotkey: false)");
@@ -1560,7 +1571,7 @@ pub async fn toggle_recording_with_window(
 
     // Если пользователь не авторизован — не показываем recording окно.
     // Иначе получается странное поведение: окно может получить фокус, но UI в нём "none" (скрыт правилами windowMode).
-    let is_authenticated = *state.is_authenticated.read().await;
+    let is_authenticated = state.has_local_access().await;
     if !is_authenticated {
         log::info!(
             "toggle_recording_with_window: user not authenticated -> redirect to auth window"
@@ -1642,7 +1653,7 @@ pub async fn toggle_recording_with_window_internal(
     log::info!("toggle_recording_with_window_internal (from hotkey)");
 
     // Проверяем авторизацию - если не авторизован, показываем auth окно
-    let is_authenticated = *state.is_authenticated.read().await;
+    let is_authenticated = state.has_local_access().await;
     if !is_authenticated {
         log::info!("User not authenticated - showing auth window");
         if let Some(auth) = app_handle.get_webview_window("auth") {
@@ -1976,6 +1987,7 @@ pub async fn get_stt_config_snapshot(
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AuthStateData {
     pub is_authenticated: bool,
+    pub local_no_auth: bool,
 }
 
 /// Get current auth state snapshot
@@ -1984,11 +1996,11 @@ pub async fn get_auth_state_snapshot(
     state: State<'_, AppState>,
 ) -> Result<SnapshotEnvelope<AuthStateData>, String> {
     log::trace!("Command: get_auth_state_snapshot");
-    let is_authenticated = *state.is_authenticated.read().await;
+    let is_authenticated = state.has_local_access().await;
     let revision = state.auth_state_revision.read().await.to_string();
     Ok(SnapshotEnvelope {
         revision,
-        data: AuthStateData { is_authenticated },
+        data: AuthStateData { is_authenticated, local_no_auth: AppState::local_no_auth_mode() },
     })
 }
 
@@ -3257,11 +3269,13 @@ const INTERVIEW_ANSWER_STYLE_GUARD: &str = r#"Правила стиля отве
 - В project summary не заменяй конкретные технологии или метрики общим описанием фич, если в памяти доступны оба типа фактов.
 - Не добавляй общую концовку с предложением продолжить, если пользователь прямо не попросил продолжение.
 - Не используй символы "—" или "–". Только обычный дефис "-" или запятую.
-- Если точных деталей реализации нет в контексте, ответь ровно одним предложением: назови известный результат и скажи, что точных внутренних деталей в контексте нет. После этого остановись.
-- Не перечисляй возможные методы, категории, причины или внутренние технические подходы, и не добавляй предложение продолжить."#;
+- Если личный опыт или детали реализации не подтверждены контекстом, не выдумывай их и не сообщай, что контекста недостаточно. Дай полезный технический ответ как подход: "Я бы...".
+- Если распознавание неточно или вопрос неполный, выбери наиболее вероятный смысл и ответь без уточняющих вопросов.
+- По умолчанию отвечай коротким связным абзацем. Список используй только для нескольких самостоятельных пунктов или по явной просьбе.
+- Не добавляй предложение продолжить."#;
 
 fn with_interview_answer_style_guard(system_prompt: String) -> String {
-    if system_prompt.contains("Правила стиля ответа:") {
+    if system_prompt.contains(INTERVIEW_ANSWER_STYLE_GUARD) {
         system_prompt
     } else {
         format!(
@@ -3369,7 +3383,7 @@ pub async fn start_haiku_stream(
 Твоя задача:
 1) Найти последний явный или неявный вопрос/задачу: в первую очередь из строк "ОС:". Если строк "ОС:" нет - используй строки "МИКРОФОН:".
 2) Дать лучший краткий ответ по делу (без воды), можно с короткими примерами/шагами.
-3) Если вопрос неясен из-за распознавания - задай 1 уточняющий вопрос и предложи 1-2 вероятные интерпретации.
+3) Если распознавание неточно, выбери наиболее вероятный смысл и ответь без уточняющих вопросов.
 4) Возможно в вопросах не будет "?". Ты должен понимать где вопросы.
 
 Формат ответа:
@@ -3377,7 +3391,7 @@ pub async fn start_haiku_stream(
 - Запрещено начинать с "Вопрос", "Ответ", заголовка # Ответ, "**Вопрос:**" или краткого пересказа вопроса.
 - Первая строка должна быть содержательным тезисом ответа.
 - Не начинай с фраз вроде "Понял", "Конечно", "Хорошо" - сразу давай содержательный ответ.
-- Сначала 3-7 буллетов с ответом (каждый пункт начинай с "- "), если пользователь не просит другой формат.
+- По умолчанию отвечай коротким связным абзацем. Список нужен только для нескольких самостоятельных пунктов или по просьбе пользователя.
 - Затем (если нужно) короткий пример кода.
 - Не пересказывай весь контекст и не цитируй теги "ОС:"/"МИКРОФОН:"/"ПОМОЩНИК:".
 
@@ -3822,16 +3836,90 @@ pub struct LlmImageInput {
     pub data_base64: String,
 }
 
-fn is_valid_llm_image_input(image: &LlmImageInput) -> bool {
-    let media_type = image.media_type.trim();
-    let data = image.data_base64.trim();
-    media_type.starts_with("image/") && !data.is_empty()
+pub(crate) fn validate_llm_image_inputs(images: Vec<LlmImageInput>) -> Result<Vec<LlmImageInput>, String> {
+    use base64::Engine;
+
+    const MAX_IMAGES: usize = 10;
+    const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: usize = 25 * 1024 * 1024;
+    if images.len() > MAX_IMAGES {
+        return Err(format!("Слишком много изображений: максимум {MAX_IMAGES} за запрос"));
+    }
+
+    let mut total_bytes = 0;
+    let mut validated = Vec::with_capacity(images.len());
+    for image in images {
+        let mime = image.media_type.trim().to_ascii_lowercase();
+        let mime = if mime == "image/jpg" { "image/jpeg".to_string() } else { mime };
+        if !matches!(mime.as_str(), "image/png" | "image/jpeg" | "image/webp" | "image/gif") {
+            return Err("Поддерживаются изображения PNG, JPEG, WebP и GIF; HEIC сначала преобразуйте в JPEG".to_string());
+        }
+        let encoded = image.data_base64.trim();
+        if encoded.is_empty() || encoded.len() > (MAX_IMAGE_BYTES * 4 / 3 + 8) {
+            return Err("Изображение пустое или больше 5 МБ".to_string());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| "Повреждённые данные изображения".to_string())?;
+        let matches_mime = match mime.as_str() {
+            "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
+            "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+            "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+            _ => false,
+        };
+        if !matches_mime || bytes.len() > MAX_IMAGE_BYTES {
+            return Err("Формат изображения не совпадает с содержимым или файл больше 5 МБ".to_string());
+        }
+        total_bytes += bytes.len();
+        if total_bytes > MAX_TOTAL_BYTES {
+            return Err("Общий размер изображений превышает 25 МБ".to_string());
+        }
+        validated.push(LlmImageInput { media_type: mime, data_base64: encoded.to_string() });
+    }
+    Ok(validated)
+}
+
+#[cfg(test)]
+mod llm_image_input_tests {
+    use super::*;
+    use base64::Engine;
+
+    fn image(mime: &str, bytes: &[u8]) -> LlmImageInput {
+        LlmImageInput {
+            media_type: mime.to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    #[test]
+    fn preserves_multiple_screenshots_and_normalizes_jpeg_alias() {
+        let images = vec![
+            image("image/png", b"\x89PNG\r\n\x1a\nfixture"),
+            image("image/jpg", b"\xff\xd8\xfffixture"),
+            image("image/webp", b"RIFF0000WEBPfixture"),
+        ];
+        let validated = validate_llm_image_inputs(images).unwrap();
+        assert_eq!(validated.len(), 3);
+        assert_eq!(validated[0].media_type, "image/png");
+        assert_eq!(validated[1].media_type, "image/jpeg");
+        assert_eq!(validated[2].media_type, "image/webp");
+    }
+
+    #[test]
+    fn rejects_unsupported_or_mismatched_images_instead_of_dropping_them() {
+        assert!(validate_llm_image_inputs(vec![image("image/heic", b"fixture")]).is_err());
+        assert!(validate_llm_image_inputs(vec![image("image/png", b"\xff\xd8\xfffixture")]).is_err());
+        assert!(validate_llm_image_inputs(vec![LlmImageInput {
+            media_type: "image/png".into(),
+            data_base64: "not-base64".into(),
+        }]).is_err());
+    }
 }
 
 fn to_llm_image_content(images: &[LlmImageInput]) -> Vec<crate::domain::LlmImageContent> {
     images
         .iter()
-        .filter(|image| is_valid_llm_image_input(image))
         .map(|image| crate::domain::LlmImageContent {
             media_type: image.media_type.trim().to_string(),
             data_base64: image.data_base64.trim().to_string(),
@@ -3910,12 +3998,7 @@ fn build_openai_responses_request(
 
 fn build_anthropic_chat_user_content(text: &str, images: &[LlmImageInput]) -> serde_json::Value {
     let trimmed_text = text.trim();
-    let valid_images = images
-        .iter()
-        .filter(|image| is_valid_llm_image_input(image))
-        .collect::<Vec<_>>();
-
-    if valid_images.is_empty() {
+    if images.is_empty() {
         return serde_json::json!(trimmed_text);
     }
 
@@ -3927,7 +4010,7 @@ fn build_anthropic_chat_user_content(text: &str, images: &[LlmImageInput]) -> se
         }));
     }
 
-    for image in valid_images {
+    for image in images {
         parts.push(serde_json::json!({
             "type": "image",
             "source": {
@@ -3941,10 +4024,23 @@ fn build_anthropic_chat_user_content(text: &str, images: &[LlmImageInput]) -> se
     serde_json::json!(parts)
 }
 
+fn build_chat_user_text(context: &str, question: &str) -> String {
+    let context = context.trim();
+    let question = question.trim();
+    if context.is_empty() {
+        question.to_string()
+    } else if question.is_empty() {
+        context.to_string()
+    } else {
+        format!("{context}\n\nЗАПРОС: {question}")
+    }
+}
+
 #[cfg(test)]
 mod ai_prompt_payload_tests {
     use super::{
-        build_anthropic_chat_user_content, with_interview_answer_style_guard, LlmImageInput,
+        build_anthropic_chat_user_content, build_chat_user_text, with_interview_answer_style_guard,
+        LlmImageInput,
     };
 
     fn image(media_type: &str, data_base64: &str) -> LlmImageInput {
@@ -3973,13 +4069,14 @@ mod ai_prompt_payload_tests {
     }
 
     #[test]
-    fn anthropic_chat_user_content_filters_invalid_images() {
-        let payload = build_anthropic_chat_user_content(
-            "ЗАПРОС: explain",
-            &[image("text/plain", "AAA="), image("image/png", "")],
+    fn chat_user_text_keeps_question_as_final_explicit_request() {
+        let text = build_chat_user_text(
+            "[current_request]\nold embedded request\n[retrieved_memory]\nlarge memory",
+            "current user question",
         );
 
-        assert_eq!(payload, serde_json::json!("ЗАПРОС: explain"));
+        assert!(text.contains("[retrieved_memory]\nlarge memory"));
+        assert!(text.ends_with("ЗАПРОС: current user question"));
     }
 
     #[test]
@@ -3996,7 +4093,8 @@ mod ai_prompt_payload_tests {
         assert!(prompt.contains("точное название"));
         assert!(prompt.contains("самый сильный proof"));
         assert!(prompt.contains("Не используй символы"));
-        assert!(prompt.contains("возможные методы"));
+        assert!(prompt.contains("Дай полезный технический ответ"));
+        assert!(prompt.contains("без уточняющих вопросов"));
     }
 
     #[test]
@@ -4015,7 +4113,7 @@ mod ai_prompt_payload_tests {
             "custom\nПравила стиля ответа:\n- Уже есть актуальный guard".to_string(),
         );
 
-        assert_eq!(prompt.matches("Правила стиля ответа:").count(), 1);
+        assert_eq!(prompt.matches("Правила стиля ответа:").count(), 2);
     }
 }
 
@@ -4041,6 +4139,7 @@ pub async fn start_haiku_chat_stream(
     context_text: String,
     question_text: String,
     images: Option<Vec<LlmImageInput>>,
+    context_images: Option<Vec<LlmImageInput>>,
     system_prompt: Option<String>,
     companion_meta: Option<CompanionAiRequestMeta>,
     openai_responses_web_search: Option<bool>,
@@ -4050,11 +4149,11 @@ pub async fn start_haiku_chat_stream(
 ) -> Result<String, String> {
     let context = context_text.trim().to_string();
     let question = question_text.trim().to_string();
-    let images = images
-        .unwrap_or_default()
-        .into_iter()
-        .filter(is_valid_llm_image_input)
-        .collect::<Vec<_>>();
+    let mut all_images = context_images.unwrap_or_default();
+    let context_image_count = all_images.len();
+    all_images.extend(images.unwrap_or_default());
+    let all_images = validate_llm_image_inputs(all_images)?;
+    let images = all_images[context_image_count..].to_vec();
 
     if context.is_empty() && question.is_empty() && images.is_empty() {
         return Err("Empty input".to_string());
@@ -4135,14 +4234,14 @@ pub async fn start_haiku_chat_stream(
 Твоя задача:
 1) Ответить на "ЗАПРОС:" с учётом контекста выше.
 2) Если "ЗАПРОС:" пустой, но есть изображения — объясни что на изображениях и ответь по ним, используя контекст.
-3) Если данных недостаточно — задай 1 уточняющий вопрос.
+3) Если деталей не хватает, дай наиболее полезный ответ по вероятному смыслу без уточняющих вопросов.
 
 Формат ответа:
 - Начинай сразу с ответа. Не повторяй "ЗАПРОС:" и не пиши заголовки "Вопрос:"/"Ответ:".
 - Запрещено начинать с "Вопрос", "Ответ", заголовка # Ответ, "**Вопрос:**" или краткого пересказа вопроса.
 - Первая строка должна быть содержательным тезисом ответа.
 - Не начинай с фраз вроде "Понял", "Конечно", "Хорошо" - сразу давай содержательный ответ.
-- Сначала 3-7 буллетов с ответом (каждый пункт начинай с "- "), если пользователь не просит другой формат.
+- По умолчанию отвечай коротким связным абзацем. Список нужен только для нескольких самостоятельных пунктов или по просьбе пользователя.
 - Затем (если нужно) короткий пример кода.
 
 Правила для кода:
@@ -4285,7 +4384,7 @@ pub async fn start_haiku_chat_stream(
     } else {
         context.clone()
     };
-    let mut llm_question = question.clone();
+    let llm_question = question.clone();
     if let Some(memory_context) =
         crate::presentation::interview_memory_bridge::assemble_chat_context_or_fallback(
             state.inner(),
@@ -4296,7 +4395,6 @@ pub async fn start_haiku_chat_stream(
         .await
     {
         llm_context = memory_context;
-        llm_question.clear();
     }
 
     let parallel_openai_enabled = provider == crate::domain::LlmProviderType::Anthropic
@@ -4374,14 +4472,14 @@ pub async fn start_haiku_chat_stream(
                     request_id,
                     llm_context.len(),
                     llm_question.len(),
-                    images.len()
+                    all_images.len()
                 );
 
                 let request_id_clone = request_id.clone();
                 let app_handle_clone = app_handle.clone();
                 let anthropic_model = model.clone();
                 let system_prompt_clone = system_prompt.clone();
-                let images_clone = images.clone();
+                let images_clone = all_images.clone();
                 let context_clone = llm_context.clone();
                 let question_clone = llm_question.clone();
                 let api_key_clone = api_key.clone();
@@ -4389,13 +4487,7 @@ pub async fn start_haiku_chat_stream(
                 let openai_mini_candidate_clone = openai_mini_candidate.clone();
 
                 tauri::async_runtime::spawn(async move {
-                    let combined_text = if context_clone.is_empty() {
-                        question_clone.clone()
-                    } else if question_clone.is_empty() {
-                        context_clone.clone()
-                    } else {
-                        format!("{context_clone}\n\nЗАПРОС: {question_clone}")
-                    };
+                    let combined_text = build_chat_user_text(&context_clone, &question_clone);
 
                     let anthropic_writer = spawn_companion_delta_writer(
                         app_handle_clone.clone(),
@@ -4578,7 +4670,7 @@ pub async fn start_haiku_chat_stream(
         request_id,
         llm_context.len(),
         llm_question.len(),
-        images.len()
+        all_images.len()
     );
 
     let request_id_clone = request_id.clone();
@@ -4589,7 +4681,7 @@ pub async fn start_haiku_chat_stream(
     let system_prompt_clone = system_prompt.clone();
     let provider_clone = provider;
     let api_key_clone = api_key.clone();
-    let images_clone = images.clone();
+    let images_clone = all_images.clone();
     let context_clone = llm_context.clone();
     let question_clone = llm_question.clone();
 
@@ -4603,13 +4695,7 @@ pub async fn start_haiku_chat_stream(
         let companion_delta_writer =
             spawn_companion_delta_writer(app_handle_clone.clone(), request_id_clone.clone(), None);
 
-        let combined_text = if context_clone.is_empty() {
-            question_clone.clone()
-        } else if question_clone.is_empty() {
-            context_clone.clone()
-        } else {
-            format!("{context_clone}\n\nЗАПРОС: {question_clone}")
-        };
+        let combined_text = build_chat_user_text(&context_clone, &question_clone);
 
         let combined_text_for_anthropic = combined_text.clone();
 
@@ -4864,7 +4950,7 @@ pub async fn start_code_explain_stream(
 Твоя задача:
 1) Понять, что пользователь хочет про выделенный фрагмент: объяснить, исправить, улучшить, ответить на вопрос, или дать краткий разбор.
 2) Дать лучший краткий ответ по делу (без воды), используя контекст чата, но не пересказывая его целиком.
-3) Если запрос неясен из-за распознавания/обрывков - задай 1 уточняющий вопрос и предложи 1-2 вероятные интерпретации.
+3) Если запрос неясен из-за распознавания/обрывков, выбери наиболее вероятный смысл и ответь без уточняющих вопросов.
 
 Формат ответа:
 - По умолчанию отвечай 1-2 короткими предложениями одним компактным абзацем.
@@ -5060,11 +5146,7 @@ fn focus_copy_helper_info() -> FocusCopyHelperInfo {
         .join(".build")
         .join("release")
         .join("MacOSFocusCopyHelper");
-    let accessibility_target = if app_bundle.exists() {
-        app_bundle.clone()
-    } else {
-        executable.clone()
-    };
+    let accessibility_target = app_bundle.clone();
 
     FocusCopyHelperInfo {
         app_bundle_path: app_bundle.to_string_lossy().to_string(),
@@ -5077,16 +5159,10 @@ fn focus_copy_helper_info() -> FocusCopyHelperInfo {
 #[cfg(target_os = "macos")]
 fn focus_copy_helper_check_executable() -> std::path::PathBuf {
     let info = focus_copy_helper_info();
-    let app_executable = std::path::PathBuf::from(&info.app_bundle_path)
+    std::path::PathBuf::from(&info.app_bundle_path)
         .join("Contents")
         .join("MacOS")
-        .join("Telegram");
-
-    if app_executable.exists() {
-        app_executable
-    } else {
-        std::path::PathBuf::from(info.executable_path)
-    }
+        .join("Telegram")
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -5357,7 +5433,7 @@ pub async fn show_settings_window(
 
     // Настройки доступны только авторизованному пользователю.
     // Если не авторизован — открываем auth окно, а settings держим скрытым.
-    if !*state.is_authenticated.read().await {
+    if !state.has_local_access().await {
         log::info!("show_settings_window: user is not authenticated -> redirect to auth window");
         show_auth_window(app_handle).await?;
         return Err("Not authenticated".to_string());
@@ -5407,7 +5483,7 @@ pub async fn show_profile_window(
 ) -> Result<(), String> {
     log::info!("Command: show_profile_window");
 
-    if !*state.is_authenticated.read().await {
+    if !state.has_local_access().await {
         log::info!("show_profile_window: not authenticated -> redirect to auth");
         show_auth_window(app_handle).await?;
         return Err("Not authenticated".to_string());
@@ -5568,7 +5644,7 @@ pub async fn set_auth_session(
     // 5) Перезапускаем фоновый refresh
     state.restart_auth_refresh_task(app_handle.clone()).await;
 
-    if !next_is_auth {
+    if !next_is_auth && !AppState::local_no_auth_mode() {
         let _ = crate::presentation::companion::disable_mode(&app_handle).await;
     } else if let Err(e) = crate::presentation::companion::publish_snapshot(&app_handle).await {
         log::debug!(
@@ -5642,7 +5718,7 @@ pub async fn set_authenticated(
         },
     );
 
-    if !authenticated {
+    if !authenticated && !AppState::local_no_auth_mode() {
         let _ = crate::presentation::companion::disable_mode(&app_handle).await;
     } else if let Err(e) = crate::presentation::companion::publish_snapshot(&app_handle).await {
         log::debug!(

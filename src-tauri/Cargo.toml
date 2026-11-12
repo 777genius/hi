@@ -40,6 +40,8 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-shell = "2"
+tauri-plugin-wdio = { version = "=1.5.1", optional = true }
+tauri-plugin-wdio-webdriver = { version = "=1.5.1", optional = true }
 
 # Async runtime
 tokio = { version = "1.41", features = ["full"] }
@@ -138,4 +140,6 @@ name = "test_deepgram_connection"
 # Enable with: cargo build --features whisper
 whisper = ["dep:whisper-rs", "dep:num_cpus"]
 integration-tests = []
+wdio = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]
+local-access = []
 default = []

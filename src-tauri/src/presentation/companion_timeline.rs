@@ -1364,7 +1364,9 @@ pub async fn on_microphone_partial(state: &AppState, payload: &PartialTranscript
     }
 
     let now = now_ms();
-    if !is_mic_dominant_now(state, now) {
+    let independent_local_mic = state.config.read().await.stt.provider
+        == crate::domain::SttProviderType::ParakeetUltra;
+    if !independent_local_mic && !is_mic_dominant_now(state, now) {
         clear_microphone_live_buffers(state).await;
         return;
     }
@@ -1625,13 +1627,14 @@ pub async fn build_selected_context_text_and_memory_evidence(
 }
 
 async fn collect_context_parts(state: &AppState, include_full_history: bool) -> Vec<ContextPart> {
+    let history_floor_seq = state.companion_history_floor_seq.load(Ordering::Relaxed);
     let context_floor_seq = state.companion_context_floor_seq.load(Ordering::Relaxed);
     let live_system = visible_system_partial_text(state).await;
     let live_mic = visible_microphone_partial_text(state).await;
 
     let mut parts: Vec<ContextPart> = Vec::new();
     for message in state.companion_timeline.read().await.iter() {
-        if message.deleted {
+        if message.deleted || message.seq <= history_floor_seq {
             continue;
         }
         if message.kind == CompanionMessageKind::Haiku && message.status != "final" {
@@ -2922,6 +2925,20 @@ mod tests {
         assert!(!selected_context.contains("new unselected"));
         assert!(!full_context.contains("explicit old selected"));
         assert!(full_context.contains("new unselected"));
+    }
+
+    #[tokio::test]
+    async fn cleared_history_cannot_be_reselected_for_llm_context() {
+        let state = AppState::default();
+        append_system_final(&state, 1, &test_transcription("old secret context", 100)).await;
+        state.companion_history_floor_seq.store(1, Ordering::Relaxed);
+        state.companion_context_floor_seq.store(1, Ordering::Relaxed);
+
+        let (selected, evidence) =
+            build_selected_context_text_and_memory_evidence(&state, &["stt:1:1".to_string()]).await;
+        assert!(selected.is_empty());
+        assert!(evidence.selected_messages.is_empty());
+        assert!(build_context_text(&state, false).await.is_empty());
     }
 
     #[tokio::test]

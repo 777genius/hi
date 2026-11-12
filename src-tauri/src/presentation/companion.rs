@@ -118,7 +118,7 @@ pub struct CompanionMemoryState {
     pub last_updated_at_ms: Option<i64>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanionAttachment {
     pub id: String,
@@ -127,7 +127,7 @@ pub struct CompanionAttachment {
     pub data_url: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanionLlmCandidate {
     pub id: String,
@@ -140,7 +140,8 @@ pub struct CompanionLlmCandidate {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum CompanionMessageKind {
     #[default]
     Stt,
@@ -173,7 +174,7 @@ impl serde::Serialize for CompanionMessageKind {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanionMessage {
     pub id: String,
@@ -193,7 +194,7 @@ pub struct CompanionMessage {
     pub insert_after_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stt_index: Option<u64>,
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub deleted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<CompanionAttachment>>,
@@ -565,6 +566,22 @@ async fn publish_snapshot_internal(
     };
 
     let runtime = state.companion_runtime.read().await.clone();
+    let previous = runtime.snapshot.read().await.clone();
+    let just_finished_response = envelope.data.timeline.iter().any(|message| {
+        message.kind == CompanionMessageKind::Haiku
+            && matches!(message.status.as_str(), "final" | "error")
+            && previous.data.timeline.iter().find(|old| old.id == message.id)
+                .is_none_or(|old| old.status != message.status)
+    });
+    let just_cleared = envelope.data.controls.history_floor_seq != previous.data.controls.history_floor_seq
+        || envelope.data.controls.context_floor_seq != previous.data.controls.context_floor_seq;
+    if just_finished_response || just_cleared {
+        if let Err(error) = crate::presentation::companion_timeline_store::save_now(state.inner()).await {
+            log::warn!("Failed to persist completed companion answer: {}", error);
+        }
+    } else {
+        crate::presentation::companion_timeline_store::schedule_save(state.inner());
+    }
     *runtime.snapshot.write().await = envelope.clone();
     let _ = runtime.sse_tx.send(envelope.clone());
 
@@ -725,7 +742,7 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
         .collect();
 
     Ok(CompanionSnapshot {
-        auth_required: !*state.is_authenticated.read().await,
+        auth_required: !state.has_local_access().await,
         recording: CompanionRecordingState {
             status: recording_status,
             active_session_id,
@@ -915,6 +932,10 @@ async fn route_request(
         #[cfg(debug_assertions)]
         (Method::POST, "/api/e2e/timeline/system") => {
             handle_e2e_system_transcript_post(app_handle.clone(), req).await
+        }
+        #[cfg(debug_assertions)]
+        (Method::POST, "/api/e2e/timeline/microphone") => {
+            handle_e2e_microphone_transcript_post(app_handle.clone(), req).await
         }
         (Method::HEAD, path) if path.starts_with("/c/") => {
             let token = path.trim_start_matches("/c/").to_string();
@@ -1456,6 +1477,57 @@ async fn handle_e2e_system_transcript_post(
             })
             .to_string(),
         ),
+        Err(error) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+#[cfg(debug_assertions)]
+async fn handle_e2e_microphone_transcript_post(
+    app_handle: AppHandle,
+    req: Request<Incoming>,
+) -> Response<CompanionBody> {
+    let Some(token) = parse_header_token(req.headers()) else {
+        return text_response(StatusCode::UNAUTHORIZED, "Missing token");
+    };
+    if !is_valid_token(&app_handle, &token).await {
+        return text_response(StatusCode::FORBIDDEN, "Forbidden");
+    }
+    if !has_json_content_type(req.headers()) {
+        return text_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Expected application/json");
+    }
+    let body = match read_json_body::<E2eSystemTranscriptBody>(req).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let text = body.text.unwrap_or_default().trim().to_string();
+    if text.is_empty() {
+        return text_response(StatusCode::BAD_REQUEST, "Empty text");
+    }
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "AppState not available");
+    };
+    let session_id = state.active_transcription_session_id.load(std::sync::atomic::Ordering::Relaxed);
+    if session_id == 0 || body.session_id.is_some_and(|value| value != session_id) {
+        return text_response(StatusCode::CONFLICT, "Recording session is not active");
+    }
+    let transcription = crate::domain::Transcription::final_result(text);
+    let payload = crate::presentation::events::FinalTranscriptionPayload::from_transcription(
+        transcription, session_id, "microphone",
+    );
+    // The endurance harness injects a controlled microphone transcript while
+    // the physical input is muted, so ambient noise cannot pollute LLM context.
+    // This route exists only in debug builds and restores the runtime flag.
+    let was_enabled = state.microphone_transcription_enabled.swap(
+        true,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    crate::presentation::companion_timeline::on_microphone_final(state.inner(), &payload).await;
+    state.microphone_transcription_enabled.store(
+        was_enabled,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    match publish_snapshot(&app_handle).await {
+        Ok(_) => json_response(StatusCode::OK, serde_json::json!({"ok": true, "sessionId": session_id}).to_string()),
         Err(error) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
 }

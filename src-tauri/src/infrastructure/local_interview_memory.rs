@@ -107,10 +107,7 @@ impl LocalInterviewMemoryStore {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(DEFAULT_EMBEDDING_DIMENSIONS),
-            openai_api_key: std::env::var("OPENAI_API_KEY")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
+            openai_api_key: embedding_api_key_from_env(),
         })
     }
 
@@ -183,7 +180,7 @@ impl LocalInterviewMemoryStore {
         let query_text = build_retrieval_query_text(&request);
 
         let mut ranked = self
-            .keyword_search(request.session_id, &query_text, 300)
+            .keyword_search(request.session_id, &request.current_request, &query_text, 3_000)
             .await?;
         if self.can_embed() {
             if let Ok(vector) = self.embed_one(&query_text).await {
@@ -211,6 +208,7 @@ impl LocalInterviewMemoryStore {
     async fn keyword_search(
         &self,
         session_id: Uuid,
+        current_request: &str,
         query_text: &str,
         limit: i64,
     ) -> Result<Vec<RankedChunk>> {
@@ -232,13 +230,17 @@ impl LocalInterviewMemoryStore {
         .await?;
 
         let query_terms = significant_words(query_text);
+        let primary_terms = significant_words(current_request);
         let mut chunks = Vec::new();
         for row in rows {
             let normalized: String = row.try_get("normalized_text")?;
             let terms = significant_words(&normalized);
             let overlap = terms.intersection(&query_terms).count();
+            let primary_overlap = terms.intersection(&primary_terms).count();
             let kind: String = row.try_get("kind")?;
-            let score = kind_score(&kind) + overlap as f32 * 8.0;
+            let score = kind_score(&kind)
+                + primary_overlap as f32 * 16.0
+                + overlap.saturating_sub(primary_overlap) as f32 * 2.0;
             if score < 8.0 {
                 continue;
             }
@@ -498,12 +500,12 @@ async fn ensure_schema(pool: &PgPool) -> Result<()> {
 
 fn pack_context(request: LocalContextRequest, chunks: Vec<RankedChunk>) -> String {
     let mut output = String::new();
-    push_section(&mut output, "current_request", &request.current_request);
-    push_evidence_section(&mut output, "selected_messages", &request.selected_messages);
-    push_evidence_section(&mut output, "current_code", &request.current_code);
+    push_section(&mut output, "current_request", &trim_text_head_to_char_boundary(&request.current_request, 2_000));
+    push_evidence_section(&mut output, "selected_messages", &request.selected_messages, 3_000);
 
     if !chunks.is_empty() {
         output.push_str("\n[retrieved_memory]\n");
+        let memory_start = output.chars().count();
         for chunk in chunks {
             let seq = match (chunk.seq_start, chunk.seq_end) {
                 (Some(start), Some(end)) if start != end => format!(" seq={start}-{end}"),
@@ -515,13 +517,14 @@ fn pack_context(request: LocalContextRequest, chunks: Vec<RankedChunk>) -> Strin
                 "[memory id={} source={} kind={} score={:.2} reason={}{}]\n{}\n",
                 chunk.id, chunk.source, chunk.kind, chunk.score, chunk.reason, seq, text
             ));
-            if output.chars().count() >= MAX_CONTEXT_CHARS {
+            if output.chars().count().saturating_sub(memory_start) >= 8_000 {
                 break;
             }
         }
     }
 
-    push_evidence_section(&mut output, "recent_timeline", &request.recent_timeline);
+    push_evidence_section(&mut output, "current_code", &request.current_code.iter().rev().cloned().collect::<Vec<_>>(), 1_500);
+    push_evidence_section(&mut output, "recent_timeline", &request.recent_timeline.iter().rev().cloned().collect::<Vec<_>>(), 2_500);
 
     trim_text_head_to_char_boundary(&output, MAX_CONTEXT_CHARS)
 }
@@ -533,15 +536,20 @@ fn push_section(output: &mut String, label: &str, text: &str) {
     }
 }
 
-fn push_evidence_section(output: &mut String, label: &str, items: &[LocalEvidence]) {
+fn push_evidence_section(output: &mut String, label: &str, items: &[LocalEvidence], limit: usize) {
     if items.is_empty() {
         return;
     }
     output.push_str(&format!("\n[{label}]\n"));
+    let start = output.chars().count();
     for item in items {
         let text = item.text.trim();
         if !text.is_empty() {
-            output.push_str(&format!("[{}]\n{}\n", item.label, text));
+            let remaining = limit.saturating_sub(output.chars().count().saturating_sub(start));
+            if remaining == 0 {
+                break;
+            }
+            output.push_str(&format!("[{}]\n{}\n", item.label, trim_text_head_to_char_boundary(text, remaining.min(1_000))));
         }
     }
 }
@@ -630,25 +638,18 @@ fn adjusted_rank_score(query_text: &str, chunk: &RankedChunk) -> f32 {
 }
 
 fn build_retrieval_query_text(request: &LocalContextRequest) -> String {
-    let mut query_text = request.current_request.clone();
-    if !request.current_request.trim().is_empty() {
-        for _ in 0..3 {
-            query_text.push('\n');
-            query_text.push_str(&request.current_request);
-        }
-    }
-    for item in request
-        .selected_messages
-        .iter()
-        .chain(request.current_code.iter())
-    {
+    let mut query_text = trim_text_head_to_char_boundary(&request.current_request, 2_000);
+    for item in request.selected_messages.iter().rev().take(4) {
         query_text.push('\n');
-        query_text.push_str(&item.text);
+        query_text.push_str(&trim_text_head_to_char_boundary(&item.text, 800));
     }
-    let recent_start = request.recent_timeline.len().saturating_sub(2);
-    for item in request.recent_timeline.iter().skip(recent_start) {
+    for item in request.current_code.iter().rev().take(2) {
         query_text.push('\n');
-        query_text.push_str(&item.text);
+        query_text.push_str(&trim_text_tail_to_char_boundary(&item.text, 500));
+    }
+    for item in request.recent_timeline.iter().rev().take(2) {
+        query_text.push('\n');
+        query_text.push_str(&trim_text_tail_to_char_boundary(&item.text, 500));
     }
     query_text
 }
@@ -794,6 +795,24 @@ fn sanitize_error(error: &str) -> String {
         .chars()
         .take(240)
         .collect()
+}
+
+fn embedding_api_key_from_env() -> Option<String> {
+    let explicit = std::env::var("INTERVIEW_MEMORY_EMBEDDING_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if explicit.is_some() {
+        return explicit;
+    }
+    let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_default();
+    if !base_url.is_empty() && !base_url.starts_with("https://api.openai.com") {
+        return None;
+    }
+    std::env::var("OPENAI_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn env_bool(name: &str, default: bool) -> bool {
@@ -1054,12 +1073,7 @@ mod tests {
 
         let query = build_retrieval_query_text(&request);
 
-        assert_eq!(
-            query
-                .matches("current autonomous workflow question")
-                .count(),
-            4
-        );
+        assert_eq!(query.matches("current autonomous workflow question").count(), 1);
         assert!(!query.contains("old topic 0"));
         assert!(!query.contains("old topic 3"));
         assert!(!query.contains("old topic 4"));
@@ -1123,6 +1137,31 @@ mod tests {
             context.find("[retrieved_memory]").unwrap()
                 < context.find("[recent_timeline]").unwrap()
         );
+    }
+
+    #[test]
+    fn pack_context_keeps_old_fact_when_current_code_is_huge() {
+        let context = pack_context(
+            LocalContextRequest {
+                session_id: Uuid::new_v4(),
+                current_request: "What phrase did I ask you to remember?".to_string(),
+                selected_messages: Vec::new(),
+                current_code: vec![LocalEvidence {
+                    label: "current_code".to_string(),
+                    text: "unrelated filler ".repeat(10_000),
+                }],
+                recent_timeline: Vec::new(),
+                max_results: 4,
+            },
+            vec![ranked_chunk(
+                Uuid::new_v4(),
+                80.0,
+                "keyword:3",
+                "Remember this exact phrase: copper lantern 742.",
+            )],
+        );
+        assert!(context.contains("copper lantern 742"));
+        assert!(context.chars().count() <= MAX_CONTEXT_CHARS);
     }
 
     #[test]

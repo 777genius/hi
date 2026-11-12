@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
@@ -133,6 +133,7 @@ pub struct AppState {
 
     /// Companion timeline (session-local, backend-owned coarse snapshot).
     pub companion_timeline: Arc<RwLock<Vec<crate::presentation::companion::CompanionMessage>>>,
+    pub companion_timeline_save_generation: Arc<AtomicU64>,
     /// Stop waits for mic + system event reducers before clearing session identity.
     pub(crate) system_stt_event_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<crate::presentation::commands::SttTranscriptionEvent>>>>,
     pub(crate) microphone_stt_event_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<crate::presentation::commands::SttTranscriptionEvent>>>>,
@@ -210,6 +211,10 @@ pub struct AppState {
     /// stale-снапшотом даже если каждое место по отдельности "правильное".
     pub stt_config_guard: Arc<tokio::sync::Mutex<()>>,
 
+    /// Protected by stt_config_guard: persisted settings must be loaded before
+    /// authentication can write an updated token back to disk.
+    stt_config_loaded: AtomicBool,
+
     /// Дебаунс для глобального hotkey записи.
     /// Нужен из‑за key repeat / случайных двойных срабатываний, которые выглядят как "мигание" окна.
     pub last_recording_hotkey_ms: AtomicU64,
@@ -232,6 +237,16 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The app never requires login: local access is always granted, without creating
+    /// an auth session or manufacturing a backend token.
+    pub(crate) fn local_no_auth_mode() -> bool {
+        true
+    }
+
+    pub(crate) async fn has_local_access(&self) -> bool {
+        Self::local_no_auth_mode() || *self.is_authenticated.read().await
+    }
+
     pub fn new() -> Self {
         // Initialize audio capture (system output by default).
         let capture_result: Result<Box<dyn AudioCapture>, _> =
@@ -287,6 +302,7 @@ impl AppState {
                     companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
                     companion_desktop_blackout_enabled: Arc::new(AtomicBool::new(false)),
                     companion_timeline: Arc::new(RwLock::new(Vec::new())),
+                    companion_timeline_save_generation: Arc::new(AtomicU64::new(0)),
                     system_stt_event_tx: Arc::new(RwLock::new(None)),
                     microphone_stt_event_tx: Arc::new(RwLock::new(None)),
                     companion_next_seq: Arc::new(AtomicU64::new(0)),
@@ -315,6 +331,7 @@ impl AppState {
                     companion_request_generations: Arc::new(RwLock::new(HashMap::new())),
                     auth_refresh_task: Arc::new(RwLock::new(None)),
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    stt_config_loaded: AtomicBool::new(false),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
@@ -383,6 +400,7 @@ impl AppState {
                     companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
                     companion_desktop_blackout_enabled: Arc::new(AtomicBool::new(false)),
                     companion_timeline: Arc::new(RwLock::new(Vec::new())),
+                    companion_timeline_save_generation: Arc::new(AtomicU64::new(0)),
                     system_stt_event_tx: Arc::new(RwLock::new(None)),
                     microphone_stt_event_tx: Arc::new(RwLock::new(None)),
                     companion_next_seq: Arc::new(AtomicU64::new(0)),
@@ -411,6 +429,7 @@ impl AppState {
                     companion_request_generations: Arc::new(RwLock::new(HashMap::new())),
                     auth_refresh_task: Arc::new(RwLock::new(None)),
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    stt_config_loaded: AtomicBool::new(false),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
@@ -490,6 +509,7 @@ impl AppState {
             companion_action_lock: Arc::new(tokio::sync::Mutex::new(())),
             companion_desktop_blackout_enabled: Arc::new(AtomicBool::new(false)),
             companion_timeline: Arc::new(RwLock::new(Vec::new())),
+            companion_timeline_save_generation: Arc::new(AtomicU64::new(0)),
             system_stt_event_tx: Arc::new(RwLock::new(None)),
             microphone_stt_event_tx: Arc::new(RwLock::new(None)),
             companion_next_seq: Arc::new(AtomicU64::new(0)),
@@ -518,6 +538,7 @@ impl AppState {
             companion_request_generations: Arc::new(RwLock::new(HashMap::new())),
             auth_refresh_task: Arc::new(RwLock::new(None)),
             stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
+            stt_config_loaded: AtomicBool::new(false),
             last_recording_hotkey_ms: AtomicU64::new(0),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
@@ -545,8 +566,72 @@ impl AppState {
             .ok()
     }
 
-    pub(crate) async fn apply_backend_auth_token_to_stt(&self, token: Option<String>) {
+    /// Call only while holding stt_config_guard.
+    async fn ensure_stt_config_loaded<F>(&self, load: F) -> anyhow::Result<()>
+    where
+        F: std::future::Future<Output = anyhow::Result<crate::domain::SttConfig>>,
+    {
+        if self.stt_config_loaded.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        let mut config = load.await?;
+        if config.provider == crate::domain::SttProviderType::Backend
+            && config.keep_connection_alive
+        {
+            config.keep_connection_alive = false;
+            if let Err(error) = ConfigStore::save_config(&config).await {
+                log::warn!("Failed to persist STT keep-alive migration: {}", error);
+            }
+        }
+
+        self.transcription_service
+            .update_config(config.clone())
+            .await?;
+        self.microphone_transcription_service
+            .update_config(config.clone())
+            .await?;
+        self.config.write().await.stt = config;
+        self.stt_config_loaded.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub(crate) async fn initialize_stt_config(&self) -> anyhow::Result<()> {
         let _guard = self.stt_config_guard.lock().await;
+        self.ensure_stt_config_loaded(ConfigStore::load_config())
+            .await
+    }
+
+    pub(crate) async fn apply_backend_auth_token_to_stt(&self, token: Option<String>) {
+        self.apply_backend_auth_token_to_stt_with(
+            token,
+            ConfigStore::load_config(),
+            |config| async move { ConfigStore::save_config(&config).await },
+        )
+        .await;
+    }
+
+    async fn apply_backend_auth_token_to_stt_with<L, S, P>(
+        &self,
+        token: Option<String>,
+        load: L,
+        save: S,
+    ) where
+        L: std::future::Future<Output = anyhow::Result<crate::domain::SttConfig>>,
+        S: FnOnce(crate::domain::SttConfig) -> P,
+        P: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        let _guard = self.stt_config_guard.lock().await;
+
+        // Authentication may run before the background startup task. Never
+        // save the service's defaults over the user's persisted STT choice.
+        if let Err(error) = self.ensure_stt_config_loaded(load).await {
+            log::warn!(
+                "Cannot load STT config before updating auth token: {}",
+                error
+            );
+            return;
+        }
 
         // Best-effort: ошибки не должны блокировать UX, но они важны для диагностики.
         // Важно: берём текущий in-memory config, чтобы не "сбрасывать" keyterms и другие поля
@@ -557,7 +642,7 @@ impl AppState {
         }
         config.backend_auth_token = token;
         self.config.write().await.stt.backend_auth_token = config.backend_auth_token.clone();
-        if let Err(e) = ConfigStore::save_config(&config).await {
+        if let Err(e) = save(config.clone()).await {
             log::warn!("Failed to persist STT config token: {}", e);
         }
         if let Err(e) = self
@@ -1035,5 +1120,90 @@ impl AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod stt_config_startup_tests {
+    use super::*;
+    use crate::domain::{SttConfig, SttProviderType};
+
+    #[tokio::test]
+    async fn early_auth_loads_local_provider_before_persisting_token() {
+        let state = AppState::default();
+        let mut saved = SttConfig::new(SttProviderType::ParakeetUltra);
+        saved.language = "uk".into();
+        saved.model = Some("/model/local.gguf".into());
+        saved.backend_auth_token = Some("old".into());
+        let written = Arc::new(tokio::sync::Mutex::new(None));
+        let output = Arc::clone(&written);
+
+        state
+            .apply_backend_auth_token_to_stt_with(
+                Some("new".into()),
+                async move { Ok(saved) },
+                move |config| async move {
+                    *output.lock().await = Some(config);
+                    Ok(())
+                },
+            )
+            .await;
+
+        let persisted = written.lock().await.clone().unwrap();
+        assert_eq!(persisted.provider, SttProviderType::ParakeetUltra);
+        assert_eq!(persisted.language, "uk");
+        assert_eq!(persisted.model.as_deref(), Some("/model/local.gguf"));
+        assert_eq!(persisted.backend_auth_token.as_deref(), Some("new"));
+        assert_eq!(
+            state.transcription_service.get_config().await.provider,
+            SttProviderType::ParakeetUltra
+        );
+        assert_eq!(
+            state
+                .microphone_transcription_service
+                .get_config()
+                .await
+                .provider,
+            SttProviderType::ParakeetUltra
+        );
+        assert_eq!(
+            state.config.read().await.stt.provider,
+            SttProviderType::ParakeetUltra
+        );
+
+        // The later startup task must not reload a stale snapshot after auth.
+        let _guard = state.stt_config_guard.lock().await;
+        state
+            .ensure_stt_config_loaded(async { Err(anyhow::anyhow!("must not reload")) })
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .transcription_service
+                .get_config()
+                .await
+                .backend_auth_token
+                .as_deref(),
+            Some("new")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_initial_read_does_not_write_defaults() {
+        let state = AppState::default();
+        let written = Arc::new(AtomicBool::new(false));
+        let output = Arc::clone(&written);
+        state
+            .apply_backend_auth_token_to_stt_with(
+                Some("new".into()),
+                async { Err(anyhow::anyhow!("unreadable config")) },
+                move |_| async move {
+                    output.store(true, Ordering::Relaxed);
+                    Ok(())
+                },
+            )
+            .await;
+        assert!(!state.stt_config_loaded.load(Ordering::Relaxed));
+        assert!(!written.load(Ordering::Relaxed));
     }
 }
