@@ -1829,8 +1829,10 @@ fn companion_proxy_client() -> &'static reqwest::Client {
 
 /// The identity challenge never contains an access token. It proves that
 /// the listener at the discovered port knows the persisted private token.
-fn companion_identity_proof(token: &str, instance_id: &str, nonce: &str) -> String {
-    let value = format!("hack-interview-companion/v1:{token}:{instance_id}:{nonce}");
+fn companion_identity_proof(token: &str, instance_id: &str, port: u16, nonce: &str) -> String {
+    // Bind proof to the *actual* listener port. A process occupying 43821
+    // cannot relay a valid identity challenge to Companion on fallback 43822.
+    let value = format!("hack-interview-companion/v2:{token}:{instance_id}:{port}:{nonce}");
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
@@ -1858,13 +1860,16 @@ async fn companion_identity_response(
         return text_response(StatusCode::SERVICE_UNAVAILABLE, "Companion unavailable");
     };
     let token = runtime.security_token.read().await.clone();
+    let Some(port) = *runtime.port.read().await else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "Companion not bound");
+    };
     json_response(
         StatusCode::OK,
         serde_json::json!({
             "service": "hack-interview-companion",
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "instanceId": instance_id,
-            "proof": companion_identity_proof(&token, &instance_id, &nonce),
+            "proof": companion_identity_proof(&token, &instance_id, port, &nonce),
         }).to_string(),
     )
 }
@@ -2400,12 +2405,13 @@ mod companion_identity_tests {
 
     #[test]
     fn proof_binds_nonce_token_and_runtime_instance() {
-        let proof = companion_identity_proof("private-token", "instance-a", "abcd1234abcd1234abcd1234abcd1234");
+        let proof = companion_identity_proof("private-token", "instance-a", 43822, "abcd1234abcd1234abcd1234abcd1234");
         assert_eq!(proof.len(), 64);
         assert!(proof.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(proof, companion_identity_proof("private-token", "instance-b", "abcd1234abcd1234abcd1234abcd1234"));
-        assert_ne!(proof, companion_identity_proof("other-token", "instance-a", "abcd1234abcd1234abcd1234abcd1234"));
-        assert_ne!(proof, companion_identity_proof("private-token", "instance-a", "ffff1234abcd1234abcd1234abcd1234"));
+        assert_ne!(proof, companion_identity_proof("private-token", "instance-b", 43822, "abcd1234abcd1234abcd1234abcd1234"));
+        assert_ne!(proof, companion_identity_proof("other-token", "instance-a", 43822, "abcd1234abcd1234abcd1234abcd1234"));
+        assert_ne!(proof, companion_identity_proof("private-token", "instance-a", 43821, "abcd1234abcd1234abcd1234abcd1234"));
+        assert_ne!(proof, companion_identity_proof("private-token", "instance-a", 43822, "ffff1234abcd1234abcd1234abcd1234"));
     }
 }
 
