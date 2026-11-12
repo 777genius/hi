@@ -17,7 +17,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpListener;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 use tokio::time::timeout;
 
 use crate::domain::RecordingStatus;
@@ -72,6 +72,8 @@ pub struct CompanionMicrophoneState {
 #[derive(Debug, Clone, serde::Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanionControlState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
     pub history_floor_seq: u64,
     pub context_floor_seq: u64,
     pub conversation_generation: u64,
@@ -239,6 +241,7 @@ pub struct CompanionServerStatus {
 #[derive(Debug, Clone)]
 pub struct CompanionRuntime {
     pub snapshot: Arc<RwLock<CompanionSnapshotEnvelope>>,
+    pub publish_lock: Arc<Mutex<()>>,
     pub sse_tx: watch::Sender<CompanionSnapshotEnvelope>,
     pub security_token: Arc<RwLock<String>>,
     pub enabled: Arc<RwLock<bool>>,
@@ -421,6 +424,7 @@ pub fn new_runtime() -> CompanionRuntime {
 
     CompanionRuntime {
         snapshot: Arc::new(RwLock::new(snapshot)),
+        publish_lock: Arc::new(Mutex::new(())),
         sse_tx,
         security_token: Arc::new(RwLock::new(generate_security_token())),
         enabled: Arc::new(RwLock::new(false)),
@@ -500,8 +504,8 @@ pub async fn build_current_snapshot(
     let state = app_handle
         .try_state::<AppState>()
         .ok_or_else(|| "AppState не доступен".to_string())?;
-    let revision = state.companion_revision.read().await.to_string();
     let data = build_snapshot_data(state.inner()).await?;
+    let revision = state.companion_revision.read().await.to_string();
     Ok(CompanionSnapshotEnvelope { revision, data })
 }
 
@@ -534,17 +538,12 @@ pub async fn get_server_status(app_handle: &AppHandle) -> Result<CompanionServer
 }
 
 fn log_server_ready(status: &CompanionServerStatus) {
-    if let Some(url) = status.local_network_url.as_deref() {
-        log::info!("Companion server ready - phone URL: {}", url);
-        return;
+    if let Some(port) = status.port {
+        // Status URLs embed the bearer token. Never copy them into logs.
+        log::info!("Companion server ready on port {}; scan the private QR in the app", port);
+    } else {
+        log::info!("Companion server started, but port is not available yet");
     }
-
-    if let Some(url) = status.local_url.as_deref() {
-        log::info!("Companion server ready - local URL: {}", url);
-        return;
-    }
-
-    log::info!("Companion server started, but URL is not available yet");
 }
 
 pub async fn publish_snapshot(app_handle: &AppHandle) -> Result<CompanionSnapshotEnvelope, String> {
@@ -564,14 +563,16 @@ async fn publish_snapshot_internal(
     let state = app_handle
         .try_state::<AppState>()
         .ok_or_else(|| "AppState не доступен".to_string())?;
-    let revision = AppState::bump_revision(&state.companion_revision).await;
+    let runtime = state.companion_runtime.read().await.clone();
+    // A partial STT/LLM update may publish concurrently with a UI action.
+    // Build, number and broadcast snapshots in one ordered critical section.
+    let _publish_guard = runtime.publish_lock.lock().await;
     let data = build_snapshot_data(state.inner()).await?;
+    let revision = AppState::bump_revision(&state.companion_revision).await;
     let envelope = CompanionSnapshotEnvelope {
         revision: revision.clone(),
         data,
     };
-
-    let runtime = state.companion_runtime.read().await.clone();
     *runtime.snapshot.write().await = envelope.clone();
     let _ = runtime.sse_tx.send(envelope.clone());
 
@@ -594,7 +595,7 @@ pub async fn enable_mode(app_handle: &AppHandle) -> Result<CompanionServerStatus
     let runtime = state.companion_runtime.read().await.clone();
     if *runtime.enabled.read().await
         && runtime.port.read().await.is_some()
-        && state.companion_server_task.read().await.is_some()
+        && state.companion_server_task.read().await.as_ref().is_some_and(|task| !task.is_finished())
     {
         drop(_guard);
         let _ = publish_snapshot(app_handle).await;
@@ -678,6 +679,7 @@ pub async fn disable_mode(app_handle: &AppHandle) -> Result<(), String> {
 async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, String> {
     let runtime = state.companion_runtime.read().await.clone();
     let companion_mode_enabled = *runtime.enabled.read().await;
+    let instance_id = runtime.instance_id.read().await.clone();
 
     let system_microphone_payload =
         crate::presentation::commands::get_system_microphone_mute_state().unwrap_or(
@@ -785,6 +787,7 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
             last_updated_at_ms: memory_diagnostics.last_updated_at_ms,
         },
         controls: CompanionControlState {
+            instance_id,
             history_floor_seq,
             context_floor_seq,
             conversation_generation,
@@ -812,11 +815,23 @@ async fn serve_listener(app_handle: AppHandle, listener: TcpListener) -> Result<
         .port();
     log::info!("Companion server listening on http://127.0.0.1:{port}");
 
+    let mut consecutive_accept_errors = 0_u32;
     loop {
-        let (stream, peer) = listener
-            .accept()
-            .await
-            .map_err(|e| format!("Companion server accept failed: {}", e))?;
+        let (stream, peer) = match listener.accept().await {
+            Ok(connection) => {
+                consecutive_accept_errors = 0;
+                connection
+            }
+            Err(error) => {
+                // A transient accept failure should not permanently disconnect
+                // every phone while the desktop app continues running.
+                consecutive_accept_errors = (consecutive_accept_errors + 1).min(5);
+                let delay_ms = 200_u64 * (1_u64 << consecutive_accept_errors);
+                log::warn!("Companion listener accept failed (retrying in {}ms): {}", delay_ms, error);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                continue;
+            }
+        };
         log::debug!("Companion server accepted connection from {}", peer);
 
         let app_handle_for_conn = app_handle.clone();
@@ -882,12 +897,7 @@ async fn route_request(
         (Method::GET, "/events") => {
             if let Some(token) = parse_query_token(req.uri()) {
                 if is_valid_token(&app_handle, &token).await {
-                    match build_current_snapshot(&app_handle).await {
-                        Ok(initial_snapshot) => {
-                            sse_response(app_handle.clone(), token, initial_snapshot).await
-                        }
-                        Err(err) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &err),
-                    }
+                    sse_response(app_handle.clone(), token).await
                 } else {
                     text_response(StatusCode::FORBIDDEN, "Forbidden")
                 }
@@ -1486,22 +1496,46 @@ async fn handle_e2e_system_transcript_post(
     }
 }
 
+async fn is_valid_sse_session(
+    app_handle: &AppHandle,
+    connection_token: &str,
+    connection_instance_id: &str,
+) -> bool {
+    if !is_valid_token(app_handle, connection_token).await {
+        return false;
+    }
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return false;
+    };
+    let runtime = state.companion_runtime.read().await.clone();
+    let matches = runtime.instance_id.read().await.as_deref() == Some(connection_instance_id);
+    matches
+}
+
 async fn sse_response(
     app_handle: AppHandle,
     connection_token: String,
-    initial_snapshot: CompanionSnapshotEnvelope,
 ) -> Response<CompanionBody> {
     let state = match app_handle.try_state::<AppState>() {
         Some(state) => state,
         None => return text_response(StatusCode::INTERNAL_SERVER_ERROR, "AppState not available"),
     };
     let runtime = state.companion_runtime.read().await.clone();
+    let Some(instance_id) = runtime.instance_id.read().await.clone() else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "Companion not enabled");
+    };
+    // Subscribe *before* taking the initial snapshot. Any publish racing the
+    // snapshot construction remains pending in watch rather than being lost.
     let rx = runtime.sse_tx.subscribe();
+    let initial_snapshot = match build_current_snapshot(&app_handle).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return text_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    };
 
     let stream = stream::unfold(
-        (app_handle, connection_token, rx, Some(initial_snapshot)),
-        |(app_handle, connection_token, mut rx, initial_snapshot)| async move {
-            if !is_valid_token(&app_handle, &connection_token).await {
+        (app_handle, connection_token, instance_id, rx, Some(initial_snapshot)),
+        |(app_handle, connection_token, instance_id, mut rx, initial_snapshot)| async move {
+            if !is_valid_sse_session(&app_handle, &connection_token, &instance_id).await {
                 return None;
             }
 
@@ -1515,10 +1549,10 @@ async fn sse_response(
                 .await
                 {
                     Ok(Ok(())) => {
-                        if !is_valid_token(&app_handle, &connection_token).await {
+                        if !is_valid_sse_session(&app_handle, &connection_token, &instance_id).await {
                             return None;
                         }
-                        let snapshot = rx.borrow().clone();
+                        let snapshot = rx.borrow_and_update().clone();
                         sse_snapshot_bytes(&snapshot)
                     }
                     Ok(Err(_)) => return None,
@@ -1528,7 +1562,7 @@ async fn sse_response(
 
             Some((
                 Ok::<Frame<Bytes>, Infallible>(Frame::data(next_bytes)),
-                (app_handle, connection_token, rx, None),
+                (app_handle, connection_token, instance_id, rx, None),
             ))
         },
     );
