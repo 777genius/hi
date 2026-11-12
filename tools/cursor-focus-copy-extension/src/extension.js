@@ -1,6 +1,8 @@
 const vscode = require('vscode');
 const {
   BackendHttpError,
+  CompanionEndpointNotFoundError,
+  CompanionIdentityError,
   CompanionTokenNotFoundError,
   DEFAULT_BACKEND_URL,
   DEFAULT_TIMEOUT_MS,
@@ -24,6 +26,14 @@ function describeError(error) {
   if (error instanceof BackendHttpError) {
     const detail = error.responseText ? `: ${error.responseText}` : '';
     return `HTTP ${error.statusCode}${detail}`;
+  }
+
+  if (error instanceof CompanionIdentityError) {
+    return 'Companion server identity verification failed; editor text was not sent';
+  }
+
+  if (error instanceof CompanionEndpointNotFoundError) {
+    return 'Companion is not advertising an active endpoint; open Phone in the desktop app';
   }
 
   if (error instanceof CompanionTokenNotFoundError) {
