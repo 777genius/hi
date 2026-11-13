@@ -673,7 +673,8 @@ onUnmounted(() => {
 
 .scroll-to-bottom-button {
   position: absolute;
-  right: 14px;
+  left: 50%;
+  transform: translateX(-50%);
   bottom: 14px;
   width: 40px;
   height: 40px;
@@ -692,13 +693,13 @@ onUnmounted(() => {
 }
 
 .scroll-to-bottom-button:hover {
-  transform: translateY(-1px);
+  transform: translate(-50%, -1px);
   background: rgba(59, 130, 246, 0.22);
   border-color: rgba(59, 130, 246, 0.4);
 }
 
 .scroll-to-bottom-button:active {
-  transform: translateY(0);
+  transform: translateX(-50%);
 }
 
 .scroll-to-bottom-button .mdi {
@@ -1028,9 +1029,12 @@ onUnmounted(() => {
 }
 
 .chat-collapsible-message:not(.collapsed) .chat-collapse-toggle {
-  width: 42px;
-  height: 42px;
-  min-height: 42px;
+  /* Маленькая кнопка в правом нижнем углу сообщения, чуть выступает за край и не закрывает текст. */
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  margin-left: auto;
+  margin-right: -8px;
   padding: 0;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 999px;
@@ -1040,7 +1044,7 @@ onUnmounted(() => {
 
 .chat-collapsible-message:not(.collapsed) .chat-collapse-toggle::before {
   content: 'Hide';
-  font-size: 10px;
+  font-size: 8px;
   font-weight: 700;
   line-height: 1;
 }
@@ -1385,7 +1389,6 @@ onUnmounted(() => {
 
 @media (max-width: 560px) {
   .scroll-to-bottom-button {
-    right: 10px;
     bottom: 10px;
     width: 36px;
     height: 36px;
