@@ -975,7 +975,7 @@ function connectEvents(): void {
         setConnection('reconnecting', 'Поток обновлений прервался, обновляю состояние с компьютера...');
         setStatus('Live update повредился, пробую восстановить состояние...', 'warn');
         void resyncConnection({ reconnect: true }).catch((resyncError) => {
-          handleResyncFailure(resyncError, 'Не удалось восстановить поток обновлений с компьютером');
+          handleResyncFailure(resyncError, 'Не удалось восстановить поток обновлений с компьютера');
         });
       }
     })();
@@ -2130,12 +2130,6 @@ onUnmounted(() => {
     gap: 8px;
   }
 
-  /* Keep every fixed-dock action reachable in the 320px native WebKit window. */
-  .controls-center {
-    gap: 4px;
-    padding: 4px;
-  }
-
   .ask-card {
     bottom: calc(126px + env(safe-area-inset-bottom, 0px));
     max-height: calc(100vh - 148px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
@@ -2147,9 +2141,10 @@ onUnmounted(() => {
     padding: 7px;
   }
 
+  /* Keep every fixed-dock action reachable in the 320px native WebKit window. */
   .controls-center {
-    gap: 12px;
-    padding: 7px 8px;
+    gap: 4px;
+    padding: 4px;
   }
 
   .dock-square-button {
