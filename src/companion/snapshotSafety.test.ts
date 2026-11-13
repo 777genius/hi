@@ -32,6 +32,8 @@ const corruptions: Array<[string, (data: Record<string, unknown>) => void]> = [
   ['invalid candidate list', (data) => { data.timeline = [{ ...validSnapshot().data.timeline[0], candidates: {} }]; }],
   ['invalid candidate text', (data) => { data.timeline = [{ ...validSnapshot().data.timeline[0], candidates: [{ id: 'a', text: {} }] }]; }],
   ['duplicate message ids', (data) => { const message = validSnapshot().data.timeline[0]; data.timeline = [message, { ...message, seq: 2 }]; }],
+  ['reserved system live id', (data) => { data.timeline = [{ ...validSnapshot().data.timeline[0], id: 'stt:live' }]; data.live = { partialText: 'different live text' }; }],
+  ['reserved microphone live id', (data) => { data.timeline = [{ ...validSnapshot().data.timeline[0], id: 'mic:live', kind: 'mic' }]; data.live = { microphonePartialText: 'different live text' }; }],
   ['invalid server identity', (data) => { data.controls = { companionModeEnabled: true, instanceId: {} }; }],
   ['missing auth state', (data) => { delete data.authRequired; }],
 ];

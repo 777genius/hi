@@ -1046,7 +1046,7 @@ function connectEvents(): void {
         setConnection('reconnecting', 'Поток обновлений прервался, обновляю состояние с компьютера...');
         setStatus('Live update повредился, пробую восстановить состояние...', 'warn');
         void resyncConnection({ reconnect: true }).catch((resyncError) => {
-          handleResyncFailure(resyncError, 'Не удалось восстановить поток обновлений с компьютером');
+          handleResyncFailure(resyncError, 'Не удалось восстановить поток обновлений с компьютера');
         });
       }
     })();
@@ -1573,17 +1573,17 @@ onUnmounted(() => {
   padding: 10px 12px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
-  background: rgba(17, 21, 29, 0.84);
+  background: rgba(17, 21, 29, 0.94);
 }
 
 .pwa-notice.tone-warn {
   border-color: rgba(244, 201, 93, 0.22);
-  background: rgba(53, 43, 20, 0.68);
+  background: rgba(53, 43, 20, 0.94);
 }
 
 .pwa-notice.tone-error {
   border-color: rgba(255, 154, 143, 0.28);
-  background: rgba(56, 22, 22, 0.7);
+  background: rgba(56, 22, 22, 0.94);
 }
 
 .pwa-notice.tone-pending {
@@ -1608,7 +1608,7 @@ onUnmounted(() => {
 }
 
 .pwa-notice-title {
-  color: var(--color-text);
+  color: #f8fafc;
   font-size: 12px;
   font-weight: 700;
   line-height: 1.25;
@@ -1616,7 +1616,7 @@ onUnmounted(() => {
 
 .pwa-notice-text {
   margin-top: 2px;
-  color: var(--color-text-secondary);
+  color: #dce7f2;
   font-size: 12px;
   line-height: 1.35;
 }
@@ -1630,7 +1630,7 @@ onUnmounted(() => {
 .pwa-notice-button,
 .pwa-notice-icon-button {
   border: none;
-  color: var(--color-text);
+  color: #f8fafc;
   cursor: pointer;
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
@@ -1671,7 +1671,7 @@ onUnmounted(() => {
   grid-template-columns: 8px minmax(58px, auto) minmax(0, 1fr);
   align-items: center;
   gap: 8px;
-  color: var(--color-text-secondary);
+  color: #dce7f2;
   font-size: 12px;
   line-height: 1.3;
 }
@@ -2345,8 +2345,10 @@ onUnmounted(() => {
     padding: 7px;
   }
 
+  /* Keep every fixed-dock action reachable in the 320px native WebKit window. */
   .controls-center {
-    padding: 7px 8px;
+    gap: 4px;
+    padding: 4px;
   }
 
   .dock-square-button {
@@ -2355,8 +2357,8 @@ onUnmounted(() => {
   }
 
   .dock-circle-button {
-    width: 44px;
-    height: 44px;
+    width: 42px;
+    height: 42px;
   }
 
   .dock-microphone-button {
@@ -2367,8 +2369,8 @@ onUnmounted(() => {
   }
 
   .dock-record-button {
-    width: 56px;
-    height: 56px;
+    width: 52px;
+    height: 52px;
   }
 }
 </style>

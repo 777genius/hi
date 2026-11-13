@@ -70,7 +70,8 @@ export function isCompanionSnapshotEnvelope(value: unknown): value is CompanionS
   const live = data.live;
   if (!['partialText', 'finalText', 'microphonePartialText'].every((key) => optionalText(live[key]))) return false;
   if (!['partialStartedAtMs', 'microphonePartialStartedAtMs'].every((key) => optionalFiniteNumber(live[key]))) return false;
-  const ids = new Set<string>();
+  // These keys belong to synthetic live rows, never durable timeline entries.
+  const ids = new Set<string>(['stt:live', 'mic:live']);
   for (const message of data.timeline) {
     if (!validMessage(message)) return false;
     const id = (message as Record<string, unknown>).id as string;

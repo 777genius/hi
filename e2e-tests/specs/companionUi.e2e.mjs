@@ -56,6 +56,45 @@ describe('Built Companion UI over real browser HTTP/SSE (fault-injected server)'
   it('recovers initial GET failure, renders 300 unique messages and preserves reading position', async () => {
     fixture.stateFailures = 1;
     await openPage();
+    // The native WebKit PWA notice uses a dark translucent surface even when
+    // the surrounding app is in light mode. Measure the resulting text contrast
+    // against a white backdrop (the conservative case for this surface).
+    const pwaContrast = await browser.execute(() => {
+      const banner = document.querySelector('.pwa-notice');
+      if (!banner) return null;
+      const rgba = (value) => [...value.matchAll(/[0-9.]+/g)].map((part) => Number(part[0]));
+      const background = rgba(getComputedStyle(banner).backgroundColor);
+      const alpha = background[3] ?? 1;
+      const againstWhite = background.slice(0, 3).map((v) => v * alpha + 255 * (1 - alpha));
+      const channel = (v) => {
+        const s = v / 255;
+        return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+      };
+      const lightness = (rgb) => 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2]);
+      const backdrop = lightness(againstWhite);
+      return ['.pwa-notice-title', '.pwa-notice-text'].map((selector) => {
+        const element = banner.querySelector(selector);
+        if (!element) return 0;
+        const foreground = lightness(rgba(getComputedStyle(element).color));
+        return (Math.max(backdrop, foreground) + 0.05) / (Math.min(backdrop, foreground) + 0.05);
+      });
+    });
+    assert.ok(pwaContrast, 'native browser must render the PWA notice');
+    for (const ratio of pwaContrast) assert.ok(ratio >= 4.5, `PWA notice text contrast too low: ${ratio}`);
+    // The native WebKit test window is 320px wide; a fixed dock must not
+    // strand controls outside the viewport even when its feed is scrollable.
+    const dock = await browser.execute(() => ({
+      width: window.innerWidth,
+      buttons: Array.from(document.querySelectorAll('.controls-dock button'), (button) => {
+        const bounds = button.getBoundingClientRect();
+        return { title: button.title, left: bounds.left, right: bounds.right };
+      }),
+    }));
+    assert.ok(dock.buttons.length >= 7, 'all Companion dock controls rendered');
+    for (const button of dock.buttons) {
+      assert.ok(button.left >= 0 && button.right <= dock.width,
+        `off-screen Companion dock button: ${button.title} (${button.left}, ${button.right} / ${dock.width})`);
+    }
     for (let start = 0; start < 300; start += 25) {
       fixture.state.data.timeline.push(...Array.from({ length: 25 }, (_, i) => message(start + i)));
       fixture.publish();
@@ -119,10 +158,16 @@ describe('Built Companion UI over real browser HTTP/SSE (fault-injected server)'
     await waitFor(() => fixture.count('/api/ai/request') === 1);
     assert.deepEqual(fixture.posts.find((post) => post.path === '/api/ai/request').body.selectedMessageIds, ['burst:0']);
     await clickTitle('Открыть сообщение в AI');
-    await $('.ask-textarea').setValue('Проверка отправки — українська 🎙️');
+    // WebKitWebDriver's native setValue drops the astral microphone glyph on
+    // Linux. Emoji rendering is covered by the incoming 300-message burst;
+    // this scenario checks exact real keyboard entry, POST, and rendered reply.
+    const promptText = 'Проверка отправки — українська';
+    await $('.ask-textarea').setValue(promptText);
+    assert.equal(await $('.ask-textarea').getValue(), promptText);
     await $('.send-button').click();
-    await waitText('Проверка отправки — українська 🎙️');
+    await waitText(promptText);
     assert.equal(fixture.count('/api/prompt/send'), 1);
+    assert.equal(fixture.posts.find((post) => post.path === '/api/prompt/send').body.text, promptText);
     assert.ok(fixture.posts.every((post) => typeof post.requestId === 'string' && post.requestId.length > 0));
     const idsBeforeClear = await rowIds();
     await clickTitle('Очистить AI контекст');
@@ -150,7 +195,18 @@ describe('Built Companion UI over real browser HTTP/SSE (fault-injected server)'
   it('rejects malformed high-revision snapshots before they crash or permanently freeze the feed', async () => {
     fixture.state.data.timeline = [message(0, 'healthy')];
     await openPage();
-    for (const corruption of [{ live: null }, { timeline: [null] }]) {
+    const corruptions = [
+      { live: null },
+      { timeline: [null] },
+      ...[
+        ['stt:live', 'stt', 'partialText'],
+        ['mic:live', 'mic', 'microphonePartialText'],
+      ].map(([id, kind, partialField]) => ({
+        timeline: [{ ...message(0, 'collision'), id, kind, text: 'Reserved key durable row' }],
+        live: { [partialField]: 'Different synthetic live row' },
+      })),
+    ];
+    for (const corruption of corruptions) {
       const streamsBefore = fixture.streamsOpened;
       fixture.sendSnapshot({ revision: '999999', data: { ...fixture.state.data, ...corruption } });
       await waitFor(() => fixture.streamsOpened > streamsBefore);
@@ -160,7 +216,9 @@ describe('Built Companion UI over real browser HTTP/SSE (fault-injected server)'
       await waitText(next.text);
       await assertNoPageErrors();
     }
-    assert.equal((await rowIds()).length, 3);
+    const ids = await rowIds();
+    assert.equal(ids.length, corruptions.length + 1);
+    assert.equal(new Set(ids).size, ids.length, 'recovered feed keys remain unique');
   });
 
   it('catches up after TCP loss and accepts a restarted server without keeping an old selection', async () => {
