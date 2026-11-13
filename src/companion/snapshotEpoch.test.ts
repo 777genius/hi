@@ -37,6 +37,8 @@ describe('Companion transport envelope validation', () => {
   const valid = {
     revision: '5',
     data: {
+      authRequired: false,
+      live: {},
       controls: { companionModeEnabled: true, instanceId: 'server-a' },
       recording: { status: 'Recording' },
       microphone: { appMuted: false },
