@@ -1675,6 +1675,27 @@ const onChatMouseDown = (e: MouseEvent) => {
           <UpdateIndicator class="no-drag" @click="showUpdateDialog = true" />
         </div>
         <div class="header-right">
+          <v-tooltip
+            v-if="testInterviewer.enabled.value"
+            :text="testInterviewer.lastQuestion.value
+              ? `Следующий вопрос (озвучен ${testInterviewer.lastQuestion.value.number}/${testInterviewer.total.value}). Shift+клик: сначала`
+              : 'Тест-интервьюер: озвучить первый вопрос'"
+            location="bottom"
+          >
+            <template #activator="{ props: tp }">
+              <button
+                v-bind="tp"
+                class="minimize-button test-interviewer-button no-drag"
+                :disabled="testInterviewer.busy.value"
+                @click="onTestInterviewerClick"
+              >
+                <span class="mdi mdi-account-voice"></span>
+                <span v-if="testInterviewer.lastQuestion.value" class="test-interviewer-counter">
+                  {{ testInterviewer.lastQuestion.value.number }}/{{ testInterviewer.total.value }}
+                </span>
+              </button>
+            </template>
+          </v-tooltip>
           <v-tooltip :text="t('main.minimize')" location="bottom">
             <template #activator="{ props: tp }">
               <button v-bind="tp" class="minimize-button no-drag" @click="minimizeWindow">
@@ -2147,29 +2168,6 @@ const onChatMouseDown = (e: MouseEvent) => {
               </template>
             </v-tooltip>
           </div>
-        </div>
-        <div v-if="testInterviewer.enabled.value" class="controls-test no-drag">
-          <v-tooltip
-            v-if="testInterviewer.enabled.value"
-            :text="testInterviewer.lastQuestion.value
-              ? `Следующий вопрос (озвучен ${testInterviewer.lastQuestion.value.number}/${testInterviewer.total.value}). Shift+клик: сначала`
-              : 'Тест-интервьюер: озвучить первый вопрос'"
-            location="top"
-          >
-            <template #activator="{ props: tp }">
-              <button
-                v-bind="tp"
-                class="web-search-toggle-button test-interviewer-button no-drag"
-                :disabled="testInterviewer.busy.value"
-                @click="onTestInterviewerClick"
-              >
-                <span class="mdi mdi-account-voice"></span>
-                <span v-if="testInterviewer.lastQuestion.value" class="test-interviewer-counter">
-                  {{ testInterviewer.lastQuestion.value.number }}/{{ testInterviewer.total.value }}
-                </span>
-              </button>
-            </template>
-          </v-tooltip>
         </div>
         <div class="controls-right no-drag">
           <v-tooltip v-if="chatStore.selectedCount > 0" text="Снять выделение" location="top">
@@ -2762,6 +2760,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 .test-interviewer-button {
   position: relative;
+  color: rgba(45, 212, 191, 0.95);
 }
 
 .test-interviewer-button:disabled {
@@ -3189,16 +3188,6 @@ const onChatMouseDown = (e: MouseEvent) => {
   align-items: center;
   justify-content: center;
   gap: 12px;
-}
-
-/* Тест-кнопка живёт справа: слева абсолютная группа controls-right перекрывала её. */
-.controls-test {
-  position: absolute;
-  right: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  align-items: center;
 }
 
 .controls-right {
