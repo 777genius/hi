@@ -16,6 +16,7 @@ const PREVIEW_INTERVAL_MS: usize = 2_000;
 const MIN_VOICED_FRAMES: usize = 3; // reject clicks / extremely short noise
 const PRE_ROLL_SAMPLES: usize = SAMPLE_RATE * PRE_ROLL_MS / 1000;
 const TAIL_SAMPLES: usize = SAMPLE_RATE * TAIL_MS / 1000;
+#[cfg(test)]
 const MAX_UTTERANCE_SAMPLES: usize = SAMPLE_RATE * MAX_UTTERANCE_MS / 1000;
 const PREVIEW_INTERVAL_SAMPLES: usize = SAMPLE_RATE * PREVIEW_INTERVAL_MS / 1000;
 const SILENCE_FRAMES: usize = SILENCE_MS.div_ceil(FRAME_MS);
@@ -38,10 +39,18 @@ pub struct UtteranceSegmenter {
     voiced_frames: usize,
     quiet_frames: usize,
     last_preview_samples: usize,
+    max_utterance_samples: usize,
 }
 
 impl UtteranceSegmenter {
     pub fn new() -> SttResult<Self> {
+        Self::with_max_utterance_ms(MAX_UTTERANCE_MS)
+    }
+
+    /// A phrase longer than this is cut and finalized mid-sentence. Models whose
+    /// cost does not grow with length (Whisper's fixed 30 s window) can afford a
+    /// much longer limit and avoid splitting a question in two.
+    pub fn with_max_utterance_ms(max_ms: usize) -> SttResult<Self> {
         Ok(Self {
             vad: VadProcessor::new(Some(SILENCE_MS as u64), None)?,
             pending_frame: Vec::with_capacity(FRAME_SAMPLES * 2),
@@ -52,6 +61,7 @@ impl UtteranceSegmenter {
             voiced_frames: 0,
             quiet_frames: 0,
             last_preview_samples: 0,
+            max_utterance_samples: SAMPLE_RATE * max_ms / 1000,
         })
     }
 
@@ -119,7 +129,7 @@ impl UtteranceSegmenter {
         if self.quiet_frames >= SILENCE_FRAMES {
             return self.finish_utterance(true);
         }
-        if self.active.len() >= MAX_UTTERANCE_SAMPLES {
+        if self.active.len() >= self.max_utterance_samples {
             // Bounded memory if a speaker does not pause for a long time.
             return self.finish_utterance(false);
         }
@@ -228,6 +238,23 @@ mod tests {
             }
         }
         assert_eq!(finals, 3);
+    }
+
+    #[test]
+    fn longer_limit_keeps_a_long_question_in_one_utterance() {
+        // Eight seconds of uninterrupted speech: default limit cuts at 6 s,
+        // a 25 s limit (Whisper) does not cut it at all.
+        let frames = 8_000 / FRAME_MS;
+        let mut default = UtteranceSegmenter::new().unwrap();
+        let mut long = UtteranceSegmenter::with_max_utterance_ms(25_000).unwrap();
+        let (mut default_finals, mut long_finals) = (0, 0);
+        for _ in 0..frames {
+            default_finals += usize::from(default.accept_frame(&FRAME, true).is_some());
+            long_finals += usize::from(long.accept_frame(&FRAME, true).is_some());
+        }
+        assert_eq!(default_finals, 1, "default limit splits at 6 s");
+        assert_eq!(long_finals, 0, "25 s limit keeps the phrase whole");
+        assert!(long.finish().is_some(), "Stop still flushes the whole phrase");
     }
 
     #[test]

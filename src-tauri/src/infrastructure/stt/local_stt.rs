@@ -29,7 +29,7 @@ const STOP_DECODE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// tokens shared with the prompt; transcribe.cpp drops terms from the END of the
 /// list (with a warning) when they do not fit, so the first glossary lines win.
 const WHISPER_VOCABULARY_MAX_CHARS: usize = 1500;
-/// Short Whisper outputs on near-silence that are known hallucinations.
+/// Whole-text Whisper hallucinations on near-silence or a tiny leftover clip.
 const WHISPER_HALLUCINATIONS: &[&str] = &[
     "thank you for watching",
     "thanks for watching",
@@ -38,6 +38,22 @@ const WHISPER_HALLUCINATIONS: &[&str] = &[
     "продолжение следует",
     "дякую за перегляд",
 ];
+/// Stock subtitle credits Whisper invents for clips with almost no speech.
+const WHISPER_HALLUCINATION_FRAGMENTS: &[&str] = &[
+    "closed captioning",
+    "subtitles by",
+    "amara.org",
+    "and many more",
+    "please subscribe",
+    "like and subscribe",
+    "субтитры",
+    "редактор субтитров",
+    "dimatorzok",
+];
+/// Whisper's window is a fixed 30 s, so a long phrase costs the same as a short
+/// one: allow almost the whole window instead of cutting a question at 6 s.
+const WHISPER_MAX_UTTERANCE_MS: usize = 25_000;
+const PARAKEET_MAX_UTTERANCE_MS: usize = 6_000;
 const WHISPER_HALLUCINATION_MAX_SECONDS: f64 = 2.5;
 
 /// Weights + decode behaviour of one local model. Everything model-specific
@@ -123,6 +139,14 @@ impl LocalModel {
         }
     }
 
+    fn max_utterance_ms(self) -> usize {
+        if self.is_whisper() {
+            WHISPER_MAX_UTTERANCE_MS
+        } else {
+            PARAKEET_MAX_UTTERANCE_MS
+        }
+    }
+
     /// Live previews re-decode the growing phrase every 2 s of speech. Parakeet
     /// (~0.1 s) and Turbo (~0.65 s) can afford it; Large-v3 re-decodes a
     /// zero-padded 30 s window in ~1.1 s, which would only delay the final phrase.
@@ -161,7 +185,10 @@ impl LocalModel {
             .to_lowercase();
         normalized.is_empty()
             || (duration_s <= WHISPER_HALLUCINATION_MAX_SECONDS
-                && WHISPER_HALLUCINATIONS.contains(&normalized.as_str()))
+                && (WHISPER_HALLUCINATIONS.contains(&normalized.as_str())
+                    || WHISPER_HALLUCINATION_FRAGMENTS
+                        .iter()
+                        .any(|fragment| normalized.contains(fragment))))
     }
 
     /// Finds the model file: explicit path (env var, then config), Handy's
@@ -371,7 +398,7 @@ impl SttProvider for LocalSttProvider {
             SttError::Configuration("Local STT model not initialized".into())
         })?;
         let kind = self.kind;
-        let segmenter = UtteranceSegmenter::new()?;
+        let segmenter = UtteranceSegmenter::with_max_utterance_ms(kind.max_utterance_ms())?;
         self.cancelled = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::clone(&self.cancelled);
         let (tx, mut rx) = mpsc::channel::<Utterance>(JOB_QUEUE_CAPACITY);
@@ -649,6 +676,7 @@ mod tests {
         assert_eq!(t.sha256().len(), 64);
         assert_eq!(LocalModel::for_provider(SttProviderType::WhisperLargeV3Turbo), Some(t));
         assert!(p.emits_previews() && t.emits_previews() && !w.emits_previews());
+        assert!(t.max_utterance_ms() > p.max_utterance_ms() && t.max_utterance_ms() <= 28_000);
     }
 
     #[test]
@@ -671,10 +699,92 @@ mod tests {
         // A real long phrase or a real short answer must survive.
         assert!(!w.is_hallucination("Thank you for watching the demo, any questions?", 4.0));
         assert!(!w.is_hallucination("Thank you for watching!", 6.0));
+        assert!(w.is_hallucination("Closed Captioning by", 0.6));
+        assert!(w.is_hallucination("and many more.", 0.9));
+        assert!(!w.is_hallucination("Субтитры в видео должны быть читаемыми, как думаете?", 4.0));
         assert!(!w.is_hallucination("Да, использую Redis", 1.2));
         // Parakeet has no such failure mode and is never filtered.
         assert!(!LocalModel::ParakeetUltra.is_hallucination("you", 0.5));
         assert!(LocalModel::WhisperLargeV3Turbo.is_hallucination("you", 0.8));
+    }
+
+    /// Real-time pacing through the real segmenter/VAD: how long after the speaker
+    /// stops does the final text arrive? `LOCAL_STT_CLIPS` = comma-separated PCM
+    /// paths, `LOCAL_STT_MODEL=parakeet|whisper|turbo`, `LOCAL_STT_PREVIEWS=0|1`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires LOCAL_STT_CLIPS and a downloaded model; takes real time"]
+    async fn e2e_local_stt_final_latency_realtime() {
+        let provider_type = match std::env::var("LOCAL_STT_MODEL").as_deref() {
+            Ok("whisper") => SttProviderType::WhisperLargeV3,
+            Ok("turbo") => SttProviderType::WhisperLargeV3Turbo,
+            _ => SttProviderType::ParakeetUltra,
+        };
+        let kind = LocalModel::for_provider(provider_type).unwrap();
+        let mut provider = LocalSttProvider::new(kind);
+        if let Ok(flag) = std::env::var("LOCAL_STT_PREVIEWS") {
+            provider.previews = flag == "1";
+        }
+        provider.initialize(&SttConfig::new(provider_type)).await.unwrap();
+        let clips = std::env::var("LOCAL_STT_CLIPS").expect("clip list required");
+        let mut latencies = Vec::new();
+        for path in clips.split(',') {
+            let pcm: Vec<i16> = std::fs::read(path).unwrap()
+                .chunks_exact(2).map(|x| i16::from_le_bytes([x[0], x[1]])).collect();
+            let ended = Arc::new(AtomicBool::new(false));
+            let first_final_after_end = Arc::new(Mutex::new(None::<std::time::Instant>));
+            let finals = Arc::new(Mutex::new(Vec::<String>::new()));
+            let partials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (e, fa, ft, pc) = (
+                Arc::clone(&ended), Arc::clone(&first_final_after_end),
+                Arc::clone(&finals), Arc::clone(&partials),
+            );
+            provider.start_stream(
+                Arc::new(move |_| { pc.fetch_add(1, Ordering::Relaxed); }),
+                Arc::new(move |t| {
+                    ft.lock().unwrap().push(t.text);
+                    if e.load(Ordering::Acquire) {
+                        fa.lock().unwrap().get_or_insert_with(std::time::Instant::now);
+                    }
+                }),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            ).await.unwrap();
+            let start = tokio::time::Instant::now();
+            let frames: Vec<&[i16]> = pcm.chunks(480).collect();
+            let total_frames = frames.len();
+            let mut speech_end = None;
+            let mut frame_no = 0usize;
+            // Speech paced in real time, then silence until a final arrives after
+            // the speaker stopped (max ~6 s).
+            while frame_no < total_frames + 200 {
+                let mut data = frames.get(frame_no).map(|c| c.to_vec()).unwrap_or_default();
+                data.resize(480, 0);
+                tokio::time::sleep_until(start + std::time::Duration::from_millis(30 * (frame_no as u64 + 1))).await;
+                provider.send_audio(&AudioChunk::new(data, 16_000, 1)).await.unwrap();
+                frame_no += 1;
+                if frame_no == total_frames {
+                    speech_end = Some(std::time::Instant::now());
+                    ended.store(true, Ordering::Release);
+                }
+                if first_final_after_end.lock().unwrap().is_some() { break; }
+            }
+            provider.stop_stream().await.unwrap();
+            let latency = first_final_after_end.lock().unwrap()
+                .map(|t| t.duration_since(speech_end.unwrap()).as_secs_f64());
+            let texts = finals.lock().unwrap().clone();
+            println!(
+                "CLIP {path:?} speech {:.1}s previews={} finals={} final_after_speech_end={:?}s text={:?}",
+                pcm.len() as f64 / 16_000.0, partials.load(Ordering::Relaxed), texts.len(),
+                latency.map(|l| (l * 1000.0).round() / 1000.0), texts.join(" | "),
+            );
+            if let Some(l) = latency { latencies.push(l); }
+        }
+        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "SUMMARY [{}] previews_enabled={} n={} median={:.2}s max={:.2}s",
+            kind.label(), provider.previews, latencies.len(),
+            latencies[latencies.len() / 2], latencies.last().copied().unwrap_or(0.0)
+        );
     }
 
     /// Real ASR E2E: run ONLY with two distinct 16 kHz mono PCM16 fixtures and
