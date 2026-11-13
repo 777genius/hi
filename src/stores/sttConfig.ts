@@ -8,14 +8,14 @@ import {
 } from '@/windowing/stateSync';
 import type { RevisionSyncHandle } from '@/windowing/stateSync';
 import type { SttConfigSnapshotData, TauriSnapshotEnvelope } from '@/windowing/stateSync';
-import { SttProviderType } from '@/types';
+import { DEFAULT_STT_PROVIDER, type SttProviderType } from '@/types';
 
 export const useSttConfigStore = defineStore('sttConfig', () => {
   const revision = ref('0');
   const isLoaded = ref(false);
   const isSyncing = ref(false);
 
-  const provider = ref<SttProviderType>(SttProviderType.Backend);
+  const provider = ref<SttProviderType>(DEFAULT_STT_PROVIDER);
   const language = ref('ru');
   const autoDetectLanguage = ref(false);
   const enablePunctuation = ref(true);

@@ -5,7 +5,7 @@
 
 import { computed, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { SttProviderType } from '@/types';
+import { DEFAULT_STT_PROVIDER, SttProviderType } from '@/types';
 import { invoke } from '@tauri-apps/api/core';
 import { isTauriAvailable } from '@/utils/tauri';
 import {
@@ -135,7 +135,7 @@ export function useSettings() {
         localStorage.setItem('uiLocale', uiLocale);
         localStorage.setItem('sttLanguage', storedSttLang);
 
-        store.setProvider(SttProviderType.Backend);
+        store.setProvider(DEFAULT_STT_PROVIDER);
         store.setLanguage(storedSttLang, { persist: false });
 
         if (appConfigStoreInstance.isLoaded) {

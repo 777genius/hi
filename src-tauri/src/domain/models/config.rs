@@ -38,7 +38,9 @@ impl SttProviderType {
 
 impl Default for SttProviderType {
     fn default() -> Self {
-        Self::Backend // Через наш API с лицензией и usage tracking
+        // Local Whisper Large-v3-Turbo: accurate with a glossary, ~1.4 s to the final
+        // text, nothing leaves the machine. Backend stays an explicit choice.
+        Self::WhisperLargeV3Turbo
     }
 }
 
@@ -334,7 +336,7 @@ mod tests {
     #[test]
     fn test_stt_provider_type_default() {
         assert_eq!(serde_json::to_string(&SttProviderType::ParakeetUltra).unwrap(), "\"parakeetultra\"");
-        assert_eq!(SttProviderType::default(), SttProviderType::Backend);
+        assert_eq!(SttProviderType::default(), SttProviderType::WhisperLargeV3Turbo);
     }
 
     #[test]
@@ -351,7 +353,7 @@ mod tests {
     #[test]
     fn test_stt_config_default() {
         let config = SttConfig::default();
-        assert_eq!(config.provider, SttProviderType::Backend);
+        assert_eq!(config.provider, SttProviderType::WhisperLargeV3Turbo);
         assert_eq!(config.language, "ru");
         assert!(!config.auto_detect_language);
         assert!(config.enable_punctuation);
