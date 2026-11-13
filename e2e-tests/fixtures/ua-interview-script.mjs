@@ -1,0 +1,358 @@
+// Сценарий длинного интервью (украинский + английские термины) на позицию
+// Full-Stack Software Engineer (AI-Native), Luxoft:
+// Ruby on Rails / Node.js+TypeScript / Python, PostgreSQL, API design, AWS, agentic AI tools, CI/CD, Snowflake, Vue.
+//
+// q  - реплика интервьюера (озвучивается в системный звук)
+// a  - ответ кандидата (озвучивается в микрофон)
+// qKeys / aKeys - ключевые слова для проверки распознавания (STT) в соответствующем канале
+// llm    - после вопроса просим LLM ответить (неявный запрос по последнему вопросу)
+// image  - прикрепляем картинку с кодом как сообщение пользователя
+//   { id, caption, expect }  -> expect: ключевые слова в ответе LLM
+
+export const CODE_IMAGES = {
+  'rails-n-plus-one': {
+    title: 'orders_controller.rb',
+    lang: 'ruby',
+    code: `class OrdersController < ApplicationController
+  def index
+    @orders = Order.where(status: "paid")
+
+    @rows = @orders.map do |order|
+      {
+        id: order.id,
+        customer: order.customer.name,
+        items: order.line_items.map(&:sku),
+        total: order.line_items.sum(&:price_cents)
+      }
+    end
+
+    render json: @rows
+  end
+end`,
+  },
+  'sql-seq-scan': {
+    title: 'psql: EXPLAIN ANALYZE',
+    lang: 'sql',
+    code: `EXPLAIN ANALYZE
+SELECT * FROM invoices
+WHERE customer_id = 4821
+  AND created_at >= now() - interval '30 days'
+ORDER BY created_at DESC
+LIMIT 20;
+
+ Limit  (cost=184532.11..184532.16 rows=20)
+   ->  Sort  (cost=184532.11..184541.90 rows=3916)
+         Sort Key: created_at DESC
+         ->  Seq Scan on invoices  (cost=0.00..184412.00 rows=3916)
+               Filter: (customer_id = 4821 AND created_at >= ...)
+               Rows Removed by Filter: 9184233
+ Planning Time: 0.3 ms
+ Execution Time: 1432.7 ms`,
+  },
+  'ts-idempotency-race': {
+    title: 'payments.ts',
+    lang: 'typescript',
+    code: `export async function createPayment(req: Request, res: Response) {
+  const key = req.header("Idempotency-Key");
+
+  const existing = await db.payments.findOne({ idempotencyKey: key });
+  if (existing) {
+    return res.status(200).json(existing);
+  }
+
+  const payment = await gateway.charge(req.body.amount, req.body.card);
+
+  await db.payments.insert({
+    idempotencyKey: key,
+    amount: req.body.amount,
+    status: payment.status,
+  });
+
+  return res.status(201).json(payment);
+}`,
+  },
+  'python-sqs-consumer': {
+    title: 'consumer.py',
+    lang: 'python',
+    code: `def handle_messages(queue):
+    while True:
+        messages = queue.receive_messages(MaxNumberOfMessages=10)
+        for msg in messages:
+            body = json.loads(msg.body)
+            invoice = create_invoice(body["customer_id"], body["amount"])
+            send_email(invoice)
+            msg.delete()`,
+  },
+};
+
+export const TURNS = [
+  {
+    id: 1,
+    q: 'Вітаю! Дякую, що знайшли час. Розкажіть, будь ласка, коротко про себе та про ваш останній проєкт.',
+    a: 'Дякую за запрошення. Я backend інженер, маю шість років досвіду. Останній проєкт це billing платформа для комунальних компаній на Ruby on Rails та PostgreSQL, розгорнута в AWS на ECS. Я відповідав за API для інтеграцій та за міграції схеми без downtime. Також писав сервіси на Node.js з TypeScript і трохи працював із Vue на фронтенді.',
+    qKeys: ['розкажіть', 'проєкт', 'коротко'],
+    aKeys: ['backend', 'шість', 'billing', 'Rails', 'PostgreSQL', 'AWS', 'ECS', 'TypeScript'],
+  },
+  {
+    id: 2,
+    q: 'Ви згадали Rails та Node.js. Чому ви обрали б кожен з них для нового сервісу, і в чому головні trade-offs?',
+    a: 'Rails дає дуже швидкий старт для CRUD та доменної логіки: ActiveRecord, міграції, convention over configuration. Node.js з TypeScript я беру, коли потрібен спільний код із фронтендом і багато I/O, наприклад gateway або webhook сервіси. Trade-off такий: Rails швидше в розробці доменної моделі, але важчий у runtime, а Node вимагає більше дисципліни в архітектурі.',
+    qKeys: ['Rails', 'Node', 'trade-offs', 'сервіс'],
+    aKeys: ['Rails', 'ActiveRecord', 'Node', 'TypeScript', 'webhook', 'trade-off'],
+  },
+  {
+    id: 3,
+    q: 'Як ви проєктуєте схему в PostgreSQL для складного бізнес-домену, який постійно змінюється? Як робите міграції без downtime?',
+    a: 'Я починаю з нормалізованої моделі, де кожна сутність має чіткий ключ і обмеження: foreign keys, unique та check constraints. Для міграцій використовую підхід expand and contract. Спочатку додаю колонку як nullable, потім backfill батчами у фоні, далі код пише в обидва місця, і тільки після цього ставлю NOT NULL та видаляю стару колонку.',
+    qKeys: ['схему', 'PostgreSQL', 'міграції', 'downtime'],
+    aKeys: ['нормалізован', 'constraints', 'expand', 'contract', 'nullable', 'backfill', 'NOT NULL'],
+    llm: { expect: ['expand', 'nullable', 'backfill', 'constraint', 'міграц'] },
+  },
+  {
+    id: 4,
+    q: 'Поясніть різницю між B-tree, GIN та partial індексами. Коли PostgreSQL перестає використовувати індекс?',
+    a: 'B-tree це індекс за замовчуванням для рівності та діапазонів. GIN підходить для jsonb, масивів та повнотекстового пошуку. Partial індекс будується лише по підмножині рядків, наприклад тільки для активних записів, тому він менший і швидший. Планувальник ігнорує індекс, якщо вибірка занадто велика, статистика застаріла, або у виразі є функція над колонкою. Це я перевіряю через EXPLAIN ANALYZE.',
+    qKeys: ['B-tree', 'GIN', 'partial', 'індекс'],
+    aKeys: ['B-tree', 'GIN', 'jsonb', 'partial', 'EXPLAIN', 'статистика'],
+  },
+  {
+    id: 5,
+    q: 'Що таке проблема N плюс один запитів? Як ви її знаходите та виправляєте в Rails або Node.js з ORM? Ось приклад коду.',
+    a: 'N плюс один виникає, коли ми робимо один запит за списком, а потім окремий запит для кожного елемента, щоб дістати зв’язані дані. В Rails я знаходжу це через логи, Bullet gem або APM, а виправляю через includes, preload чи eager load. У Node.js з ORM роблю join або батчинг запитів, наприклад через DataLoader.',
+    qKeys: ['N', 'запитів', 'ORM', 'Rails'],
+    aKeys: ['includes', 'preload', 'Bullet', 'DataLoader', 'join'],
+    llm: { expect: ['N+1', 'includes', 'preload', 'eager', 'запит'] },
+    image: {
+      id: 'rails-n-plus-one',
+      caption: 'Ось код контролера з екрана. Що тут не так з продуктивністю і як це виправити?',
+      expect: ['N+1', 'includes', 'preload', 'eager', 'customer', 'line_items'],
+    },
+  },
+  {
+    id: 6,
+    q: 'Розкажіть про транзакції та рівні ізоляції в PostgreSQL. Який рівень ви використовуєте за замовчуванням?',
+    a: 'За замовчуванням у PostgreSQL це read committed. Для критичних сценаріїв, як списання балансу, я використовую SELECT FOR UPDATE або serializable з retry на serialization failure. Також люблю optimistic locking через колонку version, коли конфлікти рідкісні, і advisory locks для координації фонових задач.',
+    qKeys: ['транзакції', 'ізоляції', 'PostgreSQL'],
+    aKeys: ['read committed', 'FOR UPDATE', 'serializable', 'optimistic', 'advisory'],
+  },
+  {
+    id: 7,
+    q: 'Як ви проєктуєте REST API, щоб він був стабільним контрактом для інших команд? Versioning, pagination, idempotency?',
+    a: 'Контракт описую в OpenAPI і перевіряю в CI, щоб зламані зміни не проходили. Versioning роблю через префікс у шляху або через заголовок, і ніколи не видаляю поля без періоду deprecation. Pagination краще cursor based, ніж offset, бо вона стабільна при вставках. Для POST запитів вводжу Idempotency-Key, а помилки повертаю в єдиному форматі з кодом та correlation id.',
+    qKeys: ['REST', 'API', 'versioning', 'pagination', 'idempotency'],
+    aKeys: ['OpenAPI', 'versioning', 'cursor', 'offset', 'Idempotency-Key', 'correlation'],
+  },
+  {
+    id: 8,
+    q: 'У нас багато system-to-system інтеграцій. Як ви зробите надійну інтеграцію із зовнішнім API, яке іноді падає?',
+    a: 'Ставлю timeout на кожен виклик, потім retries з exponential backoff та jitter, але тільки для ідемпотентних операцій. Для POST використовую idempotency keys. Додаю circuit breaker, щоб не добивати сервіс, який лежить. Повідомлення, що не вдалося обробити, відправляю в dead letter queue в SQS, і маю алерт та replay процедуру.',
+    qKeys: ['system', 'інтеграції', 'API', 'падає'],
+    aKeys: ['timeout', 'backoff', 'jitter', 'circuit', 'dead letter', 'SQS', 'idempotency'],
+    llm: { expect: ['retry', 'backoff', 'jitter', 'timeout', 'circuit', 'dead letter', 'idempot'] },
+  },
+  {
+    id: 9,
+    q: 'Порівняйте REST, GraphQL та gRPC. Для якого сценарію ви обрали б кожен з них?',
+    a: 'REST для публічних та простих CRUD API, де важлива кешованість та простота. GraphQL добре для фронтенду з різними екранами, які потребують різні поля, але треба дивитися на складність запитів та N плюс один на сервері. gRPC обираю для внутрішньої взаємодії сервісів, де потрібні строгі контракти в protobuf і низька затримка.',
+    qKeys: ['REST', 'GraphQL', 'gRPC'],
+    aKeys: ['REST', 'GraphQL', 'gRPC', 'protobuf', 'кеш'],
+  },
+  {
+    id: 10,
+    q: 'Як ви моделюєте event-driven взаємодію між сервісами? Коли SQS, а коли Kafka чи EventBridge?',
+    a: 'SQS для простих черг задач з гарантією at least once, де потрібен competing consumers. Kafka коли потрібен журнал подій, replay та кілька незалежних споживачів із порядком у партиції. EventBridge для маршрутизації подій між AWS сервісами та SaaS. Через at least once доставку споживачі мають бути ідемпотентними, тому я зберігаю processed event id або роблю upsert.',
+    qKeys: ['event-driven', 'SQS', 'Kafka', 'EventBridge'],
+    aKeys: ['SQS', 'Kafka', 'EventBridge', 'at least once', 'ідемпотент'],
+    llm: { expect: ['SQS', 'Kafka', 'EventBridge', 'at least once', 'idempot', 'ідемпот'] },
+  },
+  {
+    id: 11,
+    q: 'Розкажіть, як ви працювали з AWS. Які сервіси використовували та як налаштовували IAM?',
+    a: 'Основне це ECS Fargate для сервісів, RDS PostgreSQL, S3, SQS та CloudWatch. Інфраструктуру описували в Terraform. З IAM працюю за принципом least privilege: окрема role для кожного сервісу, без wildcard дозволів, секрети в Secrets Manager, а доступ до RDS через security groups та IAM auth де можливо.',
+    qKeys: ['AWS', 'сервіси', 'IAM'],
+    aKeys: ['ECS', 'Fargate', 'RDS', 'S3', 'Terraform', 'least privilege', 'Secrets Manager'],
+  },
+  {
+    id: 12,
+    q: 'Тепер подивимось на продуктивність запиту в базі. Ось вивід EXPLAIN ANALYZE. Що ви бачите та як це виправите?',
+    a: 'Тут Seq Scan по таблиці invoices майже в дев’ять мільйонів рядків, і це видно з Rows Removed by Filter. Потрібен складений індекс по customer id та created at, у такому порядку, щоб він покрив і фільтр, і сортування, і прибрав окремий Sort. Створювати його треба через CREATE INDEX CONCURRENTLY, щоб не блокувати записи.',
+    qKeys: ['продуктивність', 'EXPLAIN', 'ANALYZE', 'бачите'],
+    aKeys: ['Seq Scan', 'invoices', 'індекс', 'customer', 'CONCURRENTLY'],
+    image: {
+      id: 'sql-seq-scan',
+      caption: 'Ось EXPLAIN ANALYZE запиту з екрана. Що не так і яким індексом це виправити?',
+      expect: ['Seq Scan', 'індекс', 'index', 'customer_id', 'created_at', 'CONCURRENTLY'],
+    },
+  },
+  {
+    id: 13,
+    q: 'Опишіть складний production-інцидент, який ви розслідували. Що пішло не так і що змінили після цього?',
+    a: 'Був інцидент, коли клієнти отримали дублікати рахунків. Причина: інтеграція з платіжним провайдером робила retry після timeout, а в нас не було idempotency key та unique обмеження. Ми знайшли це по логах з correlation id та по метриках кількості invoice. Виправили, додавши idempotency key і unique індекс на customer id та billing period, а ще написали скрипт для безпечного злиття дублікатів.',
+    qKeys: ['інцидент', 'production', 'змінили'],
+    aKeys: ['дублікат', 'рахунк', 'retry', 'idempotency', 'unique', 'correlation'],
+    llm: { expect: ['дублікат', 'idempot', 'retry', 'unique', 'інцидент'] },
+  },
+  {
+    id: 14,
+    q: 'Як ви організуєте CI/CD для моноліту та кількох сервісів? Які етапи в пайплайні?',
+    a: 'Пайплайн у GitHub Actions: лінтери та типи, unit тести, integration тести з реальним PostgreSQL в контейнері, security scan залежностей, збірка Docker образу. Деплой через ECS з rolling або blue green, а для ризикових змін використовую canary та feature flags. Rollback це повернення на попередній task definition, а міграції пишу так, щоб старий код працював з новою схемою.',
+    qKeys: ['CI', 'CD', 'моноліту', 'пайплайні'],
+    aKeys: ['GitHub Actions', 'integration', 'Docker', 'blue', 'canary', 'rollback', 'feature flags'],
+  },
+  {
+    id: 15,
+    q: 'На фронтенді ми використовуємо Vue з TypeScript. Як ви типізуєте відповіді API, щоб frontend і backend не роз’їжджалися?',
+    a: 'Генерую типи та клієнт із OpenAPI схеми, тому зміна контракту ламає збірку фронтенду, а не production. Для runtime валідації на межі застосунку використовую zod. У Vue тримаю state в Pinia та composables, а запити огортаю в один шар доступу до API, де обробляються помилки та retry.',
+    qKeys: ['Vue', 'TypeScript', 'API', 'frontend'],
+    aKeys: ['OpenAPI', 'zod', 'Pinia', 'composables', 'типи'],
+    llm: { expect: ['OpenAPI', 'zod', 'Pinia', 'тип', 'контракт'] },
+  },
+  {
+    id: 16,
+    q: 'Ви щодня користуєтесь agentic AI coding tools. Як саме вони вбудовані у ваш workflow?',
+    a: 'Я даю агенту чітке завдання з контекстом, критеріями приймання та командами для перевірки, і прошу спочатку план. Підтримую файл з правилами для репозиторію, як AGENTS md, де описані команди, стиль та заборони. Результат завжди проходить через тести та мій review. Агента я використовую для рефакторингу, написання тестів та дослідження коду.',
+    qKeys: ['agentic', 'AI', 'workflow', 'щодня'],
+    aKeys: ['агент', 'план', 'AGENTS', 'тести', 'review', 'рефакторинг'],
+  },
+  {
+    id: 17,
+    q: 'Де ви не довіряєте згенерованому коду і перевіряєте його вручну? Покажу один приклад, який приходить від агента.',
+    a: 'Вручну перевіряю все, що стосується грошей, безпеки, міграцій та конкурентності. Дивлюсь, чи є галузь помилок, чи немає race condition, чи правильні транзакції. У цьому прикладі зі спільним ключем є класична гонка: між перевіркою існування та вставкою інший запит встигне зробити платіж. Потрібне unique обмеження на idempotency key та вставка до виклику gateway.',
+    qKeys: ['згенерованому', 'код', 'вручну'],
+    aKeys: ['race', 'транзакц', 'unique', 'idempotency', 'gateway'],
+    image: {
+      id: 'ts-idempotency-race',
+      caption: 'Це код із екрана, який згенерував агент. Знайди проблеми з конкурентністю та ідемпотентністю і запропонуй виправлення.',
+      expect: ['race', 'гонк', 'unique', 'idempot', 'gateway', 'insert'],
+    },
+  },
+  {
+    id: 18,
+    q: 'Як масштабувати AI-native розробку на всю команду? Які shared workflows та інтеграцію з CI ви б впровадили?',
+    a: 'Почав би зі спільного репозиторію правил та prompt шаблонів для типових задач: міграція, тести, code review. Додав би в CI автоматичний review pull request агентом з обмеженими правами та перевірку, що зміни проходять тести. Метрики: час до merge, частка відкочених змін, дефекти після релізу. Також потрібне навчання команди та політика, що відповідальність за код завжди на авторі.',
+    qKeys: ['масштабувати', 'AI-native', 'workflows', 'CI'],
+    aKeys: ['правил', 'prompt', 'CI', 'review', 'метрики', 'відповідальн'],
+    llm: { expect: ['правил', 'prompt', 'CI', 'review', 'метрик', 'workflow'] },
+  },
+  {
+    id: 19,
+    q: 'Давайте до Python. Ось consumer для SQS. Що ви побачите в цьому коді з точки зору надійності?',
+    a: 'Тут немає обробки помилок, тому якщо send email впаде після create invoice, повідомлення не видалиться і спрацює повторно, а інвойс створиться вдруге. Потрібна ідемпотентність за message id, try except з логуванням, visibility timeout, dead letter queue та видалення повідомлення тільки після успішної обробки в одній логічній транзакції.',
+    qKeys: ['Python', 'consumer', 'SQS', 'надійності'],
+    aKeys: ['помилок', 'send email', 'invoice', 'ідемпотент', 'visibility', 'dead letter'],
+    image: {
+      id: 'python-sqs-consumer',
+      caption: 'Ось consumer з екрана. Які проблеми з надійністю та як зробити його безпечним до повторної доставки?',
+      expect: ['idempot', 'ідемпот', 'dead letter', 'visibility', 'duplicate', 'дублік', 'try'],
+    },
+  },
+  {
+    id: 20,
+    q: 'Ми будуємо LLM features на enterprise платформах, наприклад AWS Bedrock. Як ви спроєктуєте таку feature?',
+    a: 'Спочатку визначу задачу та метрику якості. Далі prompt із чіткими інструкціями та структурованим виводом, guardrails на вхід і вихід, ліміти токенів. Виклики через Bedrock з retry та fallback моделлю. Обов’язково observability: логую prompt version, latency, токени та вартість, а також збираю feedback користувачів. Дані клієнтів не потрапляють у промпти без маскування.',
+    qKeys: ['LLM', 'Bedrock', 'feature'],
+    aKeys: ['Bedrock', 'prompt', 'guardrails', 'токен', 'observability', 'fallback'],
+    llm: { expect: ['Bedrock', 'guardrail', 'prompt', 'observability', 'токен', 'latency'] },
+  },
+  {
+    id: 21,
+    q: 'Як ви тестуєте LLM функціональність, яка недетермінована? Що таке evals?',
+    a: 'Evals це набір тестових кейсів із очікуваннями, який ми проганяємо автоматично при зміні prompt чи моделі. Для частини перевірок достатньо правил, наприклад структура JSON та наявність ключових фактів. Для якості відповіді використовую LLM as a judge з rubric, але калібрую його на розмічених прикладах. Результати порівнюю з baseline і блокую деградацію в CI.',
+    qKeys: ['LLM', 'недетермінована', 'evals'],
+    aKeys: ['evals', 'prompt', 'JSON', 'judge', 'rubric', 'baseline', 'CI'],
+  },
+  {
+    id: 22,
+    q: 'У нас є аналітичні дані в Snowflake та транзакційні в PostgreSQL. Як би ви організували потік даних між ними?',
+    a: 'Для транзакційних змін використав би CDC, наприклад через логічну реплікацію PostgreSQL та потік у Snowflake через Kafka або managed ingestion. Важливо мати стабільні ключі та поле updated at, щоб робити ідемпотентні merge. Зміни схеми проходять через contract між командами, а якість даних перевіряємо тестами на рівні моделі, наприклад в dbt.',
+    qKeys: ['Snowflake', 'PostgreSQL', 'потік', 'даних'],
+    aKeys: ['CDC', 'реплікац', 'Snowflake', 'Kafka', 'merge', 'dbt'],
+    llm: { expect: ['CDC', 'Snowflake', 'merge', 'dbt', 'реплік', 'схем'] },
+  },
+  {
+    id: 23,
+    q: 'Як ви працюєте з observability у production? Які метрики, логи та traces для вас найважливіші?',
+    a: 'Базово це RED метрики: rate, errors, duration, і насиченість ресурсів. Логи структуровані з correlation id, що проходить через усі сервіси. Distributed tracing через OpenTelemetry допомагає знаходити повільні залежності. Алерти роблю на SLO та burn rate, а не на кожен спайк, щоб не втомлювати чергових.',
+    qKeys: ['observability', 'метрики', 'логи', 'traces'],
+    aKeys: ['RED', 'correlation', 'OpenTelemetry', 'SLO', 'burn'],
+  },
+  {
+    id: 24,
+    q: 'Як би ви змоделювали домен, який змінюється: наприклад тарифи на електроенергію, що мають періоди дії та версії?',
+    a: 'Тут працює temporal model: кожен тариф має valid from та valid to, а зміни це нові версії запису, а не update. Для цього добре підходить PostgreSQL з range типами та exclusion constraint, який не дозволяє перетин періодів. У API віддаю тариф на дату запиту, а в історії зберігаю повний audit trail.',
+    qKeys: ['домен', 'тарифи', 'електроенергію', 'версії'],
+    aKeys: ['temporal', 'valid', 'range', 'exclusion', 'audit'],
+    llm: { expect: ['temporal', 'valid', 'range', 'exclusion', 'версі', 'період'] },
+  },
+  {
+    id: 25,
+    q: 'Як ви підходите до безпеки API? Аутентифікація, авторизація, захист від поширених атак?',
+    a: 'Аутентифікація через OAuth два та OIDC, короткоживучі access токени. Авторизацію роблю на рівні політик, а не розкиданих перевірок, і завжди перевіряю власника ресурсу, щоб уникнути IDOR. Валідація вхідних даних, параметризовані запити проти SQL injection, rate limiting, секрети поза кодом і регулярне оновлення залежностей.',
+    qKeys: ['безпеки', 'API', 'аутентифікація', 'авторизація'],
+    aKeys: ['OAuth', 'OIDC', 'IDOR', 'injection', 'rate limiting', 'секрет'],
+  },
+  {
+    id: 26,
+    q: 'Ось ще один фрагмент з Rails проєкту, який треба оптимізувати. Як би ви пояснили проблему джуніору?',
+    a: 'Я б показав у логах, що на кожен рядок результату виконується окремий запит, і пояснив, що база викликається в циклі. Потім показав би виправлення з includes та агрегацією на рівні SQL, замість підрахунку сум у Ruby. Після цього порівняли б кількість запитів і час відповіді до і після, щоб джуніор побачив ефект.',
+    qKeys: ['Rails', 'оптимізувати', 'джуніору'],
+    aKeys: ['запит', 'циклі', 'includes', 'SQL', 'агрегац'],
+    image: {
+      id: 'rails-n-plus-one',
+      caption: 'Це той самий контролер ще раз. Напиши виправлену версію коду з includes та агрегацією в SQL.',
+      expect: ['includes', 'group', 'sum', 'N+1', 'SQL'],
+    },
+  },
+  {
+    id: 27,
+    q: 'Як ви ставитесь до технічного боргу? Product команда просить швидку фічу, яка псує domain model.',
+    a: 'Я пояснюю наслідки мовою бізнесу: вартість змін і ризик інцидентів. Пропоную мінімальний варіант, який не ламає модель, або тимчасове рішення з чітким тікетом, власником та дедлайном на виправлення. Борг фіксую у backlog з оцінкою впливу, і закладаю частину кожного спринту на його погашення.',
+    qKeys: ['технічного', 'боргу', 'product', 'domain'],
+    aKeys: ['бізнес', 'ризик', 'тікет', 'backlog', 'спринт', 'борг'],
+    llm: { expect: ['борг', 'ризик', 'backlog', 'компроміс', 'domain', 'спринт'] },
+  },
+  {
+    id: 28,
+    q: 'Як ви проводите code review та що для вас найважливіше в pull request?',
+    a: 'Спочатку перевіряю, що PR малий та має зрозумілий опис і тести. Дивлюсь на коректність, граничні випадки, безпеку та вплив на схему даних. Стиль віддаю лінтеру, щоб не витрачати на це час. Коментарі формулюю як питання або пропозицію, і розділяю блокуючі зауваження та побажання.',
+    qKeys: ['code review', 'pull request', 'важливіше'],
+    aKeys: ['PR', 'тести', 'граничні', 'безпек', 'лінтер', 'блокуюч'],
+  },
+  {
+    id: 29,
+    q: 'Останні питання. Скажіть, що б ви покращили в архітектурі billing платформи, над якою працювали?',
+    a: 'Я б вніс outbox pattern для надійної публікації подій разом із транзакцією, щоб не губити та не дублювати події. Ще зробив би окремі read models для звітності, щоб не навантажувати основну базу, і посилив би contract тести для інтеграцій з провайдерами, бо інцидент із дублікатами показав цю прогалину.',
+    qKeys: ['архітектурі', 'billing', 'платформи'],
+    aKeys: ['outbox', 'транзакц', 'read models', 'contract', 'дублікат'],
+    llm: { expect: ['outbox', 'read model', 'contract', 'billing', 'дублікат'] },
+  },
+  {
+    id: 30,
+    q: 'Дякую. Підсумуємо: нагадайте коротко, який у вас досвід, який стек та який інцидент ви розбирали.',
+    a: 'Підсумую. Шість років досвіду, billing платформа на Rails, PostgreSQL та AWS ECS, також Node.js з TypeScript. Міграції я роблю за схемою expand and contract. Ключовий інцидент: дублікати рахунків через retry без idempotency key, які ми виправили unique індексом та ключем ідемпотентності.',
+    qKeys: ['підсумуємо', 'досвід', 'стек', 'інцидент'],
+    aKeys: ['шість', 'Rails', 'ECS', 'expand', 'дублікат', 'idempotency'],
+  },
+];
+
+// Финальные проверки "понимает ли LLM весь контекст беседы": явные промпты после всей беседы.
+export const FINAL_RECALL_PROMPTS = [
+  {
+    id: 'recall-profile',
+    text: 'Підсумуй за всією нашою бесідою: який досвід і стек назвав кандидат, на чому працював останній проєкт і в якому cloud розгортався? Відповідай коротко.',
+    expect: ['шість', '6', 'billing', 'Rails', 'PostgreSQL', 'AWS', 'ECS'],
+    minHits: 4,
+  },
+  {
+    id: 'recall-incident',
+    text: 'Який production інцидент описав кандидат, яка була причина і що змінили після нього? Згадай також, який підхід до міграцій він назвав.',
+    expect: ['дублік', 'duplicate', 'retry', 'idempot', 'unique', 'expand', 'contract', 'nullable'],
+    minHits: 4,
+  },
+  {
+    id: 'recall-code',
+    text: 'Які проблеми з коду на картинках ми обговорювали? Перерахуй: N+1 у Rails, повільний запит у PostgreSQL, race condition в платежах, SQS consumer. Що пропонувалось виправити в кожному випадку?',
+    expect: ['N+1', 'includes', 'index', 'індекс', 'race', 'unique', 'idempot', 'SQS'],
+    minHits: 5,
+  },
+];

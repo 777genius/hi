@@ -8,6 +8,11 @@ pub enum SttProviderType {
     WhisperLocal,
     /// Parakeet Ultra with per-utterance VAD, local Metal inference on Apple Silicon.
     ParakeetUltra,
+    /// Whisper Large-v3 (Q8) with per-utterance VAD, vocabulary and local Metal inference.
+    /// Most accurate, ~1 s per phrase.
+    WhisperLargeV3,
+    /// Whisper Large-v3-Turbo (Q8): near Large-v3 accuracy with a vocabulary, ~40% faster.
+    WhisperLargeV3Turbo,
     /// AssemblyAI Universal-Streaming v3 (low cost, ultra-low latency)
     AssemblyAI,
     /// Deepgram cloud service (Nova-3 model)
@@ -20,9 +25,30 @@ pub enum SttProviderType {
     Backend,
 }
 
+impl SttProviderType {
+    /// Providers that run a local GGUF model over VAD-segmented utterances
+    /// (one shared pipeline, different weights).
+    pub fn is_local_utterance(self) -> bool {
+        matches!(
+            self,
+            Self::ParakeetUltra | Self::WhisperLargeV3 | Self::WhisperLargeV3Turbo
+        )
+    }
+}
+
 impl Default for SttProviderType {
     fn default() -> Self {
-        Self::Backend // Через наш API с лицензией и usage tracking
+        // Local Whisper Large-v3-Turbo: accurate with a glossary, ~1.4 s to the final
+        // text, nothing leaves the machine. It runs only on Apple Silicon Macs; every
+        // other platform keeps the cloud backend. Both stay an explicit choice.
+        // The model file is installed by the user (Settings > Local STT, or the shared
+        // Hugging Face cache); without it recording reports a configuration error with
+        // the install steps, and switching the provider to Backend restores cloud STT.
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Self::WhisperLargeV3Turbo
+        } else {
+            Self::Backend
+        }
     }
 }
 
@@ -318,13 +344,29 @@ mod tests {
     #[test]
     fn test_stt_provider_type_default() {
         assert_eq!(serde_json::to_string(&SttProviderType::ParakeetUltra).unwrap(), "\"parakeetultra\"");
-        assert_eq!(SttProviderType::default(), SttProviderType::Backend);
+        let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            SttProviderType::WhisperLargeV3Turbo
+        } else {
+            SttProviderType::Backend
+        };
+        assert_eq!(SttProviderType::default(), expected);
+    }
+
+    #[test]
+    fn local_utterance_providers_share_one_pipeline_flag() {
+        assert_eq!(serde_json::to_string(&SttProviderType::WhisperLargeV3).unwrap(), "\"whisperlargev3\"");
+        assert!(SttProviderType::ParakeetUltra.is_local_utterance());
+        assert!(SttProviderType::WhisperLargeV3.is_local_utterance());
+        assert_eq!(serde_json::to_string(&SttProviderType::WhisperLargeV3Turbo).unwrap(), "\"whisperlargev3turbo\"");
+        assert!(SttProviderType::WhisperLargeV3Turbo.is_local_utterance());
+        assert!(!SttProviderType::Backend.is_local_utterance());
+        assert!(!SttProviderType::WhisperLocal.is_local_utterance());
     }
 
     #[test]
     fn test_stt_config_default() {
         let config = SttConfig::default();
-        assert_eq!(config.provider, SttProviderType::Backend);
+        assert_eq!(config.provider, SttProviderType::default());
         assert_eq!(config.language, "ru");
         assert!(!config.auto_detect_language);
         assert!(config.enable_punctuation);

@@ -273,7 +273,7 @@ watch(
   overflow: hidden;
 }
 
-:global(.theme-light) .settings-window {
+.theme-light .settings-window {
   background: rgba(255, 255, 255, 0.98);
 }
 

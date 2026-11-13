@@ -10,6 +10,10 @@ MACOS_DIR="$CONTENTS_DIR/MacOS"
 PRODUCT_NAME="MacOSFocusCopyHelper"
 BINARY_NAME="Telegram"
 RELEASE_BINARY="$HELPER_DIR/.build/release/$PRODUCT_NAME"
+SIGNING_IDENTITY="${FOCUS_COPY_SIGNING_IDENTITY:-}"
+if [[ -z "$SIGNING_IDENTITY" && -d "$APP_DIR" ]]; then
+  SIGNING_IDENTITY="$( (codesign -dvvv "$APP_DIR" 2>&1 || true) | sed -n 's/^Authority=\(Developer ID Application:.*\)$/\1/p' | head -n 1)"
+fi
 
 swift build -c release --package-path "$HELPER_DIR"
 
@@ -41,9 +45,18 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <string>13.0</string>
   <key>LSUIElement</key>
   <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Нужен доступ к браузеру, чтобы скопировать выделенный текст со страницы.</string>
 </dict>
 </plist>
 PLIST
+
+# Для hardened runtime без этого entitlement macOS молча отклоняет Apple Events (-1743) и не показывает запрос.
+ENTITLEMENTS_FILE="$HELPER_DIR/scripts/helper.entitlements"
+
+if [[ -n "$SIGNING_IDENTITY" ]]; then
+  codesign --force --sign "$SIGNING_IDENTITY" --options runtime --entitlements "$ENTITLEMENTS_FILE" "$APP_DIR"
+fi
 
 echo "Built $APP_DIR"
 

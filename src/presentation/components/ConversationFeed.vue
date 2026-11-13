@@ -4,7 +4,7 @@ import type { ConversationFeedMessage } from '../conversationFeed';
 import { renderMarkdownToSafeHtml } from '@/utils/markdown';
 import { highlightMessage, highlightRawCodeBlock, messageHasCode } from '@/utils/codeHighlight';
 import { isCodeBlockExpandedFromTarget, toggleCodeBlockCollapseFromTarget } from '../feedCodeBlocks';
-import { DEFAULT_SCROLL_BOTTOM_THRESHOLD_PX, isNearScrollBottom, scrollElementToBottom } from '../feedScroll';
+import { DEFAULT_SCROLL_BOTTOM_THRESHOLD_PX, isNearScrollBottom, scrollBottomRemaining, scrollElementToBottom } from '../feedScroll';
 
 type HighlightEntry = { sourceText: string; html: string; expanded: boolean };
 type HighlightCandidate = { id: string; text: string; forceCode: boolean; expanded: boolean };
@@ -19,6 +19,7 @@ const props = withDefaults(defineProps<{
   anchorMode?: 'tail' | 'fixed';
   anchorSttIndex?: number;
   messagesClickable?: boolean;
+  assistantStreaming?: boolean;
   isSelected?: (id: string) => boolean;
   isOutOfContext?: (message: ConversationFeedMessage) => boolean;
 }>(), {
@@ -27,6 +28,7 @@ const props = withDefaults(defineProps<{
   anchorMode: 'tail',
   anchorSttIndex: 0,
   messagesClickable: false,
+  assistantStreaming: false,
   isSelected: () => false,
   isOutOfContext: () => false,
 });
@@ -50,6 +52,11 @@ const activeCandidateByMessageId = reactive<Record<string, string>>({});
 let scrollStateFrame: number | null = null;
 let shouldStickToBottomAfterRender = false;
 let stickToBottomScheduled = false;
+let resumeAfterUserScroll = false;
+let frozenScrollTop: number | null = null;
+let userScrollIntent = false;
+let lastScrollTop = 0;
+let wasNearBottom = true;
 
 defineExpose({
   scrollEl,
@@ -57,6 +64,13 @@ defineExpose({
 });
 
 const hasActionsSlot = computed(() => !!slots.actions);
+
+// Companion не передаёт assistantStreaming, поэтому стриминг определяем и по самим сообщениям.
+const isAssistantStreaming = computed(
+  () =>
+    props.assistantStreaming ||
+    props.messages.some((message) => message.kind === 'haiku' && !message.deleted && message.status === 'streaming')
+);
 
 const latestAssistantMessageId = computed(() => {
   for (let index = props.messages.length - 1; index >= 0; index -= 1) {
@@ -185,7 +199,9 @@ function expandCollapsedMessage(message: ConversationFeedMessage, event: MouseEv
 }
 
 function renderHaikuMarkdown(text: string): string {
-  return renderMarkdownToSafeHtml(String(text ?? ''));
+  const answer = String(text ?? '').trim();
+  const singleBullet = answer.match(/^[-*•]\s+([^\n]+)$/);
+  return renderMarkdownToSafeHtml(singleBullet ? singleBullet[1] : answer);
 }
 
 function candidateList(message: ConversationFeedMessage) {
@@ -348,7 +364,28 @@ function scheduleScrollStateUpdate(): void {
 }
 
 function onScroll(): void {
+  const element = scrollEl.value;
+  if (element && !shouldStickToBottomAfterRender && !isAssistantStreaming.value) {
+    wasNearBottom = isNearBottom(element);
+  }
+  if (isAssistantStreaming.value && userScrollIntent && element && !resumeAfterUserScroll) {
+    frozenScrollTop = element.scrollTop;
+  }
+  // Пользователь прокрутил вверх, пока лента "прилипла" к низу: отпускаем и фиксируем позицию,
+  // иначе автоскролл возвращает его вниз и выйти из конца ленты невозможно.
+  if (element && isAssistantStreaming.value && userScrollIntent && resumeAfterUserScroll &&
+      element.scrollTop < lastScrollTop - 2 && scrollBottomRemaining(element) > 8) {
+    resumeAfterUserScroll = false;
+    shouldStickToBottomAfterRender = false;
+    frozenScrollTop = element.scrollTop;
+    wasNearBottom = false;
+  }
+  if (element) lastScrollTop = element.scrollTop;
   updateScrollToBottomVisibility();
+}
+
+function onUserScrollIntent(): void {
+  userScrollIntent = true;
 }
 
 function scrollToBottom(behavior: ScrollBehavior = 'smooth'): void {
@@ -359,15 +396,33 @@ function scrollToBottom(behavior: ScrollBehavior = 'smooth'): void {
     top: element.scrollHeight,
     behavior,
   });
+  wasNearBottom = true;
+  if (isAssistantStreaming.value) {
+    // Автоскролл во время ответа не включаем: лента остаётся там, где её оставил пользователь.
+    frozenScrollTop = element.scrollHeight - element.clientHeight;
+  }
   scheduleScrollStateUpdate();
 }
 
 function rememberStickToBottomIfCurrentlyPinned(): void {
-  const element = scrollEl.value;
-  if (!element || !isNearBottom(element)) return;
+  if (isAssistantStreaming.value && !resumeAfterUserScroll) return;
+  if (isAssistantStreaming.value && resumeAfterUserScroll) {
+    shouldStickToBottomAfterRender = true;
+    scheduleStickToBottomAfterRender();
+    return;
+  }
+  if (!scrollEl.value || !wasNearBottom) return;
   shouldStickToBottomAfterRender = true;
   scheduleStickToBottomAfterRender();
 }
+
+watch(isAssistantStreaming, (streaming) => {
+  resumeAfterUserScroll = false;
+  userScrollIntent = false;
+  frozenScrollTop = streaming ? (scrollEl.value?.scrollTop ?? null) : null;
+  shouldStickToBottomAfterRender = false;
+  if (streaming) wasNearBottom = false;
+}, { flush: 'sync' });
 
 function scheduleStickToBottomAfterRender(): void {
   if (stickToBottomScheduled) return;
@@ -380,6 +435,7 @@ function scheduleStickToBottomAfterRender(): void {
     const element = scrollEl.value;
     if (!element) return;
     scrollElementToBottom(element);
+    wasNearBottom = true;
     scheduleScrollStateUpdate();
   });
 }
@@ -389,6 +445,7 @@ watch(
   (element, previous) => {
     previous?.removeEventListener('scroll', onScroll);
     element?.addEventListener('scroll', onScroll, { passive: true });
+    if (element) wasNearBottom = isNearBottom(element);
     scheduleScrollStateUpdate();
   },
   { immediate: true }
@@ -398,6 +455,13 @@ watch(
   () => [props.messages, props.emptyText],
   () => {
     rememberStickToBottomIfCurrentlyPinned();
+    if (isAssistantStreaming.value && !resumeAfterUserScroll && frozenScrollTop !== null) {
+      void nextTick(() => {
+        if (isAssistantStreaming.value && !resumeAfterUserScroll && scrollEl.value) {
+          scrollEl.value.scrollTop = frozenScrollTop!;
+        }
+      });
+    }
   },
   { deep: true, flush: 'pre' }
 );
@@ -443,8 +507,11 @@ onUnmounted(() => {
     <div
       ref="scrollEl"
       class="chat-scroll"
-      :class="{ selecting }"
+      :class="{ 'scroll-frozen': assistantStreaming && !resumeAfterUserScroll, selecting }"
       @mousedown="emit('scroll-mousedown', $event)"
+      @wheel.passive="onUserScrollIntent"
+      @touchmove.passive="onUserScrollIntent"
+      @keydown="onUserScrollIntent"
       @click.capture="onScrollClickCapture"
     >
       <slot name="overlay" />
@@ -538,7 +605,6 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <span v-if="visibleMessageStatus(msg) === 'streaming'" class="chat-cursor">▍</span>
           </template>
         </div>
 
@@ -591,6 +657,10 @@ onUnmounted(() => {
   position: relative;
 }
 
+.chat-scroll.scroll-frozen {
+  overflow-anchor: none;
+}
+
 .chat-scroll::after {
   content: '';
   display: block;
@@ -635,7 +705,7 @@ onUnmounted(() => {
   font-size: 20px;
 }
 
-:global(.theme-light) .scroll-to-bottom-button {
+.theme-light .scroll-to-bottom-button {
   background: rgba(255, 255, 255, 0.95);
   color: rgba(15, 23, 42, 0.92);
   border-color: rgba(15, 23, 42, 0.08);
@@ -679,7 +749,7 @@ onUnmounted(() => {
 
 .chat-bubble {
   box-sizing: border-box;
-  max-width: calc(92% - 40px);
+  max-width: calc((92% - 40px) * var(--chat-bubble-width-scale, 1));
   min-width: 0;
   padding: 8px 10px;
   border-radius: 12px;
@@ -733,20 +803,20 @@ onUnmounted(() => {
 }
 
 .chat-row.outgoing .chat-bubble {
-  width: calc(92% - 40px);
+  width: calc((92% - 40px) * var(--chat-bubble-width-scale, 1));
   background: rgba(59, 130, 246, 0.16);
   border-color: rgba(59, 130, 246, 0.25);
   color: var(--color-text);
 }
 
 .chat-row.assistant-response .chat-bubble {
-  width: calc(100% - 18px);
-  max-width: calc(100% - 18px);
+  width: calc((100% - 18px) * var(--chat-bubble-width-scale, 1));
+  max-width: calc((100% - 18px) * var(--chat-bubble-width-scale, 1));
 }
 
 .chat-row.focus-copy .chat-bubble {
-  width: calc(100% - 18px);
-  max-width: calc(100% - 18px);
+  width: calc((100% - 18px) * var(--chat-bubble-width-scale, 1));
+  max-width: calc((100% - 18px) * var(--chat-bubble-width-scale, 1));
   color: var(--color-text);
 }
 
@@ -831,7 +901,7 @@ onUnmounted(() => {
   color: rgba(255, 255, 255, 0.35);
 }
 
-:global(.theme-light) .chat-text-deleted {
+.theme-light .chat-text-deleted {
   color: rgba(0, 0, 0, 0.35);
 }
 
@@ -924,13 +994,13 @@ onUnmounted(() => {
   background: rgba(59, 130, 246, 0.95);
 }
 
-:global(.theme-light) .assistant-candidate-tab {
+.theme-light .assistant-candidate-tab {
   border-color: rgba(15, 23, 42, 0.12);
   background: rgba(15, 23, 42, 0.04);
   color: rgba(15, 23, 42, 0.68);
 }
 
-:global(.theme-light) .assistant-candidate-tab.active {
+.theme-light .assistant-candidate-tab.active {
   border-color: rgba(37, 99, 235, 0.45);
   background: rgba(37, 99, 235, 0.12);
   color: rgba(15, 23, 42, 0.92);
@@ -986,18 +1056,18 @@ onUnmounted(() => {
   background: rgba(43, 48, 57, 0.96);
 }
 
-:global(.theme-light) .chat-collapse-toggle {
+.theme-light .chat-collapse-toggle {
   background: rgba(248, 250, 252, 0.94);
   color: rgba(15, 23, 42, 0.62);
   border-top-color: rgba(15, 23, 42, 0.08);
 }
 
-:global(.theme-light) .chat-collapse-toggle:hover {
+.theme-light .chat-collapse-toggle:hover {
   color: rgba(15, 23, 42, 0.88);
   background: rgba(241, 245, 249, 0.96);
 }
 
-:global(.theme-light) .chat-collapsible-message:not(.collapsed) .chat-collapse-toggle {
+.theme-light .chat-collapsible-message:not(.collapsed) .chat-collapse-toggle {
   border-color: rgba(15, 23, 42, 0.14);
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
 }
@@ -1263,15 +1333,15 @@ onUnmounted(() => {
   color: rgba(255, 255, 255, 0.85);
 }
 
-:global(.theme-light) .chat-markdown :deep(.code-block-toggle),
-:global(.theme-light) .chat-text-highlighted :deep(.code-block-toggle) {
+.theme-light .chat-markdown :deep(.code-block-toggle),
+.theme-light .chat-text-highlighted :deep(.code-block-toggle) {
   background: rgba(248, 250, 252, 0.94);
   color: rgba(15, 23, 42, 0.62);
   border-top-color: rgba(15, 23, 42, 0.08);
 }
 
-:global(.theme-light) .chat-markdown :deep(.code-block-toggle:hover),
-:global(.theme-light) .chat-text-highlighted :deep(.code-block-toggle:hover) {
+.theme-light .chat-markdown :deep(.code-block-toggle:hover),
+.theme-light .chat-text-highlighted :deep(.code-block-toggle:hover) {
   background: rgba(241, 245, 249, 0.96);
   color: rgba(15, 23, 42, 0.88);
 }
@@ -1313,19 +1383,6 @@ onUnmounted(() => {
   overflow-wrap: normal;
 }
 
-.chat-cursor {
-  display: inline-block;
-  margin-left: 2px;
-  opacity: 0.9;
-  animation: chat-cursor-blink 1s steps(2, end) infinite;
-}
-
-@keyframes chat-cursor-blink {
-  50% {
-    opacity: 0.25;
-  }
-}
-
 @media (max-width: 560px) {
   .scroll-to-bottom-button {
     right: 10px;
@@ -1348,12 +1405,12 @@ onUnmounted(() => {
   }
 
   .chat-row.outgoing .chat-bubble {
-    width: calc(100% - 16px);
+    width: calc((100% - 16px) * var(--chat-bubble-width-scale, 1));
   }
 
   .chat-row.assistant-response .chat-bubble {
-    width: calc(100% - 6px);
-    max-width: calc(100% - 6px);
+    width: calc((100% - 6px) * var(--chat-bubble-width-scale, 1));
+    max-width: calc((100% - 6px) * var(--chat-bubble-width-scale, 1));
   }
 
   .chat-row.outgoing .chat-actions {
@@ -1386,8 +1443,8 @@ onUnmounted(() => {
   }
 
   .chat-row.assistant-response .chat-bubble {
-    width: calc(100% - 2px);
-    max-width: calc(100% - 2px);
+    width: calc((100% - 2px) * var(--chat-bubble-width-scale, 1));
+    max-width: calc((100% - 2px) * var(--chat-bubble-width-scale, 1));
   }
 }
 </style>

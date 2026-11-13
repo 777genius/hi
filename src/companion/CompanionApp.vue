@@ -51,7 +51,7 @@ const REQUEST_TIMEOUT_MS = 9000;
 const ACTION_REQUEST_TIMEOUT_MS = 30000;
 const PWA_CHECK_TIMEOUT_MS = 4500;
 const PWA_INSTALL_HINT_DISMISSED_KEY = 'companionPwaInstallHintDismissed';
-const OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY = 'openaiResponsesWebSearchEnabled';
+const OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY = 'openaiResponsesWebSearchEnabledV2';
 const UNCONFIRMED_ACTION_WARNING = 'Не удалось подтвердить отправку. После восстановления связи проверь ленту перед повтором.';
 
 const companionFeedRef = ref<{ scrollEl: HTMLElement | null } | null>(null);
@@ -66,9 +66,49 @@ const actionInFlight = ref(false);
 const syncInFlight = ref(false);
 const aiQuestion = ref('');
 const aiComposerOpen = ref(false);
-const openaiResponsesWebSearchEnabled = ref(readStoredBoolean(OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY, true));
+// Поле сообщения закреплено вверху экрана: внизу его перекрывает экранная клавиатура.
+// visualViewport.offsetTop сдвигает его вместе с видимой областью, если браузер прокрутил страницу при фокусе.
+const composerViewportOffsetTop = ref(0);
+// Высота видимой области над клавиатурой: 100dvh клавиатуру не учитывает, и без этого низ карточки
+// (фото и «Отправить») оказывался под клавиатурой без возможности до него доскроллить.
+const composerViewportHeight = ref(0);
+function syncComposerViewportOffset(): void {
+  composerViewportOffsetTop.value = Math.max(0, Math.round(window.visualViewport?.offsetTop ?? 0));
+  composerViewportHeight.value = Math.max(0, Math.round(window.visualViewport?.height ?? 0));
+}
+function bindComposerViewport(): void {
+  window.visualViewport?.addEventListener('resize', syncComposerViewportOffset);
+  window.visualViewport?.addEventListener('scroll', syncComposerViewportOffset);
+  syncComposerViewportOffset();
+}
+function unbindComposerViewport(): void {
+  window.visualViewport?.removeEventListener('resize', syncComposerViewportOffset);
+  window.visualViewport?.removeEventListener('scroll', syncComposerViewportOffset);
+  composerViewportOffsetTop.value = 0;
+  composerViewportHeight.value = 0;
+}
+const composerStyle = computed(() => ({
+  transform: `translateY(${composerViewportOffsetTop.value}px)`,
+  ...(composerViewportHeight.value > 0
+    ? { '--composer-viewport-height': `${composerViewportHeight.value}px` }
+    : {}),
+}));
+const aiTextareaRef = ref<HTMLTextAreaElement | null>(null);
+watch(aiComposerOpen, (open) => {
+  if (open) {
+    bindComposerViewport();
+    // Фокус сразу в поле, чтобы можно было печатать без лишнего тапа (preventScroll: страница не прыгает).
+    void nextTick(() => aiTextareaRef.value?.focus({ preventScroll: true }));
+  } else {
+    unbindComposerViewport();
+  }
+});
+const openaiResponsesWebSearchEnabled = ref(readStoredBoolean(OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY, false));
 const promptImages = ref<PromptImageDraft[]>([]);
 const promptFileInputRef = ref<HTMLInputElement | null>(null);
+const promptGalleryInputRef = ref<HTMLInputElement | null>(null);
+// Сервер принимает тело до 32 МБ, фото до ~4,5 МБ (base64 примерно 6 МБ): больше 5 штук не влезет.
+const MAX_PROMPT_IMAGES = 5;
 const pwaStandalone = ref(false);
 const pwaDiagnosticItems = ref<PwaDiagnosticItem[]>([]);
 const pwaDiagnosticChecking = ref(false);
@@ -185,6 +225,11 @@ const actionsDisabled = computed(() => (
   || syncInFlight.value
   || authRequired.value
 ));
+// Черновик (текст и фото) локальный: его можно править и при переподключении, нужна связь только для «Отправить».
+// Иначе каждый обрыв SSE выключал поле, и на телефоне закрывалась клавиатура посреди набора.
+const composerInputDisabled = computed(() => !companionAvailable || authRequired.value);
+// Пока сообщение уходит, черновик не меняем: после успешной отправки он очищается целиком.
+const composerAttachmentsDisabled = computed(() => composerInputDisabled.value || actionInFlight.value);
 const recordActionBlocked = computed(() => actionInFlight.value || recordingStatus.value === 'Processing');
 const recordButtonClass = computed(() => ({
   starting: recordingStatus.value === 'Starting',
@@ -309,7 +354,11 @@ async function applySnapshot(next: TauriSnapshotEnvelope<CompanionSnapshotData>)
     selectedMessageIds.value = [];
   }
 
-  if (shouldStickBottom && revisionAdvanced) {
+  // Пока идёт ответ LLM, ленту вниз не двигаем: она остаётся там, где её оставил пользователь.
+  const answerStreaming = (next.data?.timeline ?? []).some(
+    (message) => message.kind === 'haiku' && !message.deleted && message.status === 'streaming'
+  );
+  if (shouldStickBottom && revisionAdvanced && !answerStreaming) {
     await stickToBottomIfNeeded();
   }
 }
@@ -540,6 +589,10 @@ function extractErrorMessage(status: number, payload: CompanionActionResponse | 
   if (status === 401 || status === 403) {
     return 'Ссылка устарела или companion перезапустился. Открой QR из окна приложения заново.';
   }
+  if (status === 413) {
+    // Сервер отвечает техническим "Request body too large": объясняем, что сделать с черновиком.
+    return 'Сообщение слишком большое для отправки: убери часть фото и отправь ещё раз.';
+  }
   return compactResponseError(raw, `Запрос завершился ошибкой: ${status}`);
 }
 
@@ -637,8 +690,13 @@ async function refreshSnapshot(): Promise<void> {
   if (response.status === 401 || response.status === 403) {
     throw new Error('Ссылка устарела или companion перезапустился. Открой QR из окна приложения заново.');
   }
-  if (!response.ok || !isCompanionSnapshotEnvelope(json)) {
-    throw new Error(compactResponseError(raw, `Не удалось получить корректное состояние Companion: ${response.status}`));
+  const invalidStateMessage = `Не удалось получить корректное состояние Companion: ${response.status}`;
+  if (!response.ok) {
+    throw new Error(compactResponseError(raw, invalidStateMessage));
+  }
+  if (!isCompanionSnapshotEnvelope(json)) {
+    // Тело успешного ответа — это сам (битый) snapshot: сырой JSON пользователю не показываем.
+    throw new Error(invalidStateMessage);
   }
 
   await applySnapshot(json);
@@ -648,6 +706,11 @@ async function resyncConnection(options: {
   reconnect?: boolean;
   successStatusText?: string;
 } = {}): Promise<void> {
+  // Без token подключаться некуда: pageshow/online/visibilitychange не должны
+  // объявлять связь активной и стирать ошибку «Ссылка не содержит token».
+  if (!companionAvailable) {
+    return;
+  }
   if (resyncPromise) {
     return resyncPromise;
   }
@@ -878,9 +941,13 @@ function onAiKeydown(event: KeyboardEvent): void {
   }
 }
 
-function openPromptFilePicker(): void {
-  if (actionsDisabled.value) return;
-  promptFileInputRef.value?.click();
+function openPromptFilePicker(fromGallery: boolean): void {
+  if (composerAttachmentsDisabled.value) return;
+  if (promptImages.value.length >= MAX_PROMPT_IMAGES) {
+    setTemporaryStatus(`Можно прикрепить не больше ${MAX_PROMPT_IMAGES} фото за раз`, 'warn', 3200);
+    return;
+  }
+  (fromGallery ? promptGalleryInputRef : promptFileInputRef).value?.click();
 }
 
 function removePromptImage(id: string): void {
@@ -898,6 +965,10 @@ async function onPromptFilesSelected(event: Event): Promise<void> {
   let added = 0;
   let lastError = '';
   for (const file of files) {
+    if (promptImages.value.length >= MAX_PROMPT_IMAGES) {
+      lastError = `Прикреплено максимум ${MAX_PROMPT_IMAGES} фото, остальные пропущены.`;
+      break;
+    }
     try {
       const nextImage = await createPromptImageDraft(file, { prefix: 'img' });
       if (!nextImage) continue;
@@ -1122,6 +1193,7 @@ watch(
 
 onUnmounted(() => {
   componentUnmounted = true;
+  unbindComposerViewport();
   reconnectScheduler.cancel();
   clearStatusTimer();
   cleanupPwaDisplayModeListener();
@@ -1212,22 +1284,44 @@ onUnmounted(() => {
       </section>
 
       <transition name="ask-slide">
-        <section v-if="aiComposerOpen" class="ask-card">
+        <section
+          v-if="aiComposerOpen"
+          class="ask-card"
+          :style="composerStyle"
+        >
           <div class="ask-card-header">
             <div class="summary-label">Сообщение в AI</div>
             <div class="ask-card-header-actions">
               <button
                 class="ask-icon-button"
-                title="Сфоткать или выбрать фото"
-                :disabled="actionsDisabled"
-                @click="openPromptFilePicker"
+                title="Сфоткать"
+                :disabled="composerAttachmentsDisabled"
+                @click="openPromptFilePicker(false)"
               >
                 <span class="mdi mdi-camera-outline" />
+              </button>
+              <button
+                class="ask-icon-button"
+                title="Выбрать из галереи"
+                :disabled="composerAttachmentsDisabled"
+                @click="openPromptFilePicker(true)"
+              >
+                <span class="mdi mdi-image-outline" />
               </button>
               <button class="ask-close-button" title="Скрыть" @click="aiComposerOpen = false">
                 <span class="mdi mdi-close" />
               </button>
             </div>
+          </div>
+
+          <!-- Строка статуса вверху экрана закрыта карточкой: ошибки отправки и связи показываем здесь. -->
+          <div
+            v-if="showTopConnectionStatus"
+            class="ask-status"
+            :class="[connectionState, actionStatusTone && `tone-${actionStatusTone}`]"
+            role="status"
+          >
+            {{ topConnectionText }}
           </div>
 
           <input
@@ -1239,12 +1333,22 @@ onUnmounted(() => {
             multiple
             @change="onPromptFilesSelected"
           />
+          <input
+            ref="promptGalleryInputRef"
+            class="prompt-file-input"
+            type="file"
+            accept="image/*"
+            multiple
+            @change="onPromptFilesSelected"
+          />
 
           <textarea
+            ref="aiTextareaRef"
             v-model="aiQuestion"
             class="ask-textarea"
             placeholder="Напиши сообщение или прикрепи фото. Можно оставить пустым и отправить только фото."
-            :disabled="actionsDisabled"
+            :disabled="composerInputDisabled"
+            :readonly="actionInFlight"
             @keydown="onAiKeydown"
           />
 
@@ -1254,7 +1358,7 @@ onUnmounted(() => {
               <button
                 class="prompt-attachment-remove"
                 title="Удалить фото"
-                :disabled="actionsDisabled"
+                :disabled="composerAttachmentsDisabled"
                 @click="removePromptImage(img.id)"
               >
                 <span class="mdi mdi-close" />
@@ -1423,7 +1527,8 @@ onUnmounted(() => {
   min-width: 0;
 }
 
-.top-connection-status {
+.top-connection-status,
+.ask-status {
   min-height: 16px;
   padding: 0 2px;
   color: rgba(255, 255, 255, 0.58);
@@ -1432,21 +1537,31 @@ onUnmounted(() => {
   letter-spacing: 0.01em;
 }
 
+.ask-status {
+  overflow-wrap: anywhere;
+}
+
 .top-connection-status.reconnecting,
-.top-connection-status.tone-warn {
+.top-connection-status.tone-warn,
+.ask-status.reconnecting,
+.ask-status.tone-warn {
   color: #f4c95d;
 }
 
 .top-connection-status.disconnected,
-.top-connection-status.tone-error {
+.top-connection-status.tone-error,
+.ask-status.disconnected,
+.ask-status.tone-error {
   color: #ff9a8f;
 }
 
-.top-connection-status.tone-ok {
+.top-connection-status.tone-ok,
+.ask-status.tone-ok {
   color: #8ee0a1;
 }
 
-.top-connection-status.tone-pending {
+.top-connection-status.tone-pending,
+.ask-status.tone-pending {
   color: #9cc6ff;
 }
 
@@ -1596,6 +1711,38 @@ onUnmounted(() => {
   animation: dock-spin 1s linear infinite;
 }
 
+/* Светлая тема (на iPhone по умолчанию): цвета статуса и подложка PWA-подсказки рассчитаны на тёмный фон,
+   жёлтое предупреждение и серый текст подсказки на светлом фоне почти не читались.
+   Без :global(): .theme-light стоит на <html>, а Vue 3.5 компилирует ":global(.a) .b" в один ".a". */
+.theme-light .top-connection-status,
+.theme-light .ask-status {
+  color: var(--color-text-secondary);
+}
+
+.theme-light .top-connection-status.reconnecting,
+.theme-light .top-connection-status.tone-warn,
+.theme-light .ask-status.reconnecting,
+.theme-light .ask-status.tone-warn {
+  color: #8a5a00;
+}
+
+.theme-light .top-connection-status.disconnected,
+.theme-light .top-connection-status.tone-error,
+.theme-light .ask-status.disconnected,
+.theme-light .ask-status.tone-error {
+  color: #b42318;
+}
+
+.theme-light .top-connection-status.tone-ok,
+.theme-light .ask-status.tone-ok {
+  color: #1b7a33;
+}
+
+.theme-light .top-connection-status.tone-pending,
+.theme-light .ask-status.tone-pending {
+  color: #1d5fbf;
+}
+
 .summary-label {
   font-size: 12px;
   text-transform: uppercase;
@@ -1605,10 +1752,13 @@ onUnmounted(() => {
 
 .feed-card {
   --chat-empty-font-size: 14px;
-  --chat-message-font-size: 14px;
+  /* Размер текста сообщений на 20% меньше (было 21px), ширина пузырей на 20% уже. */
+  --chat-message-font-size: 17px;
+  --chat-bubble-width-scale: 0.8;
   --chat-message-line-height: 1.44;
-  --chat-code-font-size: 11.5px;
-  --chat-code-line-height: 1.42;
+  /* Код ровно того же размера, что и текст сообщения (решение владельца). */
+  --chat-code-font-size: var(--chat-message-font-size);
+  --chat-code-line-height: var(--chat-message-line-height);
   --chat-inline-code-font-size: 0.9em;
   --chat-sticky-footer-bottom: calc(126px + env(safe-area-inset-bottom, 0px));
   --chat-scroll-padding: 12px 6px 0 2px;
@@ -1629,13 +1779,9 @@ onUnmounted(() => {
 }
 
 .feed-card :deep(.chat-row.incoming .chat-bubble) {
+  /* Размер шрифта общий для всех пузырей (--chat-message-font-size): вопросы не мельче ответов и кода. */
   padding: 10px 12px;
-  font-size: 15px;
-  line-height: 1.45;
-}
-
-.feed-card :deep(.chat-row.focus-copy .chat-bubble) {
-  font-size: 15px;
+  line-height: var(--chat-message-line-height);
 }
 
 .feed-card :deep(.chat-scroll) {
@@ -1653,6 +1799,19 @@ onUnmounted(() => {
   bottom: calc(126px + env(safe-area-inset-bottom, 0px));
 }
 
+.feed-card :deep(.chat-row .chat-bubble:has(.code-block)) {
+  /* Сообщение с кодом занимает всю ширину ленты (как на десктопе), без сужения 80%. */
+  --chat-bubble-width-scale: 1;
+  width: calc(100% - 6px);
+  max-width: calc(100% - 6px);
+}
+
+.feed-card :deep(.chat-markdown .code-block pre),
+.feed-card :deep(.chat-text-highlighted .code-block pre) {
+  /* Внутренние отступы блока кода не больше 2px: и в ответах AI (markdown), и в коде из вопросов/prompt (shiki). */
+  padding: 2px;
+}
+
 .feed-card :deep(.chat-markdown .code-block pre),
 .feed-card :deep(.chat-markdown .code-block pre code),
 .feed-card :deep(.chat-text-highlighted .shiki),
@@ -1667,8 +1826,8 @@ onUnmounted(() => {
 .feed-card :deep(.chat-row.focus-copy .chat-text-highlighted .code-block[data-lang="plaintext"] .shiki span) {
   min-width: 0;
   font-family: inherit;
-  font-size: 15px;
-  line-height: 1.45;
+  font-size: var(--chat-code-font-size);
+  line-height: var(--chat-message-line-height);
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
@@ -1681,7 +1840,20 @@ onUnmounted(() => {
 .ask-card {
   display: grid;
   gap: 10px;
-  margin-bottom: calc(122px + env(safe-area-inset-bottom, 0px));
+  /* Вверху экрана, поверх ленты: клавиатура снизу его не закрывает. */
+  position: fixed;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  left: calc(12px + env(safe-area-inset-left, 0px));
+  right: calc(12px + env(safe-area-inset-right, 0px));
+  width: auto;
+  max-width: 916px;
+  margin: 0 auto;
+  z-index: 30;
+  max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px));
+  max-height: calc(var(--composer-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px));
+  overflow-y: auto;
+  box-sizing: border-box;
+  background: var(--color-bg);
 }
 
 .ask-card-header {
@@ -1834,6 +2006,8 @@ onUnmounted(() => {
   gap: 16px;
   z-index: 40;
   pointer-events: none;
+  /* Фон дока тёмный в обеих темах: в светлой теме --color-text тёмный, и иконки сливались с фоном. */
+  --color-text: #ffffff;
 }
 
 .controls-side,
@@ -1976,6 +2150,8 @@ onUnmounted(() => {
 }
 
 .dock-record-button {
+  /* На самых узких экранах сжимаются соседние кнопки, круглая кнопка записи остаётся кругом. */
+  flex-shrink: 0;
   width: 68px;
   height: 68px;
   border-radius: 999px;
@@ -2011,13 +2187,15 @@ onUnmounted(() => {
 
 .ask-slide-enter-active,
 .ask-slide-leave-active {
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  /* transform занят сдвигом под клавиатуру (visualViewport.offsetTop) и анимироваться не должен,
+     иначе в первые 180 мс после открытия карточка «плывёт» вслед за клавиатурой. Выезд делаем через margin-top. */
+  transition: opacity 0.18s ease, margin-top 0.18s ease;
 }
 
 .ask-slide-enter-from,
 .ask-slide-leave-to {
   opacity: 0;
-  transform: translateY(10px);
+  margin-top: -10px;
 }
 
 @media (max-width: 720px) {
@@ -2041,9 +2219,11 @@ onUnmounted(() => {
     position: fixed;
     left: calc(10px + env(safe-area-inset-left, 0px));
     right: calc(10px + env(safe-area-inset-right, 0px));
-    bottom: calc(110px + env(safe-area-inset-bottom, 0px));
-    max-height: calc(100vh - 132px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-    max-height: calc(100dvh - 132px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    top: calc(8px + env(safe-area-inset-top, 0px));
+    bottom: auto;
+    max-height: calc(100vh - 24px - env(safe-area-inset-top, 0px));
+    max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px));
+    max-height: calc(var(--composer-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px));
     margin-bottom: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -2075,15 +2255,17 @@ onUnmounted(() => {
 
   .controls-dock {
     width: calc(100vw - 16px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
-    gap: 14px;
+    gap: 8px;
   }
 
   .ask-card {
     left: calc(8px + env(safe-area-inset-left, 0px));
     right: calc(8px + env(safe-area-inset-right, 0px));
-    bottom: calc(134px + env(safe-area-inset-bottom, 0px));
-    max-height: calc(100vh - 156px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-    max-height: calc(100dvh - 156px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    top: calc(8px + env(safe-area-inset-top, 0px));
+    bottom: auto;
+    max-height: calc(100vh - 24px - env(safe-area-inset-top, 0px));
+    max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px));
+    max-height: calc(var(--composer-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px));
   }
 
   .controls-side {
@@ -2093,7 +2275,12 @@ onUnmounted(() => {
   }
 
   .controls-center {
-    gap: 20px;
+    /* Группа занимает остаток ширины дока и раздвигает кнопки сама: с фиксированным gap 20px
+       она была шире экрана 320-414px, и кнопка сообщения справа уходила за край. */
+    flex: 1 1 auto;
+    min-width: 0;
+    justify-content: space-between;
+    gap: 4px;
     padding: 8px 10px;
   }
 
@@ -2126,16 +2313,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 360px) {
-  .controls-dock {
-    gap: 8px;
-  }
-
-  .ask-card {
-    bottom: calc(126px + env(safe-area-inset-bottom, 0px));
-    max-height: calc(100vh - 148px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-    max-height: calc(100dvh - 148px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-  }
-
   .controls-side {
     gap: 10px;
     padding: 7px;

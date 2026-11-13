@@ -1,0 +1,20 @@
+{
+  "app": {
+    "security": {
+      "capabilities": [
+      "app-wide",
+      "auth-window",
+      "default",
+      "demo-window",
+      "main-window",
+      "profile-window",
+      "settings-window",
+      {
+        "identifier": "wdio-test",
+        "windows": ["main", "auth", "profile", "settings", "demo-*"],
+        "permissions": ["wdio:default", "wdio-webdriver:default"]
+      }
+      ]
+    }
+  }
+}

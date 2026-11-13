@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { isTauriAvailable } from '../utils/tauri';
 import type { CompanionSnapshotData } from '@/windowing/stateSync';
 import { i18n } from '../i18n';
+import { useSttConfigStore } from './sttConfig';
 import { appendTranscriptText, mergeTranscriptText } from '../utils/transcriptionText';
 import { api } from '../features/auth/infrastructure/api/apiClient';
 import { useAuthStore } from '../features/auth/store/authStore';
@@ -13,6 +14,7 @@ import { getAuthContainer } from '../features/auth/infrastructure/di/authContain
 import { canRefreshSession, isAccessTokenExpired } from '../features/auth/domain/entities/Session';
 import {
   RecordingStatus,
+  isLocalUtteranceProvider,
   ConnectionQuality,
   PartialTranscriptionPayload,
   FinalTranscriptionPayload,
@@ -508,7 +510,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     // Во время Starting/Recording показываем пустую строку или "Listening..."
     if (status.value === RecordingStatus.Starting) {
-      return t('main.connecting');
+      return t(isLocalUtteranceProvider(useSttConfigStore().provider)
+        ? 'main.loadingLocalModel'
+        : 'main.connecting');
     }
 
     if (status.value === RecordingStatus.Recording) {
@@ -1534,6 +1538,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   async function forceLogoutFromSttAuthError(): Promise<void> {
+    // Local access has no backend session to clear. Keep the window usable and
+    // surface the provider error instead of forcing the login flow.
+    if (authStore.localAccess) {
+      status.value = RecordingStatus.Error;
+      errorType.value = 'authentication';
+      error.value = i18n.global.t('errors.authentication');
+      return;
+    }
     if (isForcingLogout) return;
     isForcingLogout = true;
 
@@ -1564,6 +1576,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   async function tryRefreshAuthForStt(): Promise<boolean> {
+    if (authStore.localAccess) return false;
     if (refreshAuthForSttPromise) return refreshAuthForSttPromise;
 
     refreshAuthForSttPromise = (async () => {

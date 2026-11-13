@@ -76,6 +76,32 @@ describe('buildCompanionConversationFeedMessages', () => {
     ]);
   });
 
+  it('keeps several answers to the same question in creation order', () => {
+    const haiku = (id: string, seq: number, createdAtMs: number) => ({
+      id,
+      seq,
+      kind: 'haiku' as const,
+      role: 'outgoing' as const,
+      status: 'final',
+      text: id,
+      createdAtMs,
+      insertAfterId: 'stt-1',
+    });
+    const snapshot = makeSnapshot({
+      timeline: [
+        { id: 'stt-1', seq: 1, kind: 'stt', role: 'incoming', status: 'final', text: 'Question', createdAtMs: 100 },
+        haiku('haiku-1', 2, 110),
+        haiku('haiku-2', 3, 120),
+      ],
+    });
+
+    expect(buildCompanionConversationFeedMessages(snapshot).map((message) => message.id)).toEqual([
+      'stt-1',
+      'haiku-1',
+      'haiku-2',
+    ]);
+  });
+
   it('adds live partial entries after durable base messages', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-23T10:00:00Z'));

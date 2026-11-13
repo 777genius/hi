@@ -85,7 +85,7 @@ Usage:
   pnpm e2e:memory-canary -- --api-url https://api.voicetext.site
 
 What it checks:
-  - calls legacy /api/v1/interview-memory/* or Memory Platform /v1/*;
+  - calls legacy /api/v1/interview-memory/* or Memo Stack /v1/*;
   - creates an isolated synthetic memory session;
   - ingests deterministic code, voice question, constraint, filler, prompt and final AI-answer events;
   - verifies /context retrieves required early and late evidence under budget;
@@ -96,8 +96,8 @@ What it checks:
 Useful flags:
   --api-url <url>             Backend URL, default VITE_API_URL/INTERVIEW_MEMORY_API_URL/https://api.voicetext.site.
   --api-variant <name>        legacy or platform, default INTERVIEW_MEMORY_API_VARIANT/legacy.
-  --space-slug <slug>         Memory Platform space slug, default hackinterview.
-  --profile-ref <ref>         Memory Platform profile external ref, default default.
+  --space-slug <slug>         Memo Stack space slug, default hackinterview.
+  --profile-ref <ref>         Memo Stack profile external ref, default default.
   --auth-token <token>        Raw bearer token.
   --auth-token-file <path>    Raw token or auth_store.json.
   --auth-store-path <path>    Native Tauri auth store, default ~/Library/Application Support/HackInterview/auth_store.json.
@@ -114,7 +114,12 @@ function normalizeBaseUrl(rawUrl) {
 
 function normalizeApiVariant(value) {
   const normalized = String(value || 'legacy').trim().toLowerCase();
-  if (['platform', 'v1', 'memory_platform', 'memory-platform'].includes(normalized)) return 'platform';
+  if (
+    ['platform', 'v1', 'memo_stack', 'memo-stack', 'memory_platform', 'memory-platform'].includes(
+      normalized,
+    )
+  )
+    return 'platform';
   if (['legacy', 'compat', 'compatibility'].includes(normalized)) return 'legacy';
   throw new Error(`Unknown memory api variant: ${value}`);
 }

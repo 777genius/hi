@@ -4,11 +4,16 @@ import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 
-export const DEFAULT_MEMORY_PLATFORM_API_URL = 'http://127.0.0.1:7788';
+export const DEFAULT_MEMO_STACK_API_URL = 'http://127.0.0.1:7788';
 
 export function normalizeApiVariant(value) {
   const normalized = String(value || 'legacy').trim().toLowerCase();
-  if (['platform', 'v1', 'memory_platform', 'memory-platform'].includes(normalized)) return 'platform';
+  if (
+    ['platform', 'v1', 'memo_stack', 'memo-stack', 'memory_platform', 'memory-platform'].includes(
+      normalized,
+    )
+  )
+    return 'platform';
   if (['legacy', 'compat', 'compatibility'].includes(normalized)) return 'legacy';
   throw new Error(`Unknown memory api variant: ${value}`);
 }
@@ -17,7 +22,7 @@ export const DEFAULT_MEMORY_API_URL =
   process.env.INTERVIEW_MEMORY_E2E_API_URL ||
   process.env.INTERVIEW_MEMORY_API_URL ||
   (normalizeApiVariant(process.env.INTERVIEW_MEMORY_API_VARIANT || 'legacy') === 'platform'
-    ? DEFAULT_MEMORY_PLATFORM_API_URL
+    ? DEFAULT_MEMO_STACK_API_URL
     : '') ||
   process.env.VITE_API_URL ||
   'https://api.voicetext.site';

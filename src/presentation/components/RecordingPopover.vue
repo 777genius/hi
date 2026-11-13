@@ -32,6 +32,7 @@ import {
   type CodeExplainDonePayload,
   type CodeExplainErrorPayload,
 } from '@/types';
+import { useTestInterviewer } from '@/composables/useTestInterviewer';
 import { useAudioPermissions } from '@/composables/useAudioPermissions';
 import {
   CMD_COMPANION_CLEAR_CONTEXT,
@@ -91,6 +92,11 @@ const webSearchToggleTooltip = computed(() =>
 );
 
 const audioPermissions = useAudioPermissions();
+const testInterviewer = useTestInterviewer();
+function onTestInterviewerClick(e: MouseEvent) {
+  if (e.shiftKey) void testInterviewer.reset();
+  else void testInterviewer.askNext();
+}
 
 const shouldShowSystemAudioPermissionWarning = computed(() => {
   return !audioPermissions.systemAudioGranted.value;
@@ -118,6 +124,17 @@ let accessibilityPermissionRefreshTimer: number | null = null;
 const shouldShowAccessibilityPermissionBanner = computed(() => {
   return isMac && !hasAccessibilityPermission.value;
 });
+
+// Статус хоткеев копирования из редактора показываем, пока лента пуста: сразу видно, работают ли они.
+const hotkeyStatusLine = computed(() => {
+  if (!isMac) return '';
+  return hasAccessibilityPermission.value
+    ? '✓ Ctrl+Shift+A и Ctrl+Shift+S готовы: выдели текст в редакторе и нажми'
+    : '✗ Ctrl+Shift+A и Ctrl+Shift+S не работают: нужен доступ Accessibility для Telegram';
+});
+const emptyFeedText = computed(() =>
+  [store.displayText, hotkeyStatusLine.value].filter(Boolean).join('\n\n')
+);
 
 const accessibilityPermissionTooltip = computed(() => {
   return hasAccessibilityPermission.value
@@ -288,7 +305,7 @@ const companionStatusLine = computed(() => {
 // Ref для области чата (для автоскролла)
 const chatScrollRef = computed(() => conversationFeedRef.value?.scrollEl ?? null);
 
-const CODE_EXPLAIN_SYSTEM_PROMPT = `Ты — ассистент на техническом собеседовании. Отвечай по-русски.
+const CODE_EXPLAIN_SYSTEM_PROMPT = `Ты — ассистент на техническом собеседовании. Всегда отвечай по-русски, даже если вопрос задан на украинском или английском. Технические термины оставляй на английском.
 
 Тебе дают:
 - "Выделенный фрагмент" — текст или код, на который нужно ответить/объяснить.
@@ -1205,6 +1222,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  stopHaikuWaitTimer();
   store.cleanup();
   chatStore.cleanup();
   appConfigStore.stopSync();
@@ -1355,6 +1373,25 @@ const minimizeWindow = async () => {
 };
 
 const haikuHoverArmed = ref(true);
+const haikuStopInFlight = ref(false);
+const haikuRequestPending = ref(false);
+const haikuWaitSeconds = ref(0);
+let haikuWaitTimer: ReturnType<typeof setInterval> | null = null;
+let haikuWaitStartedAt = 0;
+
+function stopHaikuWaitTimer(): void {
+  if (haikuWaitTimer) clearInterval(haikuWaitTimer);
+  haikuWaitTimer = null;
+}
+
+function startHaikuWaitTimer(): void {
+  stopHaikuWaitTimer();
+  haikuWaitStartedAt = Date.now();
+  haikuWaitSeconds.value = 0;
+  haikuWaitTimer = setInterval(() => {
+    haikuWaitSeconds.value = Math.floor((Date.now() - haikuWaitStartedAt) / 1000);
+  }, 1000);
+}
 
 const onHaikuHover = async () => {
   try {
@@ -1386,17 +1423,26 @@ const onHaikuPointerEnter = async () => {
   // Запускаем только при "входе извне". Если курсор уже был над кнопкой,
   // или мы только что отменили запрос — не триггерим повторно.
   if (!haikuHoverArmed.value) return;
-  if (chatStore.isHaikuStreaming) return;
+  if (chatStore.isHaikuStreaming || haikuRequestPending.value) return;
   haikuHoverArmed.value = false;
-  await onHaikuHover();
+  haikuRequestPending.value = true;
+  startHaikuWaitTimer();
+  try {
+    await onHaikuHover();
+  } finally {
+    haikuRequestPending.value = false;
+    if (!chatStore.isHaikuStreaming) stopHaikuWaitTimer();
+  }
 };
 
 const onHaikuPointerLeave = () => {
   haikuHoverArmed.value = true;
 };
 
-const onHaikuClick = async () => {
+const stopHaikuGeneration = async () => {
   if (!chatStore.isHaikuStreaming) return;
+  if (haikuStopInFlight.value) return;
+  haikuStopInFlight.value = true;
   chatStore.cancelActiveHaikuStreams();
   try {
     const response = await invoke<CompanionActionResponse>(CMD_CANCEL_HAIKU_STREAMS);
@@ -1409,6 +1455,24 @@ const onHaikuClick = async () => {
   // Требуем реальный выход курсора, чтобы следующий запуск был только "снаружи".
   haikuHoverArmed.value = false;
 };
+
+const onHaikuStopHover = async () => {
+  await stopHaikuGeneration();
+};
+
+const onHaikuStopClick = async () => {
+  await stopHaikuGeneration();
+};
+
+watch(
+  () => chatStore.isHaikuStreaming,
+  (streaming) => {
+    if (!streaming) {
+      haikuStopInFlight.value = false;
+      if (!haikuRequestPending.value) stopHaikuWaitTimer();
+    }
+  }
+);
 
 const onMicToggleClick = async () => {
   try {
@@ -1565,8 +1629,17 @@ const onChatMouseDown = (e: MouseEvent) => {
         class="permission-warning-overlay no-drag"
       >
         <div class="permission-warning-card">
-          <div class="permission-warning-title">
-            Ожидаем разрешения
+          <div class="permission-warning-heading">
+            <div class="permission-warning-title">Ожидаем разрешения</div>
+            <button
+              class="permission-warning-minimize no-drag"
+              type="button"
+              :aria-label="t('main.minimize')"
+              :title="t('main.minimize')"
+              @click="minimizeWindow"
+            >
+              <span class="mdi mdi-window-minimize" aria-hidden="true" />
+            </button>
           </div>
 
           <div v-if="shouldShowSystemAudioPermissionWarning" class="permission-warning-item">
@@ -1594,6 +1667,13 @@ const onChatMouseDown = (e: MouseEvent) => {
             >
               Запросить доступ
             </button>
+            <button
+              v-if="shouldShowMicrophonePermissionWarning"
+              class="permission-warning-btn permission-warning-btn-secondary"
+              @click="audioPermissions.requestMicrophonePermission"
+            >
+              Запросить микрофон
+            </button>
           </div>
         </div>
       </div>
@@ -1606,6 +1686,27 @@ const onChatMouseDown = (e: MouseEvent) => {
           <UpdateIndicator class="no-drag" @click="showUpdateDialog = true" />
         </div>
         <div class="header-right">
+          <v-tooltip
+            v-if="testInterviewer.enabled.value"
+            :text="testInterviewer.lastQuestion.value
+              ? `Следующий вопрос (озвучен ${testInterviewer.lastQuestion.value.number}/${testInterviewer.total.value}). Shift+клик: сначала`
+              : 'Тест-интервьюер: озвучить первый вопрос'"
+            location="bottom"
+          >
+            <template #activator="{ props: tp }">
+              <button
+                v-bind="tp"
+                class="minimize-button test-interviewer-button no-drag"
+                :disabled="testInterviewer.busy.value"
+                @click="onTestInterviewerClick"
+              >
+                <span class="mdi mdi-account-voice"></span>
+                <span v-if="testInterviewer.lastQuestion.value" class="test-interviewer-counter">
+                  {{ testInterviewer.lastQuestion.value.number }}/{{ testInterviewer.total.value }}
+                </span>
+              </button>
+            </template>
+          </v-tooltip>
           <v-tooltip :text="t('main.minimize')" location="bottom">
             <template #activator="{ props: tp }">
               <button v-bind="tp" class="minimize-button no-drag" @click="minimizeWindow">
@@ -1843,7 +1944,8 @@ const onChatMouseDown = (e: MouseEvent) => {
         <ConversationFeed
           ref="conversationFeedRef"
           :messages="chatStore.messages"
-          :empty-text="store.displayText"
+          :assistant-streaming="chatStore.isHaikuStreaming"
+          :empty-text="emptyFeedText"
           :selecting="lassoActive"
           :editing-message-id="editingMessageId"
           :anchor-mode="chatStore.anchorMode"
@@ -2038,25 +2140,45 @@ const onChatMouseDown = (e: MouseEvent) => {
               </button>
             </template>
           </v-tooltip>
-          <v-tooltip :text="chatStore.isHaikuStreaming ? 'Отменить генерацию' : 'Отправить в AI'" location="top">
-            <template #activator="{ props: tp }">
-              <button
-                v-bind="tp"
-                class="haiku-button no-drag"
-                :class="{ loading: chatStore.isHaikuStreaming }"
-                :disabled="!chatStore.canRequestHaiku && !chatStore.isHaikuStreaming"
-                @pointerenter="onHaikuPointerEnter"
-                @pointerleave="onHaikuPointerLeave"
-                @mouseenter="onHaikuPointerEnter"
-                @mouseleave="onHaikuPointerLeave"
-                @mousemove="onHaikuPointerEnter"
-                @click="onHaikuClick"
-              >
-                <span v-if="chatStore.isHaikuStreaming" class="haiku-spinner" />
-                <span v-else class="mdi mdi-robot haiku-icon" />
-              </button>
-            </template>
-          </v-tooltip>
+          <div class="haiku-control-group">
+            <span v-if="haikuRequestPending || chatStore.isHaikuStreaming" class="haiku-wait-label">
+              {{ haikuRequestPending ? 'Отправляю…' : `AI отвечает · ${haikuWaitSeconds} с` }}
+            </span>
+            <v-tooltip :text="chatStore.isHaikuStreaming ? 'Генерация ответа...' : 'Отправить в AI'" location="top">
+              <template #activator="{ props: tp }">
+                <button
+                  v-bind="tp"
+                  class="haiku-button no-drag"
+                  data-testid="haiku-generate-button"
+                  :class="{ loading: chatStore.isHaikuStreaming }"
+                  :disabled="!chatStore.canRequestHaiku && !chatStore.isHaikuStreaming"
+                  @pointerenter="onHaikuPointerEnter"
+                  @pointerleave="onHaikuPointerLeave"
+                  @mouseenter="onHaikuPointerEnter"
+                  @mouseleave="onHaikuPointerLeave"
+                  @mousemove="onHaikuPointerEnter"
+                >
+                  <span v-if="chatStore.isHaikuStreaming" class="haiku-spinner" />
+                  <span v-else class="mdi mdi-robot haiku-icon" />
+                </button>
+              </template>
+            </v-tooltip>
+            <v-tooltip v-if="chatStore.isHaikuStreaming" text="Наведи, чтобы остановить ответ" location="top">
+              <template #activator="{ props: tp }">
+                <button
+                  v-bind="tp"
+                  class="haiku-stop-button no-drag"
+                  data-testid="haiku-stop-button"
+                  :disabled="haikuStopInFlight"
+                  @pointerenter="onHaikuStopHover"
+                  @mouseenter="onHaikuStopHover"
+                  @click.stop="onHaikuStopClick"
+                >
+                  <span class="mdi mdi-stop"></span>
+                </button>
+              </template>
+            </v-tooltip>
+          </div>
         </div>
         <div class="controls-right no-drag">
           <v-tooltip v-if="chatStore.selectedCount > 0" text="Снять выделение" location="top">
@@ -2180,7 +2302,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 .permission-warning-overlay {
   position: absolute;
-  inset: 0;
+  inset: 64px 0 0;
   z-index: 20;
   display: flex;
   align-items: center;
@@ -2198,7 +2320,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
 }
 
-::global(.theme-light) .permission-warning-card {
+.theme-light .permission-warning-card {
   background: rgba(255, 255, 255, 0.98);
   border: 1px solid rgba(0, 0, 0, 0.12);
 }
@@ -2207,7 +2329,32 @@ const onChatMouseDown = (e: MouseEvent) => {
   font-size: 15px;
   font-weight: 700;
   color: var(--color-text);
+}
+
+.permission-warning-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   margin-bottom: 10px;
+}
+
+.permission-warning-minimize {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.permission-warning-minimize:hover {
+  background: rgba(128, 128, 128, 0.2);
 }
 
 .permission-warning-item {
@@ -2220,7 +2367,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   margin-bottom: 8px;
 }
 
-::global(.theme-light) .permission-warning-item {
+.theme-light .permission-warning-item {
   background: rgba(0, 0, 0, 0.04);
 }
 
@@ -2267,11 +2414,11 @@ const onChatMouseDown = (e: MouseEvent) => {
   background: rgba(255, 255, 255, 0.08);
 }
 
-:global(.theme-light) .popover-container {
+.theme-light .popover-container {
   background: transparent;
 }
 
-:global(.theme-light) .popover {
+.theme-light .popover {
   background: #ffffff;
   border: 1px solid rgba(0, 0, 0, 0.08);
 }
@@ -2329,7 +2476,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   cursor: default;
 }
 
-:global(.theme-light) .header {
+.theme-light .header {
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 }
 
@@ -2350,7 +2497,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   color: var(--color-text);
 }
 
-:global(.theme-light) .accessibility-permission-banner {
+.theme-light .accessibility-permission-banner {
   background: rgba(245, 158, 11, 0.14);
   border-color: rgba(180, 83, 9, 0.28);
 }
@@ -2458,6 +2605,27 @@ const onChatMouseDown = (e: MouseEvent) => {
   flex-shrink: 0;
 }
 
+.haiku-control-group {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.haiku-wait-label {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(20, 20, 24, 0.9);
+  color: #fff;
+  font-size: 11px;
+  pointer-events: none;
+}
+
 .haiku-button {
   width: 48px;
   height: 48px;
@@ -2491,6 +2659,39 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 .haiku-button.loading {
   background: rgba(244, 67, 54, 0.18);
+}
+
+.haiku-stop-button {
+  position: absolute;
+  left: calc(100% + 5px);
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(244, 67, 54, 0.62);
+  background: rgba(244, 67, 54, 0.94);
+  color: rgba(255, 255, 255, 0.96);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  opacity: 0.94;
+  transform: translateY(-50%);
+  transition: opacity 0.12s ease, transform 0.12s ease, background 0.12s ease;
+  z-index: 3;
+}
+
+.haiku-stop-button:hover:not(:disabled) {
+  opacity: 1;
+  background: rgba(220, 38, 38, 1);
+  transform: translateY(-50%) scale(1.08);
+}
+
+.haiku-stop-button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .haiku-icon {
@@ -2568,6 +2769,25 @@ const onChatMouseDown = (e: MouseEvent) => {
   box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.2), 0 0 16px rgba(20, 184, 166, 0.22);
 }
 
+.test-interviewer-button {
+  position: relative;
+  color: rgba(45, 212, 191, 0.95);
+}
+
+.test-interviewer-button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.test-interviewer-counter {
+  position: absolute;
+  right: 2px;
+  bottom: 1px;
+  font-size: 10px;
+  line-height: 1;
+  color: rgba(240, 253, 250, 0.95);
+}
+
 @keyframes haiku-spin {
   to {
     transform: rotate(360deg);
@@ -2620,15 +2840,15 @@ const onChatMouseDown = (e: MouseEvent) => {
 }
 
 
-:global(.theme-light) .minimize-button:hover,
-:global(.theme-light) .companion-button:hover,
-:global(.theme-light) .accessibility-button:hover,
-:global(.theme-light) .settings-button:hover,
-:global(.theme-light) .profile-button:hover {
+.theme-light .minimize-button:hover,
+.theme-light .companion-button:hover,
+.theme-light .accessibility-button:hover,
+.theme-light .settings-button:hover,
+.theme-light .profile-button:hover {
   background: rgba(0, 0, 0, 0.06);
 }
 
-:global(.theme-light) .minimize-button {
+.theme-light .minimize-button {
   color: #1f2937;
 }
 
@@ -3342,12 +3562,12 @@ const onChatMouseDown = (e: MouseEvent) => {
   display: none;
 }
 
-:global(.theme-light) .footer {
+.theme-light .footer {
   position: relative;
   border-top: none;
 }
 
-:global(.theme-light) .footer::before {
+.theme-light .footer::before {
   content: '';
   position: absolute;
   left: 0;
@@ -3468,6 +3688,14 @@ const onChatMouseDown = (e: MouseEvent) => {
     height: 28px;
   }
 
+  .haiku-stop-button {
+    left: calc(100% + 4px);
+    width: 22px;
+    height: 22px;
+    border-radius: 7px;
+    font-size: 13px;
+  }
+
   .record-button {
     width: 58px;
     height: 58px;
@@ -3542,6 +3770,14 @@ const onChatMouseDown = (e: MouseEvent) => {
     font-size: 17px;
   }
 
+  .haiku-stop-button {
+    left: calc(100% + 3px);
+    width: 20px;
+    height: 20px;
+    border-radius: 7px;
+    font-size: 12px;
+  }
+
   .record-button {
     width: 54px;
     height: 54px;
@@ -3603,8 +3839,8 @@ const onChatMouseDown = (e: MouseEvent) => {
   }
 }
 
-::global(.theme-light) .prompt-button:hover,
-::global(.theme-light) .context-clear-button:hover {
+.theme-light .prompt-button:hover,
+.theme-light .context-clear-button:hover {
   background: rgba(0, 0, 0, 0.06);
 }
 </style>

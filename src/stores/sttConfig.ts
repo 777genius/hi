@@ -15,6 +15,7 @@ export const useSttConfigStore = defineStore('sttConfig', () => {
   const isLoaded = ref(false);
   const isSyncing = ref(false);
 
+  // Placeholder until the backend snapshot arrives; Rust decides the real default per platform.
   const provider = ref<SttProviderType>(SttProviderType.Backend);
   const language = ref('ru');
   const autoDetectLanguage = ref(false);

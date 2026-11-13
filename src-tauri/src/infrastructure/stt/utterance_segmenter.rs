@@ -8,14 +8,21 @@ use crate::infrastructure::audio::{VadProcessor, VadResult};
 const SAMPLE_RATE: usize = 16_000;
 const FRAME_SAMPLES: usize = 480; // 30 ms
 const FRAME_MS: usize = 30;
-const SILENCE_MS: usize = 700;
+const SILENCE_MS: usize = 450;
 const PRE_ROLL_MS: usize = 150;
 const TAIL_MS: usize = 150;
-const MAX_UTTERANCE_MS: usize = 20_000;
+const MAX_UTTERANCE_MS: usize = 6_000;
+const PREVIEW_INTERVAL_MS: usize = 2_000;
+/// Shortest useful speculative pause: the kept tail. The utterance is cut to the
+/// same shape as the final one, so any pause >= the tail yields the exact audio
+/// the final will have if the silence goes on.
+const SPECULATIVE_QUIET_FRAMES: usize = TAIL_MS / FRAME_MS;
 const MIN_VOICED_FRAMES: usize = 3; // reject clicks / extremely short noise
 const PRE_ROLL_SAMPLES: usize = SAMPLE_RATE * PRE_ROLL_MS / 1000;
 const TAIL_SAMPLES: usize = SAMPLE_RATE * TAIL_MS / 1000;
+#[cfg(test)]
 const MAX_UTTERANCE_SAMPLES: usize = SAMPLE_RATE * MAX_UTTERANCE_MS / 1000;
+const PREVIEW_INTERVAL_SAMPLES: usize = SAMPLE_RATE * PREVIEW_INTERVAL_MS / 1000;
 const SILENCE_FRAMES: usize = SILENCE_MS.div_ceil(FRAME_MS);
 
 #[derive(Debug)]
@@ -23,6 +30,10 @@ pub struct Utterance {
     pub pcm: Vec<i16>,
     pub start_sample: u64,
     pub captured_at_ms: i64,
+    pub is_final: bool,
+    /// Early decode of the phrase at a short pause: identical audio to the final
+    /// utterance when speech does not resume, so the decoder result can be reused.
+    pub speculative: bool,
 }
 
 pub struct UtteranceSegmenter {
@@ -34,10 +45,27 @@ pub struct UtteranceSegmenter {
     utterance_start: u64,
     voiced_frames: usize,
     quiet_frames: usize,
+    last_preview_samples: usize,
+    max_utterance_samples: usize,
+    /// Pause (in frames) after which a speculative decode is requested; `None` = never.
+    speculative_quiet_frames: Option<usize>,
 }
 
 impl UtteranceSegmenter {
     pub fn new() -> SttResult<Self> {
+        Self::with_max_utterance_ms(MAX_UTTERANCE_MS)
+    }
+
+    /// A phrase longer than this is cut and finalized mid-sentence. Models whose
+    /// cost does not grow with length (Whisper's fixed 30 s window) can afford a
+    /// much longer limit and avoid splitting a question in two.
+    pub fn with_max_utterance_ms(max_ms: usize) -> SttResult<Self> {
+        Self::with_options(max_ms, Some(SPECULATIVE_QUIET_FRAMES * FRAME_MS))
+    }
+
+    /// `speculative_pause_ms`: request an early decode after this much silence
+    /// (clamped to [tail, endpoint silence)); `None` disables speculation.
+    pub fn with_options(max_ms: usize, speculative_pause_ms: Option<usize>) -> SttResult<Self> {
         Ok(Self {
             vad: VadProcessor::new(Some(SILENCE_MS as u64), None)?,
             pending_frame: Vec::with_capacity(FRAME_SAMPLES * 2),
@@ -47,6 +75,11 @@ impl UtteranceSegmenter {
             utterance_start: 0,
             voiced_frames: 0,
             quiet_frames: 0,
+            last_preview_samples: 0,
+            max_utterance_samples: SAMPLE_RATE * max_ms / 1000,
+            speculative_quiet_frames: speculative_pause_ms.map(|ms| {
+                ms.div_ceil(FRAME_MS).clamp(SPECULATIVE_QUIET_FRAMES, SILENCE_FRAMES - 1)
+            }),
         })
     }
 
@@ -70,6 +103,10 @@ impl UtteranceSegmenter {
                 matches!(state, VadResult::Speech),
             ) {
                 result.push(utterance);
+            } else if matches!(state, VadResult::Speech) {
+                if let Some(preview) = self.preview() {
+                    result.push(preview);
+                }
             }
         }
         if complete_frames > 0 {
@@ -89,6 +126,7 @@ impl UtteranceSegmenter {
                 self.active.extend_from_slice(frame);
                 self.voiced_frames = 1;
                 self.quiet_frames = 0;
+                self.last_preview_samples = 0;
             } else {
                 self.pre_roll.extend(frame.iter().copied());
                 while self.pre_roll.len() > PRE_ROLL_SAMPLES {
@@ -109,17 +147,50 @@ impl UtteranceSegmenter {
         if self.quiet_frames >= SILENCE_FRAMES {
             return self.finish_utterance(true);
         }
-        if self.active.len() >= MAX_UTTERANCE_SAMPLES {
+        if self.active.len() >= self.max_utterance_samples {
             // Bounded memory if a speaker does not pause for a long time.
             return self.finish_utterance(false);
         }
+        if !voiced
+            && self.speculative_quiet_frames == Some(self.quiet_frames)
+            && self.voiced_frames >= MIN_VOICED_FRAMES
+        {
+            // Same shape as the final utterance: speech plus the kept tail.
+            let mut pcm = self.active.clone();
+            let surplus = (self.quiet_frames * FRAME_SAMPLES).saturating_sub(TAIL_SAMPLES);
+            pcm.truncate(pcm.len().saturating_sub(surplus));
+            return Some(Utterance {
+                pcm,
+                start_sample: self.utterance_start,
+                captured_at_ms: chrono::Utc::now().timestamp_millis(),
+                is_final: false,
+                speculative: true,
+            });
+        }
         None
+    }
+
+    fn preview(&mut self) -> Option<Utterance> {
+        if self.active.len().saturating_sub(self.last_preview_samples)
+            < PREVIEW_INTERVAL_SAMPLES
+        {
+            return None;
+        }
+        self.last_preview_samples = self.active.len();
+        Some(Utterance {
+            pcm: self.active.clone(),
+            start_sample: self.utterance_start,
+            captured_at_ms: chrono::Utc::now().timestamp_millis(),
+            is_final: false,
+            speculative: false,
+        })
     }
 
     fn finish_utterance(&mut self, trim_silence: bool) -> Option<Utterance> {
         let mut pcm = std::mem::take(&mut self.active);
         let voiced_frames = std::mem::take(&mut self.voiced_frames);
         let quiet_frames = std::mem::take(&mut self.quiet_frames);
+        self.last_preview_samples = 0;
         self.pre_roll.clear();
 
         if voiced_frames < MIN_VOICED_FRAMES {
@@ -140,6 +211,8 @@ impl UtteranceSegmenter {
             pcm,
             start_sample: self.utterance_start,
             captured_at_ms: chrono::Utc::now().timestamp_millis(),
+            is_final: true,
+            speculative: false,
         })
     }
 
@@ -171,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn ends_at_720_ms_and_keeps_preroll_and_150_ms_tail() {
+    fn ends_after_short_pause_and_keeps_preroll_and_150_ms_tail() {
         let mut s = UtteranceSegmenter::new().unwrap();
         for _ in 0..5 {
             s.accept_frame(&QUIET, false);
@@ -180,7 +253,8 @@ mod tests {
             s.accept_frame(&FRAME, true);
         }
         for _ in 0..SILENCE_FRAMES - 1 {
-            assert!(s.accept_frame(&QUIET, false).is_none());
+            // Only the early speculative decode may appear before the long pause.
+            assert!(s.accept_frame(&QUIET, false).map_or(true, |u| u.speculative));
         }
         let u = s.accept_frame(&QUIET, false).expect("final at pause");
         assert_eq!(u.start_sample, 0);
@@ -197,10 +271,125 @@ mod tests {
                 s.accept_frame(&FRAME, true);
             }
             for _ in 0..SILENCE_FRAMES {
-                finals += usize::from(s.accept_frame(&QUIET, false).is_some());
+                finals += usize::from(s.accept_frame(&QUIET, false).is_some_and(|u| u.is_final));
             }
         }
         assert_eq!(finals, 3);
+    }
+
+    #[test]
+    fn speculative_utterance_at_short_pause_has_exactly_the_final_audio() {
+        let mut s = UtteranceSegmenter::new().unwrap();
+        for _ in 0..5 {
+            s.accept_frame(&QUIET, false);
+        }
+        for _ in 0..10 {
+            s.accept_frame(&FRAME, true);
+        }
+        let mut speculative = None;
+        for _ in 0..SPECULATIVE_QUIET_FRAMES {
+            if let Some(u) = s.accept_frame(&QUIET, false) {
+                speculative = Some(u);
+            }
+        }
+        let speculative = speculative.expect("speculative utterance at the short pause");
+        assert!(speculative.speculative && !speculative.is_final);
+        let mut final_utterance = None;
+        for _ in SPECULATIVE_QUIET_FRAMES..SILENCE_FRAMES {
+            if let Some(u) = s.accept_frame(&QUIET, false) {
+                assert!(!u.speculative, "only one speculation per pause");
+                final_utterance = Some(u);
+            }
+        }
+        let final_utterance = final_utterance.expect("final at the long pause");
+        assert!(final_utterance.is_final);
+        assert_eq!(speculative.start_sample, final_utterance.start_sample);
+        assert_eq!(speculative.pcm, final_utterance.pcm, "reuse is only valid for identical audio");
+    }
+
+    #[test]
+    fn later_speculative_pause_is_trimmed_to_the_same_audio_as_the_final() {
+        let mut s = UtteranceSegmenter::with_options(6_000, Some(300)).unwrap();
+        for _ in 0..10 {
+            s.accept_frame(&FRAME, true);
+        }
+        let (mut speculative, mut final_utterance) = (None, None);
+        for _ in 0..SILENCE_FRAMES {
+            if let Some(u) = s.accept_frame(&QUIET, false) {
+                if u.speculative { speculative = Some(u) } else { final_utterance = Some(u) }
+            }
+        }
+        let (speculative, final_utterance) = (speculative.unwrap(), final_utterance.unwrap());
+        assert_eq!(speculative.pcm, final_utterance.pcm);
+        let mut off = UtteranceSegmenter::with_options(6_000, None).unwrap();
+        for _ in 0..10 { off.accept_frame(&FRAME, true); }
+        assert!((0..SILENCE_FRAMES).all(|_| off.accept_frame(&QUIET, false).map_or(true, |u| !u.speculative)));
+    }
+
+    #[test]
+    fn resumed_speech_invalidates_the_speculation_and_a_new_pause_speculates_again() {
+        let mut s = UtteranceSegmenter::new().unwrap();
+        for _ in 0..10 {
+            s.accept_frame(&FRAME, true);
+        }
+        let count_speculations = |s: &mut UtteranceSegmenter| {
+            (0..SPECULATIVE_QUIET_FRAMES)
+                .filter_map(|_| s.accept_frame(&QUIET, false))
+                .filter(|u| u.speculative)
+                .count()
+        };
+        assert_eq!(count_speculations(&mut s), 1);
+        for _ in 0..4 {
+            s.accept_frame(&FRAME, true); // speech resumes before the long pause
+        }
+        assert_eq!(count_speculations(&mut s), 1, "the second pause speculates on the longer audio");
+    }
+
+    #[test]
+    fn clicks_below_the_voiced_minimum_never_speculate() {
+        let mut s = UtteranceSegmenter::new().unwrap();
+        s.accept_frame(&FRAME, true);
+        let speculations = (0..SPECULATIVE_QUIET_FRAMES)
+            .filter_map(|_| s.accept_frame(&QUIET, false))
+            .filter(|u| u.speculative)
+            .count();
+        assert_eq!(speculations, 0);
+    }
+
+    #[test]
+    fn longer_limit_keeps_a_long_question_in_one_utterance() {
+        // Eight seconds of uninterrupted speech: default limit cuts at 6 s,
+        // a 25 s limit (Whisper) does not cut it at all.
+        let frames = 8_000 / FRAME_MS;
+        let mut default = UtteranceSegmenter::new().unwrap();
+        let mut long = UtteranceSegmenter::with_max_utterance_ms(25_000).unwrap();
+        let (mut default_finals, mut long_finals) = (0, 0);
+        for _ in 0..frames {
+            default_finals += usize::from(default.accept_frame(&FRAME, true).is_some());
+            long_finals += usize::from(long.accept_frame(&FRAME, true).is_some());
+        }
+        assert_eq!(default_finals, 1, "default limit splits at 6 s");
+        assert_eq!(long_finals, 0, "25 s limit keeps the phrase whole");
+        assert!(long.finish().is_some(), "Stop still flushes the whole phrase");
+    }
+
+    #[test]
+    fn previews_continuous_speech_before_six_second_final() {
+        let mut s = UtteranceSegmenter::new().unwrap();
+        let mut previews = Vec::new();
+        let mut final_utterance = None;
+        for _ in 0..MAX_UTTERANCE_MS / FRAME_MS {
+            if let Some(final_result) = s.accept_frame(&FRAME, true) {
+                final_utterance = Some(final_result);
+            } else if let Some(preview) = s.preview() {
+                previews.push(preview);
+            }
+        }
+        assert_eq!(previews.len(), 2);
+        assert!(previews.iter().all(|preview| !preview.is_final));
+        assert_eq!(previews[0].start_sample, 0);
+        assert!(previews[0].pcm.len() < previews[1].pcm.len());
+        assert_eq!(final_utterance.unwrap().pcm.len(), MAX_UTTERANCE_SAMPLES);
     }
 
     #[test]

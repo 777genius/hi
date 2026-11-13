@@ -12,6 +12,13 @@ use crate::application::AudioSpectrumAnalyzer;
 
 type Result<T> = anyhow::Result<T>;
 
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 /// Main application service that orchestrates transcription workflow
 ///
 /// This service follows the Dependency Inversion Principle by depending on
@@ -25,11 +32,49 @@ pub struct TranscriptionService {
     microphone_sensitivity: Arc<RwLock<u8>>, // 0-200, default 95
     inactivity_timer_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // таймер для автоочистки соединения
     audio_processor_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // обработчик аудио-чанков → STT
+    capture_refresh_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     start_abort_requested: Arc<AtomicBool>,
     dropped_audio_chunks: Arc<AtomicUsize>,
 }
 
+/// Сколько раз повторять перезапуск ScreenCaptureKit после сбоя (паузы 1,5 с, 3 с, 4,5 с ... суммарно около 40 с).
+const CAPTURE_REFRESH_RETRIES: u32 = 6;
+
+/// Обновление ScreenCaptureKit делаем только в долгой тишине и не чаще этого интервала. В часовых прогонах
+/// обновление каждые 26 с давало потерянные вопросы: новый поток иногда какое-то время не отдаёт звук.
+const CAPTURE_REFRESH_MIN_QUIET_MS: u64 = 30_000;
+const CAPTURE_REFRESH_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl TranscriptionService {
+    /// Load local weights after the UI starts, so the first recording can reuse
+    /// the same provider without paying model I/O on the Start button.
+    pub async fn warm_up_local_model(&self) -> Result<()> {
+        let mut slot = self.stt_provider.write().await;
+        if slot.is_some() || *self.status.read().await != RecordingStatus::Idle {
+            return Ok(());
+        }
+        let config = self.config.read().await.clone();
+        if !config.provider.is_local_utterance() {
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        let mut provider = self.stt_factory.create(&config)?;
+        provider.initialize(&config).await?;
+        // Start may switch the status to Starting while waiting for this slot.
+        // Hand the loaded weights to it instead of discarding them and loading
+        // the same model a second time.
+        if matches!(
+            *self.status.read().await,
+            RecordingStatus::Idle | RecordingStatus::Starting
+        ) {
+            *slot = Some(provider);
+            log::info!("Local STT model warmed in {}ms", started.elapsed().as_millis());
+        } else {
+            let _ = provider.abort().await;
+        }
+        Ok(())
+    }
+
     pub fn new(
         audio_capture: Box<dyn AudioCapture>,
         stt_factory: Arc<dyn SttProviderFactory>,
@@ -43,6 +88,7 @@ impl TranscriptionService {
             microphone_sensitivity: Arc::new(RwLock::new(95)), // Default 95% (порог ~1638, более чувствительный)
             inactivity_timer_task: Arc::new(RwLock::new(None)),
             audio_processor_task: Arc::new(RwLock::new(None)),
+            capture_refresh_task: Arc::new(RwLock::new(None)),
             start_abort_requested: Arc::new(AtomicBool::new(false)),
             dropped_audio_chunks: Arc::new(AtomicUsize::new(0)),
         }
@@ -51,6 +97,13 @@ impl TranscriptionService {
     /// Update microphone sensitivity (0-200)
     pub async fn set_microphone_sensitivity(&self, sensitivity: u8) {
         *self.microphone_sensitivity.write().await = sensitivity.min(200);
+    }
+
+    async fn stop_capture_refresh_task(&self) {
+        if let Some(task) = self.capture_refresh_task.write().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
     }
 
     /// Unlike the cloud send path, local STT consumes PCM cheaply and can
@@ -112,6 +165,10 @@ impl TranscriptionService {
         self.dropped_audio_chunks.store(0, Ordering::Relaxed);
         drop(status);
 
+        // A refresh task left over from a previous recording would restart the capture
+        // with a callback that feeds a closed channel.
+        self.stop_capture_refresh_task().await;
+
         // Отменяем таймер неактивности если он запущен
         if let Some(timer) = self.inactivity_timer_task.write().await.take() {
             log::info!("Cancelling inactivity timer (user started recording before timeout)");
@@ -129,7 +186,7 @@ impl TranscriptionService {
 
         // Проверяем можно ли переиспользовать существующее соединение
         let config = self.config.read().await.clone();
-        let local_utterance_provider = config.provider == SttProviderType::ParakeetUltra;
+        let local_utterance_provider = config.provider.is_local_utterance();
         let mut can_reuse_connection = {
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
@@ -283,7 +340,15 @@ impl TranscriptionService {
         let dropped_chunks = Arc::clone(&self.dropped_audio_chunks);
         let dropped_chunks_for_cb = dropped_chunks.clone();
         let dropped_chunks_for_processor = dropped_chunks.clone();
+        let last_loud_audio_ms = Arc::new(std::sync::atomic::AtomicU64::new(epoch_millis()));
+        let last_loud_audio_for_cb = last_loud_audio_ms.clone();
+        let last_any_chunk_ms = Arc::new(std::sync::atomic::AtomicU64::new(epoch_millis()));
+        let last_any_chunk_for_cb = last_any_chunk_ms.clone();
         let on_chunk = Arc::new(move |chunk: crate::domain::AudioChunk| {
+            last_any_chunk_for_cb.store(epoch_millis(), Ordering::Relaxed);
+            if chunk.data.iter().any(|sample| sample.unsigned_abs() > 500) {
+                last_loud_audio_for_cb.store(epoch_millis(), Ordering::Relaxed);
+            }
             // Не блокируем захват аудио: если бэкенд не успевает принимать,
             // просто дропаем чанки. Пользователь всё равно в этот момент получит
             // либо деградацию качества, либо ошибку/остановку записи.
@@ -591,7 +656,7 @@ impl TranscriptionService {
             .audio_capture
             .write()
             .await
-            .start_capture(on_chunk)
+            .start_capture(on_chunk.clone())
             .await
         {
             log::error!("Failed to start audio capture: {}", e);
@@ -629,6 +694,79 @@ impl TranscriptionService {
         // Только после успешного запуска audio capture устанавливаем статус Recording
         *self.status.write().await = RecordingStatus::Recording;
 
+        if self.audio_capture.read().await.supports_quiet_refresh() {
+            let capture = self.audio_capture.clone();
+            let status = self.status.clone();
+            let on_error_for_refresh = on_error.clone();
+            let refresh_task = tokio::spawn(async move {
+                let mut last_refresh = std::time::Instant::now();
+                let mut refresh_number: u32 = 0;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    if *status.read().await != RecordingStatus::Recording {
+                        break;
+                    }
+                    // Refresh only well inside a quiet gap. A fixed timer can
+                    // interrupt the next spoken question, while macOS may stop
+                    // including output audio after a long silent interval.
+                    let quiet_ms = epoch_millis()
+                        .saturating_sub(last_loud_audio_ms.load(Ordering::Relaxed));
+                    if quiet_ms < CAPTURE_REFRESH_MIN_QUIET_MS
+                        || last_refresh.elapsed() < CAPTURE_REFRESH_MIN_INTERVAL
+                    {
+                        continue;
+                    }
+                    let mut guard = capture.write().await;
+                    if !guard.is_capturing() {
+                        break;
+                    }
+                    refresh_number += 1;
+                    log::info!(
+                        "Refreshing ScreenCaptureKit #{refresh_number} after {quiet_ms}ms of silence ({}s since the previous refresh, last chunk of any level {}ms ago)",
+                        last_refresh.elapsed().as_secs(),
+                        epoch_millis().saturating_sub(last_any_chunk_ms.load(Ordering::Relaxed))
+                    );
+                    // Новый SCStream сразу после остановки старого иногда не стартует: даём системе вдохнуть.
+                    let mut result = match guard.stop_capture().await {
+                        Ok(()) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                            guard.start_capture(on_chunk.clone()).await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    drop(guard);
+                    // Перезапуск захвата иногда временно не удаётся (macOS: "Не удалось включить звук трансляции",
+                    // смена устройства вывода). Раньше первая же ошибка роняла запись целиком. Повторяем с паузами,
+                    // не удерживая блокировку захвата между попытками, и сдаёмся только после всех попыток.
+                    for attempt in 1..=CAPTURE_REFRESH_RETRIES {
+                        let Err(error) = &result else { break };
+                        log::warn!(
+                            "System audio refresh #{refresh_number} failed ({error}; {error:?}), retry {attempt}/{CAPTURE_REFRESH_RETRIES}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(1_500 * u64::from(attempt))).await;
+                        if *status.read().await != RecordingStatus::Recording {
+                            result = Ok(());
+                            break;
+                        }
+                        let mut guard = capture.write().await;
+                        let _ = guard.stop_capture().await;
+                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                        result = guard.start_capture(on_chunk.clone()).await;
+                    }
+                    if let Err(error) = result {
+                        log::error!("System audio stream refresh failed: {error}");
+                        on_error_for_refresh(SttError::Processing(format!(
+                            "System audio capture could not recover: {error}"
+                        )));
+                        *status.write().await = RecordingStatus::Idle;
+                        break;
+                    }
+                    last_refresh = std::time::Instant::now();
+                }
+            });
+            *self.capture_refresh_task.write().await = Some(refresh_task);
+        }
+
         log::info!("Recording started");
         Ok(())
     }
@@ -644,11 +782,13 @@ impl TranscriptionService {
         *status = RecordingStatus::Processing;
         drop(status);
 
+        self.stop_capture_refresh_task().await;
+
         // Stop audio capture
         let stop_capture_result = self.audio_capture.write().await.stop_capture().await;
 
         // A local decoder must see every queued frame before its final Stop flush.
-        let drain_local = self.config.read().await.provider == SttProviderType::ParakeetUltra;
+        let drain_local = self.config.read().await.provider.is_local_utterance();
         // Drain the PCM queue, but always proceed to close the local provider.
         let pcm_drain_error = self.finish_audio_processor(drain_local).await.err();
 
@@ -802,6 +942,8 @@ impl TranscriptionService {
         self.start_abort_requested.store(true, Ordering::SeqCst);
         *self.status.write().await = RecordingStatus::Idle;
 
+        self.stop_capture_refresh_task().await;
+
         if let Some(task) = self.audio_processor_task.write().await.take() {
             task.abort();
             let _ = task.await;
@@ -836,10 +978,12 @@ impl TranscriptionService {
         *status = RecordingStatus::Processing;
         drop(status);
 
+        self.stop_capture_refresh_task().await;
+
         // Stop audio capture
         let stop_capture_result = self.audio_capture.write().await.stop_capture().await;
 
-        let drain_local = self.config.read().await.provider == SttProviderType::ParakeetUltra;
+        let drain_local = self.config.read().await.provider.is_local_utterance();
         // Drain the PCM queue, but always proceed to close the local provider.
         let pcm_drain_error = self.finish_audio_processor(drain_local).await.err();
 
@@ -939,8 +1083,8 @@ impl TranscriptionService {
                         }
                     }
                 }
-            } else if prev_config.provider == SttProviderType::ParakeetUltra
-                || config.provider == SttProviderType::ParakeetUltra
+            } else if prev_config.provider.is_local_utterance()
+                || config.provider.is_local_utterance()
             {
                 anyhow::bail!("Stop recording before changing local STT provider or model");
             } else {
@@ -1367,6 +1511,26 @@ mod tests {
         assert_eq!(counters.initialized.load(Ordering::SeqCst), 2);
         assert_eq!(counters.starts.load(Ordering::SeqCst), 2);
     }
+
+    #[tokio::test]
+    async fn local_model_warmup_makes_first_recording_reuse_loaded_weights() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = cached_stt_test_service(counters.clone());
+        service.update_config(SttConfig::new(SttProviderType::ParakeetUltra))
+            .await.unwrap();
+
+        service.warm_up_local_model().await.unwrap();
+        service.warm_up_local_model().await.unwrap();
+        assert_eq!(counters.created.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.initialized.load(Ordering::SeqCst), 1);
+
+        start_cached_test_recording(&service).await;
+        service.stop_recording().await.unwrap();
+        assert_eq!(counters.created.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.initialized.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.starts.load(Ordering::SeqCst), 1);
+    }
+
 
     #[tokio::test]
     async fn cached_local_stt_rejects_model_switch_while_recording() {

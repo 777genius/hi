@@ -17,9 +17,11 @@ const CROSS_STREAM_DEDUP_WINDOW_MS: i64 = 8_000;
 const CROSS_STREAM_DEDUP_RECENT_LIMIT: usize = 6;
 const MIC_DOMINANCE_HOLD_MS: u64 = 1_200;
 const MIC_SYSTEM_LOOKBACK_MS: i64 = 20_000;
-const MAX_CONTEXT_CHARS: usize = 48_000;
+// Часовое интервью (45+ ходов с ответами ассистента) занимает 60-90 тыс. символов: прежние 48 тыс. отрезали начало,
+// и ассистент не помнил, о чём спрашивали в начале. 160 тыс. символов (~45 тыс. токенов) покрывают целое интервью.
+const MAX_CONTEXT_CHARS: usize = 160_000;
 const MAX_CONTEXT_ANCHOR_CHARS: usize = 4_000;
-const RECENT_CONTEXT_CHARS: usize = 32_000;
+const RECENT_CONTEXT_CHARS: usize = 120_000;
 const MAX_PRUNED_IMPORTANT_OLD_MESSAGES: usize = 40;
 const MAX_SELECTED_MESSAGE_IDS: usize = 200;
 
@@ -1364,7 +1366,8 @@ pub async fn on_microphone_partial(state: &AppState, payload: &PartialTranscript
     }
 
     let now = now_ms();
-    if !is_mic_dominant_now(state, now) {
+    let independent_local_mic = state.config.read().await.stt.provider.is_local_utterance();
+    if !independent_local_mic && !is_mic_dominant_now(state, now) {
         clear_microphone_live_buffers(state).await;
         return;
     }
@@ -1530,8 +1533,7 @@ pub async fn on_microphone_final(state: &AppState, payload: &FinalTranscriptionP
     // capture. A loud simultaneous system speaker must not suppress the
     // candidate's words; cross-stream duplicate-text detection below still
     // rejects actual echoes. Keep legacy dominance gating for cloud partials.
-    let independent_local_mic = state.config.read().await.stt.provider
-        == crate::domain::SttProviderType::ParakeetUltra;
+    let independent_local_mic = state.config.read().await.stt.provider.is_local_utterance();
     if !independent_local_mic && !is_mic_dominant_now(state, payload.timestamp) {
         clear_microphone_live_buffers(state).await;
         return;
@@ -1625,13 +1627,14 @@ pub async fn build_selected_context_text_and_memory_evidence(
 }
 
 async fn collect_context_parts(state: &AppState, include_full_history: bool) -> Vec<ContextPart> {
+    let history_floor_seq = state.companion_history_floor_seq.load(Ordering::Relaxed);
     let context_floor_seq = state.companion_context_floor_seq.load(Ordering::Relaxed);
     let live_system = visible_system_partial_text(state).await;
     let live_mic = visible_microphone_partial_text(state).await;
 
     let mut parts: Vec<ContextPart> = Vec::new();
     for message in state.companion_timeline.read().await.iter() {
-        if message.deleted {
+        if message.deleted || message.seq <= history_floor_seq {
             continue;
         }
         if message.kind == CompanionMessageKind::Haiku && message.status != "final" {
@@ -2925,6 +2928,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleared_history_cannot_be_reselected_for_llm_context() {
+        let state = AppState::default();
+        append_system_final(&state, 1, &test_transcription("old secret context", 100)).await;
+        state.companion_history_floor_seq.store(1, Ordering::Relaxed);
+        state.companion_context_floor_seq.store(1, Ordering::Relaxed);
+
+        let (selected, evidence) =
+            build_selected_context_text_and_memory_evidence(&state, &["stt:1:1".to_string()]).await;
+        assert!(selected.is_empty());
+        assert!(evidence.selected_messages.is_empty());
+        assert!(build_context_text(&state, false).await.is_empty());
+    }
+
+    #[tokio::test]
     async fn build_memory_context_evidence_keeps_plain_class_discussion_out_of_code() {
         let state = AppState::default();
 
@@ -3033,11 +3050,13 @@ mod tests {
             kind: CompanionMessageKind::Haiku,
             line: format!("ПОМОЩНИК: ASSISTANT-OLD-NOISE-001 {}", "y".repeat(12_000)),
         });
-        for idx in 0..180 {
+        // Свежих сообщений заведомо больше лимита контекста, чтобы обрезка сработала при любом значении лимита.
+        let recent_count = MAX_CONTEXT_CHARS / 100;
+        for idx in 0..recent_count {
             parts.push(ContextPart {
                 id: format!("stt:recent:{idx}"),
                 kind: CompanionMessageKind::Stt,
-                line: format!("ОС: RECENT-HOUR-{idx:03} {}", "z".repeat(220)),
+                line: format!("ОС: RECENT-HOUR-{idx:05} {}", "z".repeat(220)),
             });
         }
 
@@ -3046,7 +3065,7 @@ mod tests {
         assert!(context.chars().count() <= MAX_CONTEXT_CHARS);
         assert!(context.contains("CODE-OLD-00"));
         assert!(context.contains("CODE-OLD-23"));
-        assert!(context.contains("RECENT-HOUR-179"));
+        assert!(context.contains(&format!("RECENT-HOUR-{:05}", recent_count - 1)));
         assert!(!context.contains("ASSISTANT-OLD-NOISE-001"));
     }
 

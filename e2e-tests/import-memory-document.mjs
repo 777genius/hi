@@ -21,7 +21,10 @@ function parseArgs(argv) {
       process.env.INTERVIEW_MEMORY_PROFILE_EXTERNAL_REF ||
       process.env.INTERVIEW_MEMORY_PROFILE_REF ||
       'default',
-    platformImportMode: process.env.INTERVIEW_MEMORY_PLATFORM_IMPORT_MODE || 'documents',
+    platformImportMode:
+      process.env.INTERVIEW_MEMO_STACK_IMPORT_MODE ||
+      process.env.INTERVIEW_MEMORY_PLATFORM_IMPORT_MODE ||
+      'documents',
     authToken: process.env.INTERVIEW_MEMORY_AUTH_TOKEN || '',
     authTokenFile: process.env.INTERVIEW_MEMORY_AUTH_TOKEN_FILE || '',
     authStorePath: DEFAULT_AUTH_STORE_PATH,
@@ -104,8 +107,8 @@ Session selection:
 Auth:
   --api-url <url>             Backend URL, default INTERVIEW_MEMORY_API_URL/VITE_API_URL/prod.
   --api-variant <name>        legacy or platform, default INTERVIEW_MEMORY_API_VARIANT/legacy.
-  --space-slug <slug>         Memory Platform space slug, default hackinterview.
-  --profile-ref <ref>         Memory Platform profile external ref, default default.
+  --space-slug <slug>         Memo Stack space slug, default hackinterview.
+  --profile-ref <ref>         Memo Stack profile external ref, default default.
   --platform-import-mode <m>  documents or episodes for platform mode, default documents.
   --auth-token <token>        Raw bearer token.
   --auth-token-file <path>    Raw token or auth_store.json.

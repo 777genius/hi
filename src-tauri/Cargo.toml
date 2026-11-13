@@ -40,6 +40,8 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-shell = "2"
+tauri-plugin-wdio = { version = "=1.5.1", optional = true }
+tauri-plugin-wdio-webdriver = { version = "=1.5.1", optional = true }
 
 # Async runtime
 tokio = { version = "1.41", features = ["full"] }
@@ -104,6 +106,7 @@ arboard = "3.6"
 tauri = { version = "2.8.5", features = ["tray-icon", "macos-private-api"] }
 cocoa = "0.25"  # macOS API для работы с окнами и Accessibility
 objc = "0.2"  # Objective-C runtime bindings
+block = "0.1"  # Objective-C blocks (completion handler запроса микрофона)
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }  # NSPanel для появления поверх fullscreen приложений
 screencapturekit = "1"
 
@@ -138,4 +141,6 @@ name = "test_deepgram_connection"
 # Enable with: cargo build --features whisper
 whisper = ["dep:whisper-rs", "dep:num_cpus"]
 integration-tests = []
+wdio = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]
+local-access = []
 default = []

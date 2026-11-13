@@ -58,7 +58,7 @@ pub fn run() {
         builder = builder.plugin(tauri_nspanel::init());
     }
 
-    builder
+    builder = builder
         .plugin(
             tauri_plugin_log::Builder::default()
                 .level(if cfg!(debug_assertions) {
@@ -99,7 +99,16 @@ pub fn run() {
                     ))
                 })
                 .build(),
-        )
+        );
+
+    #[cfg(feature = "wdio")]
+    {
+        builder = builder
+            .plugin(tauri_plugin_wdio::init())
+            .plugin(tauri_plugin_wdio_webdriver::init());
+    }
+
+    builder
         .manage(AppState::default())
         .manage(demo::DemoAppState::default())
         .invoke_handler(tauri::generate_handler![
@@ -148,6 +157,10 @@ pub fn run() {
             commands::get_output_audio_devices,
             commands::get_audio_permission_status,
             commands::request_system_audio_permission,
+            commands::request_microphone_permission,
+            commands::get_test_interviewer_state,
+            commands::test_interviewer_next_question,
+            commands::test_interviewer_reset,
             commands::start_haiku_stream,
             commands::start_haiku_chat_stream,
             commands::start_code_explain_stream,
@@ -214,7 +227,7 @@ pub fn run() {
                 }
             }
 
-            #[cfg(all(target_os = "macos", debug_assertions))]
+            #[cfg(target_os = "macos")]
             if !is_e2e {
                 if let Some(supervisor) =
                     crate::infrastructure::focus_copy_helper::start_focus_copy_helper_supervisor(
@@ -276,7 +289,7 @@ pub fn run() {
                     }
                 }
 
-                if is_e2e {
+                if is_e2e || AppState::local_no_auth_mode() {
                     let _ = window.show();
                 } else {
                     let _ = window.hide();
@@ -388,20 +401,22 @@ pub fn run() {
                 let app_handle = app.handle().clone();
                 let state = app.state::<AppState>();
                 tauri::async_runtime::block_on(async {
-                    match crate::infrastructure::AuthStore::load_or_create().await {
-                        Ok(store) => {
-                            *state.auth_store.write().await = store.clone();
-                            *state.is_authenticated.write().await = store.is_authenticated();
+                    if !AppState::local_no_auth_mode() {
+                        match crate::infrastructure::AuthStore::load_or_create().await {
+                            Ok(store) => {
+                                *state.auth_store.write().await = store.clone();
+                                *state.is_authenticated.write().await = store.is_authenticated();
 
-                            // Держим STT token синхронизированным с access token из сессии
-                            let stt_token = store.session.as_ref().map(|s| s.access_token.clone());
-                            state.apply_backend_auth_token_to_stt(stt_token).await;
+                                // Держим STT token синхронизированным с access token из сессии
+                                let stt_token = store.session.as_ref().map(|s| s.access_token.clone());
+                                state.apply_backend_auth_token_to_stt(stt_token).await;
 
-                            // Запускаем фоновый refresh (если возможен).
-                            state.restart_auth_refresh_task(app_handle.clone()).await;
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to load auth store: {}", e);
+                                // Запускаем фоновый refresh (если возможен).
+                                state.restart_auth_refresh_task(app_handle.clone()).await;
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to load auth store: {}", e);
+                            }
                         }
                     }
 
@@ -413,63 +428,23 @@ pub fn run() {
                     {
                         log::warn!("Failed to initialize persistent interview memory session: {}", e);
                     }
+                    if let Err(e) =
+                        crate::presentation::companion_timeline_store::restore(state.inner()).await
+                    {
+                        log::warn!("Failed to restore companion timeline: {}", e);
+                    }
                 });
             }
 
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
 
-                // Загружаем STT конфигурацию
-                if let Ok(mut saved_config) = ConfigStore::load_config().await {
-                    // API ключи теперь обрабатываются напрямую в провайдерах
-                    // Приоритет: пользовательские ключи (deepgram_api_key/assemblyai_api_key) → встроенные ключи
-
-                    if let Some(state) = app_handle.try_state::<AppState>() {
-                        // Backend-only режим: не держим STT WebSocket живым между записями.
-                        // E2E показал, что pause/resume может принимать аудио без новых transcript events.
-                        // Для интервью надёжнее закрывать поток на stop и открывать свежий на start.
-                        let mut config_migrated = false;
-                        if saved_config.provider == crate::domain::SttProviderType::Backend
-                            && saved_config.keep_connection_alive
-                        {
-                            saved_config.keep_connection_alive = false;
-                            config_migrated = true;
-                            log::info!(
-                                "Disabled keep_connection_alive for backend provider for STT stability"
-                            );
-                        }
-
-                        // Best-effort: сохраняем миграцию обратно на диск, чтобы настройка была стабильной.
-                        if config_migrated {
-                            if let Err(e) = ConfigStore::save_config(&saved_config).await {
-                                log::warn!("Failed to persist migrated STT config: {}", e);
-                            }
-                        }
-
-                        // Сохраняем токен если он уже был установлен (race condition с Vue set_authenticated)
-                        let current_config = state.transcription_service.get_config().await;
-                        if current_config.backend_auth_token.is_some() && saved_config.backend_auth_token.is_none() {
-                            log::info!("Preserving existing backend_auth_token from current config");
-                            saved_config.backend_auth_token = current_config.backend_auth_token;
-                        }
-
-                        if let Err(e) = state.transcription_service.update_config(saved_config.clone()).await {
-                            log::error!("Failed to load saved STT config: {}", e);
-                        } else {
-                            if let Err(e) = state
-                                .microphone_transcription_service
-                                .update_config(saved_config.clone())
-                                .await
-                            {
-                                log::warn!("Failed to update microphone STT config: {}", e);
-                            }
-
-                            // Синхронизируем с AppConfig
-                            state.config.write().await.stt = saved_config;
-                            log::info!("Loaded saved STT configuration");
-
-                            // Важно: загрузка идёт асинхронно, и окна могут успеть стартануть sync раньше.
-                            // Поэтому после успешной загрузки мы обязаны пнуть invalidation, иначе UI может остаться на дефолтах.
+                // Auth synchronization and startup share the same guarded,
+                // one-time load, so neither can overwrite saved STT settings.
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    match state.initialize_stt_config().await {
+                        Ok(()) => {
+                            state.spawn_local_model_warm_up();
                             let revision = AppState::bump_revision(&state.stt_config_revision).await;
                             let _ = app_handle.emit(
                                 crate::presentation::EVENT_STATE_SYNC_INVALIDATION,
@@ -481,12 +456,18 @@ pub fn run() {
                                 },
                             );
                         }
+                        Err(error) => log::error!("Failed to load saved STT configuration: {}", error),
                     }
                 }
 
                 // Загружаем конфигурацию приложения
                 if let Ok(mut saved_app_config) = ConfigStore::load_app_config().await {
                     if let Some(state) = app_handle.try_state::<AppState>() {
+                        // The STT configuration has its own authoritative file.
+                        // Keep the current value while restoring other settings,
+                        // and serialize against auth/settings updates.
+                        let stt_guard = state.stt_config_guard.lock().await;
+                        saved_app_config.stt = state.config.read().await.stt.clone();
                         // Миграция хоткея: старые версии могли сохранить DOM-токены типа Backquote,
                         // которые не всегда парсятся shortcut парсером. Нормализуем и сохраняем обратно.
                         let raw_hotkey = saved_app_config.recording_hotkey.clone();
@@ -519,6 +500,7 @@ pub fn run() {
                         }
 
                         *state.config.write().await = saved_app_config.clone();
+                        drop(stt_guard);
 
                         state.microphone_transcription_service
                             .set_microphone_sensitivity(saved_app_config.microphone_sensitivity)
@@ -639,33 +621,16 @@ pub fn run() {
                 state.start_vad_timeout_handler(app.handle().clone());
             }
 
-            #[cfg(debug_assertions)]
-            let disable_dev_companion_auto_start =
-                std::env::var("VOICETEXT_DISABLE_DEV_COMPANION_AUTO_START")
-                    .ok()
-                    .as_deref()
-                    == Some("1");
-            #[cfg(not(debug_assertions))]
-            let disable_dev_companion_auto_start = true;
-
-            if cfg!(debug_assertions) && !is_e2e && !disable_dev_companion_auto_start {
+            // Companion API всегда стартует автоматически (кроме e2e-режима).
+            if !is_e2e {
                 let app_handle_for_companion = app.handle().clone();
-                log::info!("Debug mode - auto-starting companion server");
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) =
                         crate::presentation::companion::enable_mode(&app_handle_for_companion).await
                     {
-                        log::warn!("Failed to auto-start companion in debug: {}", e);
+                        log::warn!("Failed to auto-start companion: {}", e);
                     }
                 });
-            } else if cfg!(debug_assertions) && disable_dev_companion_auto_start {
-                log::info!(
-                    "Dev companion auto-start disabled by VOICETEXT_DISABLE_DEV_COMPANION_AUTO_START=1"
-                );
-            } else {
-                log::info!(
-                    "Companion runtime initialized - listener stays disabled until enable_companion_mode"
-                );
             }
 
             presentation::signal_bridge::start_signal_receiver(app.handle().clone());

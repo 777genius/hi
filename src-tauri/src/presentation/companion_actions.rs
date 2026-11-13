@@ -91,7 +91,7 @@ pub async fn ensure_recording_started(
         return busy_transition(app_handle).await;
     };
 
-    if !*state.is_authenticated.read().await {
+    if !state.has_local_access().await {
         return rejected_auth(app_handle).await;
     }
 
@@ -114,7 +114,7 @@ pub async fn ensure_recording_stopped(
         return busy_transition(app_handle).await;
     };
 
-    if !*state.is_authenticated.read().await {
+    if !state.has_local_access().await {
         return rejected_auth(app_handle).await;
     }
 
@@ -143,7 +143,7 @@ pub async fn ensure_microphone_muted(
         return busy_transition(app_handle).await;
     };
 
-    if !*state.is_authenticated.read().await {
+    if !state.has_local_access().await {
         return rejected_auth(app_handle).await;
     }
 
@@ -165,7 +165,7 @@ pub async fn ensure_app_microphone_muted(
         return busy_transition(app_handle).await;
     };
 
-    if !*state.is_authenticated.read().await {
+    if !state.has_local_access().await {
         return rejected_auth(app_handle).await;
     }
 
@@ -196,7 +196,7 @@ pub async fn ensure_desktop_blackout(
         return busy_transition(app_handle).await;
     };
 
-    if !*state.is_authenticated.read().await {
+    if !state.has_local_access().await {
         return rejected_auth(app_handle).await;
     }
 
@@ -227,7 +227,7 @@ pub async fn ensure_context_cleared(
         return busy_transition(app_handle).await;
     };
 
-    if !*state.is_authenticated.read().await {
+    if !state.has_local_access().await {
         return rejected_auth(app_handle).await;
     }
 
@@ -258,7 +258,7 @@ pub async fn ensure_history_cleared(
         return busy_transition(app_handle).await;
     };
 
-    if !*state.is_authenticated.read().await {
+    if !state.has_local_access().await {
         return rejected_auth(app_handle).await;
     }
 
@@ -337,7 +337,7 @@ pub async fn request_ai(
         return busy_transition(app_handle).await;
     };
 
-    if !*state.is_authenticated.read().await {
+    if !state.has_local_access().await {
         return rejected_auth(app_handle).await;
     }
 
@@ -360,23 +360,45 @@ pub async fn request_ai(
         if context_text.trim().is_empty() {
             return noop(app_handle, "noop").await;
         }
+        let inferred_question = infer_hover_question_from_context(&context_text);
         let insert_after_id =
             crate::presentation::companion_timeline::resolve_insert_after_id(state).await;
-        commands::start_haiku_stream(
-            command_state,
-            app_handle.clone(),
-            context_text,
-            system_prompt,
-            Some(commands::CompanionAiRequestMeta {
-                insert_after_id,
-                created_at_ms: Some(created_at_ms),
-                prompt_message_id: None,
-                prompt_created_at_ms: None,
-            }),
-            openai_responses_web_search,
-            Some(memory_context_evidence),
-        )
-        .await?;
+        if let Some(inferred_question) = inferred_question {
+            commands::start_haiku_chat_stream(
+                command_state,
+                app_handle.clone(),
+                context_text,
+                inferred_question,
+                Some(Vec::new()),
+                None,
+                system_prompt,
+                Some(commands::CompanionAiRequestMeta {
+                    insert_after_id,
+                    created_at_ms: Some(created_at_ms),
+                    prompt_message_id: None,
+                    prompt_created_at_ms: None,
+                }),
+                openai_responses_web_search,
+                Some(memory_context_evidence),
+            )
+            .await?;
+        } else {
+            commands::start_haiku_stream(
+                command_state,
+                app_handle.clone(),
+                context_text,
+                system_prompt,
+                Some(commands::CompanionAiRequestMeta {
+                    insert_after_id,
+                    created_at_ms: Some(created_at_ms),
+                    prompt_message_id: None,
+                    prompt_created_at_ms: None,
+                }),
+                openai_responses_web_search,
+                Some(memory_context_evidence),
+            )
+            .await?;
+        }
     } else {
         let (context_text, memory_context_evidence) =
             build_request_context(state, selected_message_ids.as_deref()).await;
@@ -387,6 +409,7 @@ pub async fn request_ai(
             context_text,
             question,
             Some(Vec::new()),
+            None,
             system_prompt,
             Some(commands::CompanionAiRequestMeta {
                 insert_after_id: Some(prompt_message_id.clone()),
@@ -403,6 +426,87 @@ pub async fn request_ai(
     ok_with_current_snapshot(app_handle, "started_ai").await
 }
 
+fn recent_context_images(
+    timeline: &[companion::CompanionMessage],
+    context_floor_seq: u64,
+    history_floor_seq: u64,
+    selected_message_ids: Option<&[String]>,
+    max_count: usize,
+) -> Vec<commands::LlmImageInput> {
+    if max_count == 0 {
+        return Vec::new();
+    }
+    let mut newest_first = Vec::new();
+    for message in timeline.iter().rev() {
+        if message.deleted || message.kind != companion::CompanionMessageKind::Prompt {
+            continue;
+        }
+        // Очищенная история не возвращается в LLM даже через выделение сообщений (как и для текста).
+        if message.seq <= history_floor_seq {
+            continue;
+        }
+        if let Some(ids) = selected_message_ids {
+            if !ids.iter().any(|id| id == &message.id) {
+                continue;
+            }
+        } else if message.seq <= context_floor_seq {
+            continue;
+        }
+        for attachment in message.attachments.as_deref().unwrap_or_default().iter().rev() {
+            let expected_prefix = format!("data:{};base64,", attachment.mime);
+            let Some(data_base64) = attachment.data_url.strip_prefix(&expected_prefix) else {
+                continue;
+            };
+            newest_first.push(commands::LlmImageInput {
+                media_type: attachment.mime.clone(),
+                data_base64: data_base64.to_string(),
+            });
+            if newest_first.len() >= max_count {
+                newest_first.reverse();
+                return newest_first;
+            }
+        }
+    }
+    newest_first.reverse();
+    newest_first
+}
+
+#[cfg(test)]
+mod context_image_tests {
+    use super::recent_context_images;
+    use crate::presentation::companion::{CompanionAttachment, CompanionMessage, CompanionMessageKind};
+
+    fn prompt(id: &str, seq: u64, encoded: &str) -> CompanionMessage {
+        CompanionMessage {
+            id: id.into(),
+            seq,
+            kind: CompanionMessageKind::Prompt,
+            attachments: Some(vec![CompanionAttachment {
+                id: format!("{id}:image"),
+                kind: "image".into(),
+                mime: "image/png".into(),
+                data_url: format!("data:image/png;base64,{encoded}"),
+            }]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn carries_recent_images_in_order_and_respects_context_clear() {
+        let timeline = vec![prompt("old", 1, "T0xE"), prompt("middle", 2, "TUlE"), prompt("new", 3, "TkVX")];
+        let recent = recent_context_images(&timeline, 0, 0, None, 2);
+        assert_eq!(recent.iter().map(|image| image.data_base64.as_str()).collect::<Vec<_>>(), vec!["TUlE", "TkVX"]);
+        let after_clear = recent_context_images(&timeline, 2, 0, None, 2);
+        assert_eq!(after_clear.len(), 1);
+        assert_eq!(after_clear[0].data_base64, "TkVX");
+        let selected = recent_context_images(&timeline, 3, 0, Some(&["old".into()]), 2);
+        assert_eq!(selected[0].data_base64, "T0xE");
+        // После очистки истории выделение старого сообщения не возвращает его картинку.
+        let cleared = recent_context_images(&timeline, 3, 1, Some(&["old".into()]), 2);
+        assert!(cleared.is_empty());
+    }
+}
+
 pub async fn send_prompt(
     state: &AppState,
     app_handle: &AppHandle,
@@ -415,7 +519,7 @@ pub async fn send_prompt(
         return busy_transition(app_handle).await;
     };
 
-    if !*state.is_authenticated.read().await {
+    if !state.has_local_access().await {
         return rejected_auth(app_handle).await;
     }
 
@@ -423,14 +527,7 @@ pub async fn send_prompt(
         .try_state::<AppState>()
         .ok_or_else(|| "AppState не доступен".to_string())?;
     let prompt_text = text.trim().to_string();
-    let prompt_images = images
-        .into_iter()
-        .filter(|image| {
-            let mime = image.media_type.trim();
-            let data = image.data_base64.trim();
-            mime.starts_with("image/") && !data.is_empty()
-        })
-        .collect::<Vec<_>>();
+    let prompt_images = images;
 
     if prompt_text.is_empty() && prompt_images.is_empty() {
         return noop(app_handle, "noop").await;
@@ -446,6 +543,13 @@ pub async fn send_prompt(
     let selected_message_ids = (!selected_message_ids.is_empty()).then_some(selected_message_ids);
     let (context_text, memory_context_evidence) =
         build_request_context(state, selected_message_ids.as_deref()).await;
+    let context_images = recent_context_images(
+        &state.companion_timeline.read().await,
+        state.companion_context_floor_seq.load(Ordering::Relaxed),
+        state.companion_history_floor_seq.load(Ordering::Relaxed),
+        selected_message_ids.as_deref(),
+        10usize.saturating_sub(prompt_images.len()).min(2),
+    );
     let prompt_message_id = format!("prompt:{}", uuid::Uuid::new_v4());
 
     commands::start_haiku_chat_stream(
@@ -454,6 +558,7 @@ pub async fn send_prompt(
         context_text,
         prompt_text,
         Some(prompt_images),
+        Some(context_images),
         system_prompt,
         Some(commands::CompanionAiRequestMeta {
             insert_after_id: Some(prompt_message_id.clone()),
@@ -485,4 +590,82 @@ async fn build_request_context(
 
     crate::presentation::companion_timeline::build_context_text_and_memory_evidence(state, false)
         .await
+}
+
+fn infer_hover_question_from_context(context_text: &str) -> Option<String> {
+    context_text
+        .lines()
+        .rev()
+        .filter_map(context_line_as_current_request)
+        .find(|text| !is_farewell_request(text))
+}
+
+fn context_line_as_current_request(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with("ПОМОЩНИК:") {
+        return None;
+    }
+
+    for prefix in ["ОС:", "МИКРОФОН:", "ЗАПРОС:"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let text = rest.trim();
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+            return None;
+        }
+    }
+
+    None
+}
+
+fn is_farewell_request(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_matches(|ch: char| ch.is_ascii_punctuation() || ch.is_whitespace())
+        .to_lowercase();
+    if normalized.is_empty() || normalized.contains('?') {
+        return false;
+    }
+
+    normalized.starts_with("до свидания")
+        || normalized.starts_with("понял до свидания")
+        || normalized.starts_with("понял. до свидания")
+        || normalized.starts_with("спасибо")
+        || normalized.starts_with("удачи")
+        || normalized == "bye"
+        || normalized == "goodbye"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::infer_hover_question_from_context;
+
+    #[test]
+    fn hover_question_skips_assistant_farewell_and_uses_latest_real_question() {
+        let context = r#"
+ОС: Расскажи про Salt Edge AI document verification.
+ПОМОЩНИК: - Делал GCP pipeline
+ЗАПРОС: До свидания.
+ПОМОЩНИК: До свидания! Если позже понадобятся ответы на технические вопросы - обращайся.
+"#;
+
+        assert_eq!(
+            infer_hover_question_from_context(context),
+            Some("Расскажи про Salt Edge AI document verification.".to_string())
+        );
+    }
+
+    #[test]
+    fn hover_question_prefers_latest_non_farewell_prompt() {
+        let context = r#"
+ОС: старый вопрос
+ЗАПРОС: объясни LangSmith eval framework
+"#;
+
+        assert_eq!(
+            infer_hover_question_from_context(context),
+            Some("объясни LangSmith eval framework".to_string())
+        );
+    }
 }

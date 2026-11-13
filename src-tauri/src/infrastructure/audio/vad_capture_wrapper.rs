@@ -205,6 +205,9 @@ impl AudioCapture for VadCaptureWrapper {
     fn config(&self) -> AudioConfig {
         self.audio_config.clone()
     }
+    fn supports_quiet_refresh(&self) -> bool {
+        self.inner.supports_quiet_refresh()
+    }
 }
 
 #[cfg(test)]

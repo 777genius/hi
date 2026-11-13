@@ -29,6 +29,7 @@ import {
   type ContextRetentionPart,
 } from '@/presentation/contextRetention';
 import { useTranscriptionStore } from './transcription';
+import { dataUrlToBase64 } from '@/utils/promptImages';
 
 type ChatMessageKind = 'stt' | 'haiku' | 'mic' | 'prompt' | 'signal';
 type ChatMessageRole = 'incoming' | 'outgoing';
@@ -87,11 +88,13 @@ type ChatContextRetentionPart = ContextRetentionPart & {
   kind: ChatMessageKind;
 };
 
-const MIN_HOVER_TRIGGER_MS = 800;
+const MIN_HOVER_TRIGGER_MS = 120;
 const MIC_DOMINANCE_HOLD_MS = 1200;
 const LIVE_STT_MESSAGE_ID = 'stt:live';
 const LIVE_MIC_MESSAGE_ID = 'mic:live';
-const DEFAULT_SYSTEM_PROMPT = `Ты — ассистент на техническом собеседовании. Отвечай по-русски.
+// Язык ответов ассистента всегда русский, даже если вопрос звучит на украинском или английском:
+// это самый понятный язык владельца. Не заменять на "язык вопроса".
+const DEFAULT_SYSTEM_PROMPT = `Ты — ассистент на техническом собеседовании. Всегда отвечай по-русски, даже если вопрос задан на украинском или английском. Технические термины оставляй на английском.
 
 Контекст ниже — транскрипция, возможны ошибки распознавания. В нём есть строки:
 - "ОС:" — то, что я слышу (обычно реплики собеседника/вопросы).
@@ -103,11 +106,11 @@ const DEFAULT_SYSTEM_PROMPT = `Ты — ассистент на техничес
 1) Если есть свежий "ЗАПРОС:" — ответь на него, используя "ОС:", "МИКРОФОН:" и "ПОМОЩНИК:" как контекст.
 2) Если "ЗАПРОС:" нет — найди последний явный или неявный вопрос/задачу: в первую очередь из строк "ОС:". Если строк "ОС:" нет — используй строки "МИКРОФОН:".
 3) Дать лучший краткий ответ по делу (без воды), можно с короткими примерами/шагами.
-4) Если вопрос неясен из-за распознавания — задай 1 уточняющий вопрос и предложи 1-2 вероятные интерпретации.
+4) Если речь распознана неточно, выбери наиболее вероятный смысл и ответь прямо, без уточняющих вопросов.
 5) Возможно в вопросах не будет "?". Ты должен понимать где вопросы.
 
 Формат ответа:
-- Сначала 3–7 буллетов с ответом (каждый пункт начинай с "- ").
+- По умолчанию отвечай коротким связным абзацем. Список нужен только для действительно нескольких пунктов или если его попросили.
 - Затем (если нужно) короткий пример кода.
 - Не пересказывай весь контекст и не цитируй теги "ОС:"/"МИКРОФОН:"/"ПОМОЩНИК:"/"ЗАПРОС:".
 
@@ -124,7 +127,7 @@ const DEFAULT_SYSTEM_PROMPT = `Ты — ассистент на техничес
 - Если полный код слишком длинный, допускается сокращать только с помощью комментариев соответствующего языка (например "// ...", "# ...", "/* ... */") и после блока 1 строкой объяснить, что именно опущено. Не вставляй голые "..." как код.`;
 const SYSTEM_PROMPT_STORAGE_KEY = 'llmSystemPrompt';
 const LEGACY_SYSTEM_PROMPT_STORAGE_KEY = 'anthropicSystemPrompt';
-const OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY = 'openaiResponsesWebSearchEnabled';
+const OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY = 'openaiResponsesWebSearchEnabledV2';
 
 export const useChatStore = defineStore('chat', () => {
   const transcription = useTranscriptionStore();
@@ -165,7 +168,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   const openaiResponsesWebSearchEnabled = ref<boolean>(
-    readStoredBoolean(OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY, true)
+    readStoredBoolean(OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY, false)
   );
 
   // "Очистка контекста" для LLM без удаления сообщений:
@@ -277,27 +280,13 @@ export const useChatStore = defineStore('chat', () => {
       ...micMessages.value,
       ...signalMessages.value,
       ...promptMessages.value,
+      ...haikuMessages.value,
     ];
     if (liveSttMessage.value) base.push(liveSttMessage.value);
     if (liveMicMessage.value) base.push(liveMicMessage.value);
     base.sort((a, b) => (a.createdAtMs - b.createdAtMs) || (a.seq - b.seq));
 
-    const out: ChatMessage[] = [...base];
-    const haikus = [...haikuMessages.value];
-    haikus.sort((a, b) => (a.createdAtMs - b.createdAtMs) || (a.seq - b.seq));
-
-    for (const msg of haikus) {
-      const after = msg.insertAfterId;
-      if (!after) {
-        out.push(msg);
-        continue;
-      }
-      const idx = out.findIndex((m) => m.id === after);
-      if (idx >= 0) out.splice(idx + 1, 0, msg);
-      else out.push(msg);
-    }
-
-    return out;
+    return base;
   });
 
   const livePartialText = computed(() => {
@@ -1164,6 +1153,16 @@ export const useChatStore = defineStore('chat', () => {
     const context = buildHaikuContext({ selectionMode: 'ignore' });
     const contextText = context.text;
     const memoryContextEvidence = buildMemoryContextEvidenceFromParts(context.parts);
+    const contextImageLimit = Math.min(2, Math.max(0, 10 - images.length));
+    const contextImages = (contextImageLimit ? promptMessages.value
+      .filter((message) => !message.deleted && !isMessageOutOfContext(message))
+      .flatMap((message) => message.attachments ?? [])
+      .slice(-contextImageLimit) : [])
+      .map((attachment) => ({
+        mediaType: attachment.mime,
+        dataBase64: dataUrlToBase64(attachment.dataUrl),
+      }))
+      .filter((image) => image.dataBase64);
 
     promptMessages.value.push({
       id: promptMessageId,
@@ -1189,6 +1188,7 @@ export const useChatStore = defineStore('chat', () => {
           mediaType: img.mime,
           dataBase64: img.dataBase64,
         })),
+        contextImages,
         systemPrompt: sanitizeSystemPrompt(systemPrompt.value),
         openaiResponsesWebSearch: openaiResponsesWebSearchEnabled.value,
         memoryContextEvidence,

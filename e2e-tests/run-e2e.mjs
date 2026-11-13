@@ -3,18 +3,15 @@ import process from 'node:process';
 
 /**
  * Tauri WebDriver e2e:
- * - На macOS (darwin) сейчас нельзя (нет WKWebView driver).
- * - На Linux/Windows — запускаем wdio.
+ * - На macOS используем встроенный WebDriver сервер в debug сборке.
+ * - На Linux/Windows — существующий tauri-driver.
  */
 
-if (process.platform === 'darwin') {
-  console.log(
-    '[e2e] Skipped: Tauri WebDriver tests are not supported on macOS. Run them on Linux/Windows CI.',
-  );
-  process.exit(0);
+const args = ['wdio', 'run', 'e2e-tests/wdio.conf.mjs'];
+if (process.platform === 'darwin' && process.env.E2E_ALL_SPECS !== '1') {
+  args.push('--spec', 'e2e-tests/specs/desktopSmoke.e2e.mjs');
 }
-
-const result = spawnSync('pnpm', ['wdio', 'run', 'e2e-tests/wdio.conf.mjs'], {
+const result = spawnSync('pnpm', args, {
   stdio: 'inherit',
   shell: true,
   env: {
