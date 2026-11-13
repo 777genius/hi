@@ -45,12 +45,17 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <string>13.0</string>
   <key>LSUIElement</key>
   <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Нужен доступ к браузеру, чтобы скопировать выделенный текст со страницы.</string>
 </dict>
 </plist>
 PLIST
 
+# Для hardened runtime без этого entitlement macOS молча отклоняет Apple Events (-1743) и не показывает запрос.
+ENTITLEMENTS_FILE="$HELPER_DIR/scripts/helper.entitlements"
+
 if [[ -n "$SIGNING_IDENTITY" ]]; then
-  codesign --force --sign "$SIGNING_IDENTITY" --options runtime "$APP_DIR"
+  codesign --force --sign "$SIGNING_IDENTITY" --options runtime --entitlements "$ENTITLEMENTS_FILE" "$APP_DIR"
 fi
 
 echo "Built $APP_DIR"
