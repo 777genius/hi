@@ -2059,6 +2059,8 @@ onUnmounted(() => {
 }
 
 .dock-record-button {
+  /* На самых узких экранах сжимаются соседние кнопки, круглая кнопка записи остаётся кругом. */
+  flex-shrink: 0;
   width: 68px;
   height: 68px;
   border-radius: 999px;
@@ -2159,7 +2161,7 @@ onUnmounted(() => {
 
   .controls-dock {
     width: calc(100vw - 16px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
-    gap: 14px;
+    gap: 8px;
   }
 
   .ask-card {
@@ -2178,7 +2180,12 @@ onUnmounted(() => {
   }
 
   .controls-center {
-    gap: 20px;
+    /* Группа занимает остаток ширины дока и раздвигает кнопки сама: с фиксированным gap 20px
+       она была шире экрана 320-414px, и кнопка сообщения справа уходила за край. */
+    flex: 1 1 auto;
+    min-width: 0;
+    justify-content: space-between;
+    gap: 4px;
     padding: 8px 10px;
   }
 
@@ -2211,10 +2218,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 360px) {
-  .controls-dock {
-    gap: 8px;
-  }
-
   .ask-card {
     bottom: calc(126px + env(safe-area-inset-bottom, 0px));
     max-height: calc(100vh - 148px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
@@ -2227,7 +2230,6 @@ onUnmounted(() => {
   }
 
   .controls-center {
-    gap: 12px;
     padding: 7px 8px;
   }
 
