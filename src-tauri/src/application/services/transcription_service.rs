@@ -46,7 +46,7 @@ impl TranscriptionService {
             return Ok(());
         }
         let config = self.config.read().await.clone();
-        if config.provider != SttProviderType::ParakeetUltra {
+        if !config.provider.is_local_utterance() {
             return Ok(());
         }
         let started = std::time::Instant::now();
@@ -174,7 +174,7 @@ impl TranscriptionService {
 
         // Проверяем можно ли переиспользовать существующее соединение
         let config = self.config.read().await.clone();
-        let local_utterance_provider = config.provider == SttProviderType::ParakeetUltra;
+        let local_utterance_provider = config.provider.is_local_utterance();
         let mut can_reuse_connection = {
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
@@ -744,7 +744,7 @@ impl TranscriptionService {
         let stop_capture_result = self.audio_capture.write().await.stop_capture().await;
 
         // A local decoder must see every queued frame before its final Stop flush.
-        let drain_local = self.config.read().await.provider == SttProviderType::ParakeetUltra;
+        let drain_local = self.config.read().await.provider.is_local_utterance();
         // Drain the PCM queue, but always proceed to close the local provider.
         let pcm_drain_error = self.finish_audio_processor(drain_local).await.err();
 
@@ -939,7 +939,7 @@ impl TranscriptionService {
         // Stop audio capture
         let stop_capture_result = self.audio_capture.write().await.stop_capture().await;
 
-        let drain_local = self.config.read().await.provider == SttProviderType::ParakeetUltra;
+        let drain_local = self.config.read().await.provider.is_local_utterance();
         // Drain the PCM queue, but always proceed to close the local provider.
         let pcm_drain_error = self.finish_audio_processor(drain_local).await.err();
 
@@ -1039,8 +1039,8 @@ impl TranscriptionService {
                         }
                     }
                 }
-            } else if prev_config.provider == SttProviderType::ParakeetUltra
-                || config.provider == SttProviderType::ParakeetUltra
+            } else if prev_config.provider.is_local_utterance()
+                || config.provider.is_local_utterance()
             {
                 anyhow::bail!("Stop recording before changing local STT provider or model");
             } else {
