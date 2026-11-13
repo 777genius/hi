@@ -56,6 +56,20 @@ describe('Built Companion UI over real browser HTTP/SSE (fault-injected server)'
   it('recovers initial GET failure, renders 300 unique messages and preserves reading position', async () => {
     fixture.stateFailures = 1;
     await openPage();
+    // The native WebKit test window is 320px wide; a fixed dock must not
+    // strand controls outside the viewport even when its feed is scrollable.
+    const dock = await browser.execute(() => ({
+      width: window.innerWidth,
+      buttons: Array.from(document.querySelectorAll('.controls-dock button'), (button) => {
+        const bounds = button.getBoundingClientRect();
+        return { title: button.title, left: bounds.left, right: bounds.right };
+      }),
+    }));
+    assert.ok(dock.buttons.length >= 7, 'all Companion dock controls rendered');
+    for (const button of dock.buttons) {
+      assert.ok(button.left >= 0 && button.right <= dock.width,
+        `off-screen Companion dock button: ${button.title} (${button.left}, ${button.right} / ${dock.width})`);
+    }
     for (let start = 0; start < 300; start += 25) {
       fixture.state.data.timeline.push(...Array.from({ length: 25 }, (_, i) => message(start + i)));
       fixture.publish();
