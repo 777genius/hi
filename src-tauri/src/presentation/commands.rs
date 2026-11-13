@@ -4915,10 +4915,19 @@ pub async fn start_haiku_chat_stream(
                 )
             };
 
+            let stream_started_at = std::time::Instant::now();
+            let mut first_delta_logged = false;
             llm_provider
                 .stream_text(
                     &request,
                     Box::new(move |delta| {
+                        if !first_delta_logged {
+                            first_delta_logged = true;
+                            log::info!(
+                                "First LLM delta after {}ms (request sent to the provider, not counting context assembly)",
+                                stream_started_at.elapsed().as_millis()
+                            );
+                        }
                         let delta_text = delta.to_string();
                         let _ = app_handle_delta_openai.emit(
                             EVENT_HAIKU_DELTA,
