@@ -813,8 +813,8 @@ onUnmounted(() => {
 }
 
 .chat-row.assistant-response .chat-bubble {
-  width: calc((100% - 18px) * var(--chat-bubble-width-scale, 1));
-  max-width: calc((100% - 18px) * var(--chat-bubble-width-scale, 1));
+  width: calc((100% - 32px) * var(--chat-bubble-width-scale, 1));
+  max-width: calc((100% - 32px) * var(--chat-bubble-width-scale, 1));
 }
 
 .chat-row.focus-copy .chat-bubble {
@@ -1407,12 +1407,12 @@ onUnmounted(() => {
   }
 
   .chat-row.outgoing .chat-bubble {
-    width: calc((100% - 16px) * var(--chat-bubble-width-scale, 1));
+    width: calc((100% - 28px) * var(--chat-bubble-width-scale, 1));
   }
 
   .chat-row.assistant-response .chat-bubble {
-    width: calc((100% - 6px) * var(--chat-bubble-width-scale, 1));
-    max-width: calc((100% - 6px) * var(--chat-bubble-width-scale, 1));
+    width: calc((100% - 28px) * var(--chat-bubble-width-scale, 1));
+    max-width: calc((100% - 28px) * var(--chat-bubble-width-scale, 1));
   }
 
   .chat-row.outgoing .chat-actions {
@@ -1449,8 +1449,8 @@ onUnmounted(() => {
   }
 
   .chat-row.assistant-response .chat-bubble {
-    width: calc((100% - 2px) * var(--chat-bubble-width-scale, 1));
-    max-width: calc((100% - 2px) * var(--chat-bubble-width-scale, 1));
+    width: calc((100% - 24px) * var(--chat-bubble-width-scale, 1));
+    max-width: calc((100% - 24px) * var(--chat-bubble-width-scale, 1));
   }
 }
 </style>

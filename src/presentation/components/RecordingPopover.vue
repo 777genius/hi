@@ -2424,7 +2424,8 @@ const onChatMouseDown = (e: MouseEvent) => {
 }
 
 .popover-content {
-  padding: var(--spacing-sm);
+  --popover-pad: var(--spacing-sm);
+  padding: var(--popover-pad);
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -2446,8 +2447,8 @@ const onChatMouseDown = (e: MouseEvent) => {
   flex-direction: column;
   /* Сообщения вплотную к краям окна: вылезаем на боковой отступ контейнера с обеих сторон,
      ширину задаём явно, иначе при width:100% лента просто сдвигается влево и текст обрезается. */
-  width: calc(100% + 2 * var(--spacing-sm));
-  margin-inline: calc(-1 * var(--spacing-sm));
+  width: calc(100% + 2 * var(--popover-pad, var(--spacing-sm)));
+  margin-inline: calc(-1 * var(--popover-pad, var(--spacing-sm)));
 }
 
 .chat-area :deep(.scroll-to-bottom-button) {
@@ -3655,7 +3656,8 @@ const onChatMouseDown = (e: MouseEvent) => {
   }
 
   .popover-content {
-    padding: 6px;
+    --popover-pad: 6px;
+    padding: var(--popover-pad);
   }
 
   .header {
@@ -3714,7 +3716,8 @@ const onChatMouseDown = (e: MouseEvent) => {
   }
 
   .popover-content {
-    padding: 4px;
+    --popover-pad: 4px;
+    padding: var(--popover-pad);
   }
 
   .header {
