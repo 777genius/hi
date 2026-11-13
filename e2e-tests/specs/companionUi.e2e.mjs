@@ -170,7 +170,18 @@ describe('Built Companion UI over real browser HTTP/SSE (fault-injected server)'
   it('rejects malformed high-revision snapshots before they crash or permanently freeze the feed', async () => {
     fixture.state.data.timeline = [message(0, 'healthy')];
     await openPage();
-    for (const corruption of [{ live: null }, { timeline: [null] }]) {
+    const corruptions = [
+      { live: null },
+      { timeline: [null] },
+      ...[
+        ['stt:live', 'stt', 'partialText'],
+        ['mic:live', 'mic', 'microphonePartialText'],
+      ].map(([id, kind, partialField]) => ({
+        timeline: [{ ...message(0, 'collision'), id, kind, text: 'Reserved key durable row' }],
+        live: { [partialField]: 'Different synthetic live row' },
+      })),
+    ];
+    for (const corruption of corruptions) {
       const streamsBefore = fixture.streamsOpened;
       fixture.sendSnapshot({ revision: '999999', data: { ...fixture.state.data, ...corruption } });
       await waitFor(() => fixture.streamsOpened > streamsBefore);
@@ -180,7 +191,9 @@ describe('Built Companion UI over real browser HTTP/SSE (fault-injected server)'
       await waitText(next.text);
       await assertNoPageErrors();
     }
-    assert.equal((await rowIds()).length, 3);
+    const ids = await rowIds();
+    assert.equal(ids.length, corruptions.length + 1);
+    assert.equal(new Set(ids).size, ids.length, 'recovered feed keys remain unique');
   });
 
   it('catches up after TCP loss and accepts a restarted server without keeping an old selection', async () => {
