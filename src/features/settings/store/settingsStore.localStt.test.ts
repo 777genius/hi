@@ -9,10 +9,10 @@ describe('local STT provider settings', () => {
     localStorage.clear();
   });
 
-  it('uses local Whisper Large-v3-Turbo by default', () => {
+  it('starts on the cloud backend until the backend snapshot supplies the platform default', () => {
     const store = useSettingsStore();
-    expect(store.provider).toBe(SttProviderType.WhisperLargeV3Turbo);
-    expect(store.currentState.provider).toBe(SttProviderType.WhisperLargeV3Turbo);
+    expect(store.provider).toBe(SttProviderType.Backend);
+    expect(store.currentState.provider).toBe(SttProviderType.Backend);
   });
 
   it('preserves explicit Parakeet Ultra selection and language in the saved UI draft', () => {

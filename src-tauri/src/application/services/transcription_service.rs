@@ -157,6 +157,10 @@ impl TranscriptionService {
         self.dropped_audio_chunks.store(0, Ordering::Relaxed);
         drop(status);
 
+        // A refresh task left over from a previous recording would restart the capture
+        // with a callback that feeds a closed channel.
+        self.stop_capture_refresh_task().await;
+
         // Отменяем таймер неактивности если он запущен
         if let Some(timer) = self.inactivity_timer_task.write().await.take() {
             log::info!("Cancelling inactivity timer (user started recording before timeout)");

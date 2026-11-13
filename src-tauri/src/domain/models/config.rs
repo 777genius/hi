@@ -39,8 +39,13 @@ impl SttProviderType {
 impl Default for SttProviderType {
     fn default() -> Self {
         // Local Whisper Large-v3-Turbo: accurate with a glossary, ~1.4 s to the final
-        // text, nothing leaves the machine. Backend stays an explicit choice.
-        Self::WhisperLargeV3Turbo
+        // text, nothing leaves the machine. It runs only on Apple Silicon Macs; every
+        // other platform keeps the cloud backend. Both stay an explicit choice.
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Self::WhisperLargeV3Turbo
+        } else {
+            Self::Backend
+        }
     }
 }
 
@@ -336,7 +341,12 @@ mod tests {
     #[test]
     fn test_stt_provider_type_default() {
         assert_eq!(serde_json::to_string(&SttProviderType::ParakeetUltra).unwrap(), "\"parakeetultra\"");
-        assert_eq!(SttProviderType::default(), SttProviderType::WhisperLargeV3Turbo);
+        let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            SttProviderType::WhisperLargeV3Turbo
+        } else {
+            SttProviderType::Backend
+        };
+        assert_eq!(SttProviderType::default(), expected);
     }
 
     #[test]
@@ -353,7 +363,7 @@ mod tests {
     #[test]
     fn test_stt_config_default() {
         let config = SttConfig::default();
-        assert_eq!(config.provider, SttProviderType::WhisperLargeV3Turbo);
+        assert_eq!(config.provider, SttProviderType::default());
         assert_eq!(config.language, "ru");
         assert!(!config.auto_detect_language);
         assert!(config.enable_punctuation);

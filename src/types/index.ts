@@ -184,9 +184,6 @@ export enum SttProviderType {
   Azure = 'azure',
 }
 
-/** Local Whisper Large-v3-Turbo; mirrors Rust `SttProviderType::default()`. */
-export const DEFAULT_STT_PROVIDER = SttProviderType.WhisperLargeV3Turbo;
-
 /** On-device models that share one VAD-utterance pipeline (mirrors Rust `is_local_utterance`). */
 export function isLocalUtteranceProvider(provider: SttProviderType): boolean {
   return (

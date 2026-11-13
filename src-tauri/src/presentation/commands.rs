@@ -780,6 +780,20 @@ async fn abandon_failed_recording_start(state: &AppState, session_id: u64) {
     }
 }
 
+/// The microphone starts in parallel with system audio. If system audio then fails
+/// to start, nothing else would stop a microphone that already began capturing.
+/// Taking the start lock waits for an in-flight microphone start, and the session
+/// was already abandoned, so a start that has not begun yet exits on its own.
+async fn stop_microphone_after_failed_start(state: &AppState) {
+    let _start_guard = state.microphone_start_lock.lock().await;
+    if state.microphone_transcription_service.get_status().await == RecordingStatus::Idle {
+        return;
+    }
+    if let Err(error) = state.microphone_transcription_service.stop_recording_hard().await {
+        log::warn!("Could not stop the microphone after a failed recording start: {error}");
+    }
+}
+
 /// Start recording voice on the backend path shared with companion actions.
 pub async fn start_recording_raw(
     state: &AppState,
@@ -1078,6 +1092,7 @@ pub async fn start_recording_raw(
     // Поэтому здесь явно отправляем error + status=Error тем же контрактом, что и в runtime-ошибках.
     if let Err(e) = start_result {
         abandon_failed_recording_start(state, session_id).await;
+        stop_microphone_after_failed_start(state).await;
         // Стараемся извлечь исходную причину максимально надёжно (без парсинга строки).
         let stt = e
             .downcast_ref::<SttError>()

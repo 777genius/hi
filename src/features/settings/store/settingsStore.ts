@@ -4,7 +4,7 @@
 
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import { DEFAULT_STT_PROVIDER, isLocalUtteranceProvider, SttProviderType } from '@/types';
+import { isLocalUtteranceProvider, SttProviderType } from '@/types';
 import { invoke } from '@tauri-apps/api/core';
 import { isTauriAvailable } from '@/utils/tauri';
 import {
@@ -34,7 +34,7 @@ function trimKeyterms(input: string, maxTerms: number): string {
 export const useSettingsStore = defineStore('settings', () => {
   // Состояние настроек
   // Existing Backend remains the default; Apple Silicon users may opt into local STT.
-  const provider = ref<SttProviderType>(DEFAULT_STT_PROVIDER);
+  const provider = ref<SttProviderType>(SttProviderType.Backend);
   const language = ref('ru');
   const deepgramApiKey = ref('');
   const assemblyaiApiKey = ref('');
