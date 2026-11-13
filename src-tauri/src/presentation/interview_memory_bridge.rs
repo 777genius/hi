@@ -8,6 +8,10 @@ const DEFAULT_LEGACY_API_BASE_URL: &str = "https://api.voicetext.site";
 const DEFAULT_MEMO_STACK_API_BASE_URL: &str = "http://127.0.0.1:7788";
 const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 14_000;
 const DEFAULT_MINIMAL_FALLBACK_CONTEXT_CHARS: usize = 12_000;
+// Контекст, который уходит в промпт, когда memory-сервис выключен или недоступен (единственный источник контекста).
+// Локальный текст уже ограничен companion_timeline (160 тыс.); прежние 12 тыс. оставляли ассистенту лишь последние минуты
+// интервью. Запрос в memory-сервис по-прежнему строится из короткого хвоста (DEFAULT_MINIMAL_FALLBACK_CONTEXT_CHARS).
+const LOCAL_PROMPT_FALLBACK_CONTEXT_CHARS: usize = 160_000;
 const DEFAULT_MAX_MEMORY_CANDIDATES: u64 = 500;
 const DEFAULT_MAX_MEMORY_RESULTS: usize = 10;
 const MAX_INGEST_EVENT_TEXT_CHARS: usize = 25_000;
@@ -434,13 +438,13 @@ pub async fn assemble_stream_context_or_fallback(
     if !mode.backend_prompt_context_enabled() {
         record_context_diagnostics(state, "disabled", None, None).await;
         return if mode.minimal_local_prompt_context_enabled() {
-            minimal_current_session_fallback_context(local_context)
+            local_prompt_fallback_context(local_context)
         } else {
             local_context.to_string()
         };
     }
 
-    let fallback_context = minimal_current_session_fallback_context(local_context);
+    let fallback_context = local_prompt_fallback_context(local_context);
     match assemble_stream_context(state, local_context, memory_context_evidence).await {
         Ok(Some(text)) => text,
         Ok(None) => fallback_context,
@@ -476,6 +480,11 @@ pub async fn assemble_chat_context_or_fallback(
 
 pub fn minimal_current_session_fallback_context(local_context: &str) -> String {
     trim_text_tail_to_line(local_context, DEFAULT_MINIMAL_FALLBACK_CONTEXT_CHARS)
+}
+
+/// Контекст для промпта, когда memory-сервис не дал ответа: весь локальный контекст в пределах лимита.
+pub fn local_prompt_fallback_context(local_context: &str) -> String {
+    trim_text_tail_to_line(local_context, LOCAL_PROMPT_FALLBACK_CONTEXT_CHARS)
 }
 
 async fn post_ingest_memory_request(
