@@ -702,6 +702,11 @@ async function resyncConnection(options: {
   reconnect?: boolean;
   successStatusText?: string;
 } = {}): Promise<void> {
+  // Без token подключаться некуда: pageshow/online/visibilitychange не должны
+  // объявлять связь активной и стирать ошибку «Ссылка не содержит token».
+  if (!companionAvailable) {
+    return;
+  }
   if (resyncPromise) {
     return resyncPromise;
   }
