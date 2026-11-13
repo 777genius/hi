@@ -980,6 +980,9 @@ pub async fn settle_active_haiku_generation(state: &AppState) -> bool {
         return changed;
     }
 
+    // Обрываем сам HTTP-стрим к провайдеру: иначе токены продолжат тратиться впустую.
+    state.abort_llm_stream_tasks(&settled_request_ids);
+
     state
         .companion_request_generations
         .write()
@@ -987,53 +990,6 @@ pub async fn settle_active_haiku_generation(state: &AppState) -> bool {
         .retain(|request_id, generation| {
             *generation != current_generation
                 || !settled_request_ids.iter().any(|id| id == request_id)
-        });
-
-    true
-}
-
-pub async fn cancel_active_haiku_generation(state: &AppState) -> bool {
-    let current_generation = state
-        .companion_conversation_generation
-        .load(Ordering::Relaxed);
-    let mut cancelled_request_ids = Vec::new();
-    let mut changed = false;
-
-    {
-        let mut timeline = state.companion_timeline.write().await;
-        for message in timeline.iter_mut() {
-            if message.kind != CompanionMessageKind::Haiku
-                || message.status != "streaming"
-                || message.generation != Some(current_generation)
-            {
-                continue;
-            }
-
-            cancelled_request_ids.push(message.id.clone());
-            message.status = "final".to_string();
-            message.deleted = true;
-            if let Some(candidates) = message.candidates.as_mut() {
-                for candidate in candidates.iter_mut() {
-                    if candidate.status == "streaming" {
-                        candidate.status = "final".to_string();
-                    }
-                }
-            }
-            changed = true;
-        }
-    }
-
-    if cancelled_request_ids.is_empty() {
-        return changed;
-    }
-
-    state
-        .companion_request_generations
-        .write()
-        .await
-        .retain(|request_id, generation| {
-            *generation != current_generation
-                || !cancelled_request_ids.iter().any(|id| id == request_id)
         });
 
     true
@@ -3223,7 +3179,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_active_haiku_is_deleted_and_ignores_late_deltas() {
+    async fn stopped_active_haiku_keeps_partial_text_and_ignores_late_deltas() {
         let state = AppState::default();
 
         begin_haiku_message(
@@ -3239,7 +3195,7 @@ mod tests {
         .await;
         append_haiku_delta(&state, "haiku:req-cancel", "partial answer").await;
 
-        assert!(cancel_active_haiku_generation(&state).await);
+        assert!(settle_active_haiku_generation(&state).await);
         append_haiku_delta(&state, "haiku:req-cancel", " late delta").await;
         finalize_haiku_message(&state, "haiku:req-cancel").await;
 
@@ -3250,7 +3206,7 @@ mod tests {
             .expect("haiku message");
 
         assert_eq!(haiku.status, "final");
-        assert!(haiku.deleted);
+        assert!(!haiku.deleted);
         assert_eq!(haiku.text, "partial answer");
         assert!(!state
             .companion_request_generations

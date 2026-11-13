@@ -41,4 +41,21 @@ test.describe('Форма сообщений', () => {
       expect(outgoing.padRight, `${id}: внутри исходящего сообщения есть отступ со стороны края`).toBeGreaterThanOrEqual(8);
     }
   });
+
+  test('стримящийся ответ LLM держит минимальную высоту, готовый ужимается до текста', async ({ companion, page }) => {
+    await companion.reset(snapshotData([
+      stt(1, 'Вопрос'),
+      haiku(2, 'Начало', { status: 'streaming', insertAfterId: 'stt:1' }),
+    ]));
+    await companion.open();
+
+    const height = () => page.locator('[data-msg-id="haiku:2"] .chat-bubble').evaluate((el) => el.getBoundingClientRect().height);
+    expect(await height(), 'пока ответ стримится, высота не меньше плейсхолдера').toBeGreaterThanOrEqual(199);
+
+    await companion.update((data) => {
+      const message = data.timeline.find((item) => item.id === 'haiku:2')!;
+      message.status = 'final';
+    });
+    await expect.poll(height, 'после завершения сообщение ужимается до текста').toBeLessThan(120);
+  });
 });

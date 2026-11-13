@@ -881,6 +881,13 @@ onUnmounted(() => {
   opacity: 0.85;
 }
 
+/* Плейсхолдер: пока ответ LLM стримится, сообщение держит минимальную высоту,
+   чтобы лента не дёргалась по мере роста текста. После завершения оно ужимается
+   до реальной высоты текста. */
+.chat-row.assistant-response.partial .chat-bubble {
+  min-height: var(--assistant-streaming-min-height, 200px);
+}
+
 .chat-row.error .chat-bubble {
   background: rgba(244, 67, 54, 0.16);
 }
