@@ -712,7 +712,7 @@ onUnmounted(() => {
   font-size: 20px;
 }
 
-:global(.theme-light) .scroll-to-bottom-button {
+.theme-light .scroll-to-bottom-button {
   background: rgba(255, 255, 255, 0.95);
   color: rgba(15, 23, 42, 0.92);
   border-color: rgba(15, 23, 42, 0.08);
@@ -908,7 +908,7 @@ onUnmounted(() => {
   color: rgba(255, 255, 255, 0.35);
 }
 
-:global(.theme-light) .chat-text-deleted {
+.theme-light .chat-text-deleted {
   color: rgba(0, 0, 0, 0.35);
 }
 
@@ -1001,13 +1001,13 @@ onUnmounted(() => {
   background: rgba(59, 130, 246, 0.95);
 }
 
-:global(.theme-light) .assistant-candidate-tab {
+.theme-light .assistant-candidate-tab {
   border-color: rgba(15, 23, 42, 0.12);
   background: rgba(15, 23, 42, 0.04);
   color: rgba(15, 23, 42, 0.68);
 }
 
-:global(.theme-light) .assistant-candidate-tab.active {
+.theme-light .assistant-candidate-tab.active {
   border-color: rgba(37, 99, 235, 0.45);
   background: rgba(37, 99, 235, 0.12);
   color: rgba(15, 23, 42, 0.92);
@@ -1063,18 +1063,18 @@ onUnmounted(() => {
   background: rgba(43, 48, 57, 0.96);
 }
 
-:global(.theme-light) .chat-collapse-toggle {
+.theme-light .chat-collapse-toggle {
   background: rgba(248, 250, 252, 0.94);
   color: rgba(15, 23, 42, 0.62);
   border-top-color: rgba(15, 23, 42, 0.08);
 }
 
-:global(.theme-light) .chat-collapse-toggle:hover {
+.theme-light .chat-collapse-toggle:hover {
   color: rgba(15, 23, 42, 0.88);
   background: rgba(241, 245, 249, 0.96);
 }
 
-:global(.theme-light) .chat-collapsible-message:not(.collapsed) .chat-collapse-toggle {
+.theme-light .chat-collapsible-message:not(.collapsed) .chat-collapse-toggle {
   border-color: rgba(15, 23, 42, 0.14);
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
 }
@@ -1340,15 +1340,15 @@ onUnmounted(() => {
   color: rgba(255, 255, 255, 0.85);
 }
 
-:global(.theme-light) .chat-markdown :deep(.code-block-toggle),
-:global(.theme-light) .chat-text-highlighted :deep(.code-block-toggle) {
+.theme-light .chat-markdown :deep(.code-block-toggle),
+.theme-light .chat-text-highlighted :deep(.code-block-toggle) {
   background: rgba(248, 250, 252, 0.94);
   color: rgba(15, 23, 42, 0.62);
   border-top-color: rgba(15, 23, 42, 0.08);
 }
 
-:global(.theme-light) .chat-markdown :deep(.code-block-toggle:hover),
-:global(.theme-light) .chat-text-highlighted :deep(.code-block-toggle:hover) {
+.theme-light .chat-markdown :deep(.code-block-toggle:hover),
+.theme-light .chat-text-highlighted :deep(.code-block-toggle:hover) {
   background: rgba(241, 245, 249, 0.96);
   color: rgba(15, 23, 42, 0.88);
 }

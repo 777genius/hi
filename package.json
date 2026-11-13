@@ -47,6 +47,7 @@
     "memory-platform:mcp-smoke": "pnpm memo-stack:mcp-smoke",
     "memory-platform:clean-full-smoke": "pnpm memo-stack:clean-full-smoke",
     "e2e:tauri": "node e2e-tests/run-e2e.mjs",
+    "e2e:companion-ui": "playwright test -c e2e-tests/companion-ui/playwright.config.ts",
     "e2e:companion-audio": "node e2e-tests/companion-dual-audio-smoke.mjs",
     "e2e:companion-context": "node e2e-tests/companion-synthetic-context.mjs",
     "e2e:companion-voice-interview": "node e2e-tests/companion-voice-interview.mjs",
@@ -80,6 +81,7 @@
     "vuetify": "^3.7.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.0",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/cli": "^2.0.0",
     "@tauri-apps/plugin-clipboard-manager": "^2.0.0",
