@@ -16,6 +16,7 @@
     "tauri:dev:memo-stack": "INTERVIEW_MEMORY_API_VARIANT=memo-stack INTERVIEW_MEMORY_API_URL=${INTERVIEW_MEMORY_API_URL:-${MEMO_STACK_API_URL:-${MEMORY_PLATFORM_API_URL:-http://127.0.0.1:7788}}} INTERVIEW_MEMORY_AUTH_TOKEN=${INTERVIEW_MEMORY_AUTH_TOKEN:-local-dev-token} VITE_API_URL=${VITE_API_URL:-https://api.voicetext.site} VOICE_TO_TEXT_BACKEND_URL=${VOICE_TO_TEXT_BACKEND_URL:-wss://api.voicetext.site} FOCUS_COPY_ENABLE_BROWSER_CDP=1 tauri dev",
     "tauri:dev:memory-platform": "pnpm tauri:dev:memo-stack",
     "tauri:build": "tauri build",
+    "test-interviewer": "tools/run-test-interviewer.sh",
     "tauri:build:local": "tauri build --no-bundle --ci --features local-access",
     "tauri:dev:whisper": "tauri dev --features whisper",
     "tauri:build:whisper": "tauri build --features whisper",

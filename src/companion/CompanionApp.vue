@@ -1525,7 +1525,7 @@ onUnmounted(() => {
 
 .feed-card {
   --chat-empty-font-size: 14px;
-  --chat-message-font-size: 14px;
+  --chat-message-font-size: 21px;
   --chat-message-line-height: 1.44;
   --chat-code-font-size: 11.5px;
   --chat-code-line-height: 1.42;

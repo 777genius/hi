@@ -32,6 +32,7 @@ import {
   type CodeExplainDonePayload,
   type CodeExplainErrorPayload,
 } from '@/types';
+import { useTestInterviewer } from '@/composables/useTestInterviewer';
 import { useAudioPermissions } from '@/composables/useAudioPermissions';
 import {
   CMD_COMPANION_CLEAR_CONTEXT,
@@ -91,6 +92,11 @@ const webSearchToggleTooltip = computed(() =>
 );
 
 const audioPermissions = useAudioPermissions();
+const testInterviewer = useTestInterviewer();
+function onTestInterviewerClick(e: MouseEvent) {
+  if (e.shiftKey) void testInterviewer.reset();
+  else void testInterviewer.askNext();
+}
 
 const shouldShowSystemAudioPermissionWarning = computed(() => {
   return !audioPermissions.systemAudioGranted.value;
@@ -288,7 +294,7 @@ const companionStatusLine = computed(() => {
 // Ref для области чата (для автоскролла)
 const chatScrollRef = computed(() => conversationFeedRef.value?.scrollEl ?? null);
 
-const CODE_EXPLAIN_SYSTEM_PROMPT = `Ты — ассистент на техническом собеседовании. Отвечай по-русски.
+const CODE_EXPLAIN_SYSTEM_PROMPT = `Ты — ассистент на техническом собеседовании. Всегда отвечай по-русски, даже если вопрос задан на украинском или английском. Технические термины оставляй на английском.
 
 Тебе дают:
 - "Выделенный фрагмент" — текст или код, на который нужно ответить/объяснить.
@@ -1650,6 +1656,13 @@ const onChatMouseDown = (e: MouseEvent) => {
             >
               Запросить доступ
             </button>
+            <button
+              v-if="shouldShowMicrophonePermissionWarning"
+              class="permission-warning-btn permission-warning-btn-secondary"
+              @click="audioPermissions.requestMicrophonePermission"
+            >
+              Запросить микрофон
+            </button>
           </div>
         </div>
       </div>
@@ -2040,6 +2053,24 @@ const onChatMouseDown = (e: MouseEvent) => {
       <!-- Controls -->
       <div class="controls">
         <div class="controls-center">
+          <v-tooltip
+            v-if="testInterviewer.enabled.value"
+            :text="testInterviewer.lastQuestion.value
+              ? `Следующий вопрос (озвучен ${testInterviewer.lastQuestion.value.number}/${testInterviewer.total.value}). Shift+клик: сначала`
+              : 'Тест-интервьюер: озвучить первый вопрос'"
+            location="top"
+          >
+            <template #activator="{ props: tp }">
+              <button
+                v-bind="tp"
+                class="web-search-toggle-button no-drag"
+                :disabled="testInterviewer.busy.value"
+                @click="onTestInterviewerClick"
+              >
+                <span class="mdi mdi-account-voice"></span>
+              </button>
+            </template>
+          </v-tooltip>
           <v-tooltip :text="webSearchToggleTooltip" location="top">
             <template #activator="{ props: tp }">
               <button

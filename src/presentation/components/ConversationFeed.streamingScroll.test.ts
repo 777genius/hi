@@ -152,4 +152,89 @@ describe('ConversationFeed assistant scrolling', () => {
     app.unmount();
     host.remove();
   });
+  it('does not drag the Companion feed down while an answer streams, even when the user is near the bottom', async () => {
+    const state = reactive({
+      messages: [{
+        id: 'q', kind: 'stt', role: 'incoming', status: 'final',
+        text: 'Question', createdAtMs: 1, seq: 1,
+      }] as ConversationFeedMessage[],
+    });
+    const host = document.createElement('div');
+    document.body.append(host);
+    // Companion не передаёт assistantStreaming: стриминг определяется по сообщению haiku.
+    const app = createApp({
+      render: () => h(ConversationFeed, { messages: state.messages, emptyText: '' }),
+    });
+    app.mount(host);
+    const scroll = host.querySelector('.chat-scroll') as HTMLElement;
+    let contentHeight = 1000;
+    Object.defineProperty(scroll, 'scrollHeight', { get: () => contentHeight });
+    Object.defineProperty(scroll, 'clientHeight', { get: () => 500 });
+    scroll.scrollTop = 480; // 20px до низа, то есть ближе порога 72px
+
+    state.messages.push({
+      id: 'answer', kind: 'haiku', role: 'incoming', status: 'streaming',
+      text: 'Part', createdAtMs: 2, seq: 2,
+    } as ConversationFeedMessage);
+    await nextTick();
+    contentHeight = 1600;
+    state.messages[1].text = 'Part and more';
+    await nextTick();
+    await nextTick();
+    expect(scroll.scrollTop).toBe(480);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it('stops following the stream when the user scrolls up after reaching the end', async () => {
+    const state = reactive({
+      messages: [{
+        id: 'q', kind: 'stt', role: 'incoming', status: 'final',
+        text: 'Question', createdAtMs: 1, seq: 1,
+      }] as ConversationFeedMessage[],
+    });
+    const host = document.createElement('div');
+    document.body.append(host);
+    const app = createApp({
+      render: () => h(ConversationFeed, { messages: state.messages, emptyText: '' }),
+    });
+    app.mount(host);
+    const scroll = host.querySelector('.chat-scroll') as HTMLElement;
+    let contentHeight = 1000;
+    Object.defineProperty(scroll, 'scrollHeight', { get: () => contentHeight });
+    Object.defineProperty(scroll, 'clientHeight', { get: () => 500 });
+    scroll.scrollTop = 500;
+
+    state.messages.push({
+      id: 'answer', kind: 'haiku', role: 'incoming', status: 'streaming',
+      text: 'First part', createdAtMs: 2, seq: 2,
+    } as ConversationFeedMessage);
+    await nextTick();
+
+    // пользователь доходит до конца: лента начинает следовать за ответом
+    contentHeight = 1500;
+    scroll.dispatchEvent(new WheelEvent('wheel', { bubbles: true }));
+    scroll.scrollTop = 1000;
+    scroll.dispatchEvent(new Event('scroll'));
+    contentHeight = 2000;
+    state.messages[1].text += ' and following';
+    await nextTick();
+    await nextTick();
+    expect(scroll.scrollTop).toBe(2000);
+    scroll.dispatchEvent(new Event('scroll'));
+
+    // теперь пользователь листает вверх, чтобы перечитать: ответ его не возвращает вниз
+    scroll.dispatchEvent(new WheelEvent('wheel', { bubbles: true }));
+    scroll.scrollTop = 1200;
+    scroll.dispatchEvent(new Event('scroll'));
+    contentHeight = 2600;
+    state.messages[1].text += ' and even more text';
+    await nextTick();
+    await nextTick();
+    expect(scroll.scrollTop).toBe(1200);
+
+    app.unmount();
+    host.remove();
+  });
 });

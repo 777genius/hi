@@ -55,6 +55,7 @@ let stickToBottomScheduled = false;
 let resumeAfterUserScroll = false;
 let frozenScrollTop: number | null = null;
 let userScrollIntent = false;
+let lastScrollTop = 0;
 let wasNearBottom = true;
 
 defineExpose({
@@ -63,6 +64,13 @@ defineExpose({
 });
 
 const hasActionsSlot = computed(() => !!slots.actions);
+
+// Companion не передаёт assistantStreaming, поэтому стриминг определяем и по самим сообщениям.
+const isAssistantStreaming = computed(
+  () =>
+    props.assistantStreaming ||
+    props.messages.some((message) => message.kind === 'haiku' && !message.deleted && message.status === 'streaming')
+);
 
 const latestAssistantMessageId = computed(() => {
   for (let index = props.messages.length - 1; index >= 0; index -= 1) {
@@ -357,18 +365,28 @@ function scheduleScrollStateUpdate(): void {
 
 function onScroll(): void {
   const element = scrollEl.value;
-  if (element && !shouldStickToBottomAfterRender && !props.assistantStreaming) {
+  if (element && !shouldStickToBottomAfterRender && !isAssistantStreaming.value) {
     wasNearBottom = isNearBottom(element);
   }
-  if (props.assistantStreaming && userScrollIntent && element && !resumeAfterUserScroll) {
+  if (isAssistantStreaming.value && userScrollIntent && element && !resumeAfterUserScroll) {
     frozenScrollTop = element.scrollTop;
   }
-  if (props.assistantStreaming && userScrollIntent && element && !resumeAfterUserScroll &&
+  if (isAssistantStreaming.value && userScrollIntent && element && !resumeAfterUserScroll &&
       scrollBottomRemaining(element) <= 2) {
     resumeAfterUserScroll = true;
     frozenScrollTop = null;
     wasNearBottom = true;
   }
+  // Пользователь прокрутил вверх, пока лента "прилипла" к низу: отпускаем и фиксируем позицию,
+  // иначе автоскролл возвращает его вниз и выйти из конца ленты невозможно.
+  if (element && isAssistantStreaming.value && userScrollIntent && resumeAfterUserScroll &&
+      element.scrollTop < lastScrollTop - 2 && scrollBottomRemaining(element) > 8) {
+    resumeAfterUserScroll = false;
+    shouldStickToBottomAfterRender = false;
+    frozenScrollTop = element.scrollTop;
+    wasNearBottom = false;
+  }
+  if (element) lastScrollTop = element.scrollTop;
   updateScrollToBottomVisibility();
 }
 
@@ -385,7 +403,7 @@ function scrollToBottom(behavior: ScrollBehavior = 'smooth'): void {
     behavior,
   });
   wasNearBottom = true;
-  if (props.assistantStreaming) {
+  if (isAssistantStreaming.value) {
     resumeAfterUserScroll = true;
     frozenScrollTop = null;
   }
@@ -393,8 +411,8 @@ function scrollToBottom(behavior: ScrollBehavior = 'smooth'): void {
 }
 
 function rememberStickToBottomIfCurrentlyPinned(): void {
-  if (props.assistantStreaming && !resumeAfterUserScroll) return;
-  if (props.assistantStreaming && resumeAfterUserScroll) {
+  if (isAssistantStreaming.value && !resumeAfterUserScroll) return;
+  if (isAssistantStreaming.value && resumeAfterUserScroll) {
     shouldStickToBottomAfterRender = true;
     scheduleStickToBottomAfterRender();
     return;
@@ -404,7 +422,7 @@ function rememberStickToBottomIfCurrentlyPinned(): void {
   scheduleStickToBottomAfterRender();
 }
 
-watch(() => props.assistantStreaming, (streaming) => {
+watch(isAssistantStreaming, (streaming) => {
   resumeAfterUserScroll = false;
   userScrollIntent = false;
   frozenScrollTop = streaming ? (scrollEl.value?.scrollTop ?? null) : null;
@@ -443,9 +461,9 @@ watch(
   () => [props.messages, props.emptyText],
   () => {
     rememberStickToBottomIfCurrentlyPinned();
-    if (props.assistantStreaming && !resumeAfterUserScroll && frozenScrollTop !== null) {
+    if (isAssistantStreaming.value && !resumeAfterUserScroll && frozenScrollTop !== null) {
       void nextTick(() => {
-        if (props.assistantStreaming && !resumeAfterUserScroll && scrollEl.value) {
+        if (isAssistantStreaming.value && !resumeAfterUserScroll && scrollEl.value) {
           scrollEl.value.scrollTop = frozenScrollTop!;
         }
       });

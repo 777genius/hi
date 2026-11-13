@@ -40,6 +40,17 @@ export function useAudioPermissions() {
     }
   }
 
+  async function requestMicrophonePermission(): Promise<void> {
+    if (!isTauriAvailable()) return;
+    try {
+      await invoke('request_microphone_permission');
+    } catch {
+      // no-op
+    } finally {
+      await refresh();
+    }
+  }
+
   const isAnyMissing = computed(() => !systemAudioGranted.value || !microphoneGranted.value);
 
   function startPolling(): void {
@@ -57,6 +68,7 @@ export function useAudioPermissions() {
 
   onMounted(async () => {
     await refresh();
+    if (!microphoneGranted.value) void requestMicrophonePermission();
     if (isAnyMissing.value) startPolling();
   });
 
@@ -79,6 +91,7 @@ export function useAudioPermissions() {
     lastError,
     refresh,
     requestSystemAudioPermission,
+    requestMicrophonePermission,
     startPolling,
     stopPolling,
   };

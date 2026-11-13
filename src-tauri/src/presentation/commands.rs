@@ -240,6 +240,55 @@ pub async fn get_audio_permission_status() -> Result<AudioPermissionStatus, Stri
     })
 }
 
+/// Тестовый режим интервьюера включён (INTERVIEW_TEST_MODE=1)?
+#[tauri::command]
+pub async fn get_test_interviewer_state() -> Result<(bool, usize), String> {
+    Ok((
+        crate::infrastructure::test_interviewer::is_enabled(),
+        crate::infrastructure::test_interviewer::total_questions(),
+    ))
+}
+
+/// Озвучивает следующий вопрос тестового интервьюера через системный вывод.
+#[tauri::command]
+pub async fn test_interviewer_next_question(
+) -> Result<crate::infrastructure::test_interviewer::TestInterviewQuestion, String> {
+    crate::infrastructure::test_interviewer::speak_next_question()
+}
+
+/// Сбрасывает тестового интервьюера к первому вопросу и обрывает озвучку.
+#[tauri::command]
+pub async fn test_interviewer_reset() -> Result<(), String> {
+    crate::infrastructure::test_interviewer::reset();
+    Ok(())
+}
+
+/// Просим у macOS разрешение на микрофон. Системный диалог появляется только
+/// пока статус "not determined"; если доступ уже запрещён, нужно включить его в Настройках.
+#[tauri::command]
+pub async fn request_microphone_permission() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use block::ConcreteBlock;
+        use cocoa::base::nil;
+        use cocoa::foundation::NSString;
+
+        unsafe {
+            let cls = class!(AVCaptureDevice);
+            // AVMediaTypeAudio == "soun"
+            let media_type = NSString::alloc(nil).init_str("soun");
+            let handler = ConcreteBlock::new(|_granted: objc::runtime::BOOL| {}).copy();
+            let _: () = msg_send![
+                cls,
+                requestAccessForMediaType: media_type
+                completionHandler: &*handler
+            ];
+        }
+    }
+
+    Ok(())
+}
+
 /// Просим у macOS разрешение Screen Recording (для системного звука).
 #[tauri::command]
 pub async fn request_system_audio_permission() -> Result<bool, String> {
@@ -3315,6 +3364,10 @@ const INTERVIEW_ANSWER_STYLE_GUARD: &str = r#"Правила стиля отве
 - Не используй символы "—" или "–". Только обычный дефис "-" или запятую.
 - Если личный опыт или детали реализации не подтверждены контекстом, не выдумывай их и не сообщай, что контекста недостаточно. Дай полезный технический ответ как подход: "Я бы...".
 - Если распознавание неточно или вопрос неполный, выбери наиболее вероятный смысл и ответь без уточняющих вопросов.
+- Никогда не задавай вопросов, в том числе риторических, и не проси уточнений или подтверждений. Не заканчивай ответ вопросом.
+- Теоретический вопрос: 3-5 предложений сразу по существу, без вступления, итога и общих фраз.
+- Говори о себе в мужском роде: "я бы настроил", "я сделал", "я использовал".
+- Вопрос по коду или картинке с кодом: сначала 1-2 предложения с главной проблемой и причиной, затем исправленный фрагмент кода с короткими комментариями на русском, затем 1-2 предложения о компромиссах. Не больше 120 слов вне кода, без разбора второстепенных мелочей.
 - По умолчанию отвечай коротким связным абзацем. Список используй только для нескольких самостоятельных пунктов или по явной просьбе.
 - Не добавляй предложение продолжить."#;
 
@@ -3417,7 +3470,8 @@ pub async fn start_haiku_stream(
             crate::domain::LlmProviderType::Backend => 0.2,
         });
 
-    let default_system_prompt = r#"Ты - ассистент на техническом собеседовании. Отвечай по-русски.
+    // Язык ответов всегда русский (самый понятный язык владельца), даже если вопрос на украинском/английском.
+    let default_system_prompt = r#"Ты - ассистент на техническом собеседовании. Всегда отвечай по-русски, даже если вопрос задан на украинском или английском. Технические термины оставляй на английском.
 
 Контекст ниже - транскрипция, возможны ошибки распознавания. В нём есть строки:
 - "ОС:" - то, что я слышу (обычно реплики собеседника/вопросы).
@@ -4267,7 +4321,8 @@ pub async fn start_haiku_chat_stream(
             crate::domain::LlmProviderType::Backend => 0.2,
         });
 
-    let default_system_prompt = r#"Ты - ассистент на техническом собеседовании. Отвечай по-русски.
+    // Язык ответов всегда русский (самый понятный язык владельца), даже если вопрос на украинском/английском.
+    let default_system_prompt = r#"Ты - ассистент на техническом собеседовании. Всегда отвечай по-русски, даже если вопрос задан на украинском или английском. Технические термины оставляй на английском.
 
 Контекст ниже - транскрипция, возможны ошибки распознавания. В нём есть строки:
 - "ОС:" - то, что я слышу (обычно реплики собеседника/вопросы).
@@ -4980,7 +5035,8 @@ pub async fn start_code_explain_stream(
             crate::domain::LlmProviderType::Backend => 0.2,
         });
 
-    let default_system_prompt = r#"Ты - ассистент на техническом собеседовании. Отвечай по-русски.
+    // Язык ответов всегда русский (самый понятный язык владельца), даже если вопрос на украинском/английском.
+    let default_system_prompt = r#"Ты - ассистент на техническом собеседовании. Всегда отвечай по-русски, даже если вопрос задан на украинском или английском. Технические термины оставляй на английском.
 
 Тебе дают:
 - "Выделенный фрагмент" - текст или код, на который нужно ответить/объяснить.

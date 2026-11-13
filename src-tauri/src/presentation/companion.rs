@@ -416,6 +416,15 @@ struct E2eSystemTranscriptBody {
     session_id: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct E2ePlayAudioBody {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    device: Option<String>,
+}
+
 pub fn new_runtime() -> CompanionRuntime {
     let snapshot = CompanionSnapshotEnvelope::default();
     let (sse_tx, _sse_rx) = watch::channel(snapshot.clone());
@@ -955,6 +964,9 @@ async fn route_request(
         (Method::POST, "/api/focus-copy/ingest") => {
             handle_focus_copy_ingest_post(app_handle.clone(), req).await
         }
+        (Method::POST, "/api/e2e/play-audio") => {
+            handle_e2e_play_audio_post(app_handle.clone(), req).await
+        }
         #[cfg(debug_assertions)]
         (Method::POST, "/api/e2e/timeline/system") => {
             handle_e2e_system_transcript_post(app_handle.clone(), req).await
@@ -1442,6 +1454,48 @@ async fn handle_focus_copy_ingest_post(
             )
         }
         Err(error) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+/// Тестовый режим (INTERVIEW_TEST_MODE=1): проигрывает PCM-файл в устройство вывода из процесса приложения.
+async fn handle_e2e_play_audio_post(
+    app_handle: AppHandle,
+    req: Request<Incoming>,
+) -> Response<CompanionBody> {
+    if !crate::infrastructure::test_interviewer::is_enabled() {
+        return text_response(StatusCode::NOT_FOUND, "Not found");
+    }
+    let Some(token) = parse_header_token(req.headers()) else {
+        return text_response(StatusCode::UNAUTHORIZED, "Missing token");
+    };
+    if !is_valid_token(&app_handle, &token).await {
+        return text_response(StatusCode::FORBIDDEN, "Forbidden");
+    }
+    if !has_json_content_type(req.headers()) {
+        return text_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Expected application/json",
+        );
+    }
+    let body = match read_json_body::<E2ePlayAudioBody>(req).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let (Some(path), Some(device)) = (body.path, body.device) else {
+        return text_response(StatusCode::BAD_REQUEST, "Missing path or device");
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        crate::infrastructure::test_interviewer::play_pcm_to_device(&path, &device)
+    })
+    .await;
+    match result {
+        Ok(Ok(seconds)) => json_response(
+            StatusCode::OK,
+            serde_json::json!({ "ok": true, "seconds": seconds }).to_string(),
+        ),
+        Ok(Err(error)) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+        Err(error) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
 }
 
