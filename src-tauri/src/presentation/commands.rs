@@ -4505,9 +4505,7 @@ pub async fn start_haiku_chat_stream(
     let memory_mode =
         crate::presentation::interview_memory_bridge::resolved_mode_for_state(state.inner()).await;
     let mut llm_context = if memory_mode.minimal_local_prompt_context_enabled() {
-        crate::presentation::interview_memory_bridge::minimal_current_session_fallback_context(
-            &context,
-        )
+        crate::presentation::interview_memory_bridge::local_prompt_fallback_context(&context)
     } else {
         context.clone()
     };

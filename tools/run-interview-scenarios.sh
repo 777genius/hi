@@ -31,5 +31,6 @@ for name in "${SCENARIOS[@]}"; do
   sleep 20 # прогрев моделей
   node e2e-tests/companion-ua-interview-audio.mjs --scenario "e2e-tests/scenarios/$name.json" --duration-min "$MINUTES" --turns "${TURNS:-0}" \
     > "$LOG_DIR/$name.log" 2>&1
-  echo "=== $(date +%T) $name exit=$? $(grep -E 'SUMMARY|JUDGE' "$LOG_DIR/$name.log" | tail -2 | cut -c1-400)" | tee -a "$LOG_DIR/driver.log"
+  node_status=$?
+  echo "=== $(date +%T) $name exit=$node_status $(grep -E 'SUMMARY|JUDGE' "$LOG_DIR/$name.log" | tail -2 | cut -c1-400)" | tee -a "$LOG_DIR/driver.log"
 done

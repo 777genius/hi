@@ -462,11 +462,7 @@ async fn ensure_persisted_security_token(state: &AppState) -> Result<String, Str
 
     match crate::infrastructure::ConfigStore::load_companion_bridge_token().await {
         Ok(Some(token)) => {
-            {
-                let mut config = state.config.write().await;
-                config.companion_access_token = Some(token.clone());
-            }
-            save_token_into_disk_config(&token)
+            save_token_into_disk_config(state, &token)
                 .await
                 .map_err(|e| format!("Failed to restore companion token: {}", e))?;
             persist_companion_bridge_token(&token).await;
@@ -480,11 +476,7 @@ async fn ensure_persisted_security_token(state: &AppState) -> Result<String, Str
     }
 
     let token = generate_security_token();
-    {
-        let mut config = state.config.write().await;
-        config.companion_access_token = Some(token.clone());
-    }
-    save_token_into_disk_config(&token)
+    save_token_into_disk_config(state, &token)
         .await
         .map_err(|e| format!("Failed to persist companion token: {}", e))?;
 
@@ -495,7 +487,11 @@ async fn ensure_persisted_security_token(state: &AppState) -> Result<String, Str
 /// Companion стартует параллельно с загрузкой конфига при старте: в памяти тогда ещё дефолты.
 /// Поэтому токен дописываем в конфиг С ДИСКА (read-modify-write), а не сохраняем снимок из памяти,
 /// иначе сохранённые настройки пользователя (хоткей, устройства, STT) затираются дефолтами.
-async fn save_token_into_disk_config(token: &str) -> anyhow::Result<()> {
+/// Операция идёт под тем же замком `state.config`, что и `update_app_config`, чтобы устаревший снимок
+/// с диска не перезаписал настройки, сохранённые пользователем между чтением и записью.
+async fn save_token_into_disk_config(state: &AppState, token: &str) -> anyhow::Result<()> {
+    let mut config = state.config.write().await;
+    config.companion_access_token = Some(token.to_string());
     let mut on_disk = match crate::infrastructure::ConfigStore::load_app_config().await {
         Ok(config) => config,
         Err(error) => {

@@ -518,7 +518,7 @@ async function main() {
   await writeFile(join(outDir, 'report.md'), renderMarkdown(report));
   log('SUMMARY', JSON.stringify(report.summary));
   log('report:', join(outDir, 'report.md'));
-  process.exit(report.errors.length ? 1 : 0);
+  process.exit(report.errors.length || (report.incidents || []).length ? 1 : 0);
 }
 
 

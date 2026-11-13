@@ -130,9 +130,17 @@ ${tail || '(это начало интервью)'}
     console.error(`[${name}] ${turns.length}/${spec.turns}`);
   }
   const recallPrompt = `По сценарию интервью: ${spec.brief}\n\nВот его ходы:\n${turns.map((t) => `${t.id}. Q: ${t.q}\n   A: ${t.a}`).join('\n').slice(0, 24000)}\n\nСоставь 3 контрольных вопроса ассистенту на проверку памяти контекста (например "О чём спрашивали в начале и что я ответил?", "Какие технологии я называл про X?", "Назови 3 темы, на которых я ошибался/затруднялся"). Для каждого: {"id","text","expect":[5-7 ключевых терминов/фактов из сценария, которые должны быть в верном ответе],"minHits":2}. Верни ТОЛЬКО JSON в блоке \`\`\`json: {"finalRecall":[...]}.`;
-  let recall = { finalRecall: [] };
-  try { recall = extractJson(await chat(recallPrompt, 3000)); } catch (e) { console.error(`[${name}] recall prompt failed: ${e.message}`); }
-  const out = { name, ...spec, turns, images, finalRecall: recall.finalRecall || [] };
+  let recall = null;
+  for (let attempt = 1; attempt <= 3 && !recall; attempt += 1) {
+    try {
+      const parsed = extractJson(await chat(recallPrompt, 3000));
+      if (Array.isArray(parsed.finalRecall) && parsed.finalRecall.length > 0) recall = parsed;
+      else console.error(`[${name}] recall attempt ${attempt}: empty finalRecall`);
+    } catch (e) { console.error(`[${name}] recall attempt ${attempt} failed: ${e.message}`); }
+  }
+  // Без контрольных вопросов сценарий бесполезен: не затираем существующий файл пустым finalRecall.
+  if (!recall) throw new Error('could not generate finalRecall');
+  const out = { name, ...spec, turns, images, finalRecall: recall.finalRecall };
   await mkdir(outDir, { recursive: true });
   await writeFile(join(outDir, `${name}.json`), JSON.stringify(out, null, 2));
   console.error(`[${name}] done: ${turns.length} turns, ${Object.keys(images).length} images -> scenarios/${name}.json`);
@@ -140,4 +148,4 @@ ${tail || '(это начало интервью)'}
 
 const arg = process.argv[2] || 'all';
 const names = arg === 'all' ? Object.keys(SPECS) : [arg];
-await Promise.all(names.map((n) => generate(n).catch((e) => console.error(`[${n}] FAILED: ${e.message}`))));
+await Promise.all(names.map((n) => generate(n).catch((e) => { process.exitCode = 1; console.error(`[${n}] FAILED: ${e.message}`); })));
