@@ -2444,7 +2444,9 @@ const onChatMouseDown = (e: MouseEvent) => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* Сообщения вплотную к краям окна: убираем боковой отступ контейнера. */
+  /* Сообщения вплотную к краям окна: вылезаем на боковой отступ контейнера с обеих сторон,
+     ширину задаём явно, иначе при width:100% лента просто сдвигается влево и текст обрезается. */
+  width: calc(100% + 2 * var(--spacing-sm));
   margin-inline: calc(-1 * var(--spacing-sm));
 }
 

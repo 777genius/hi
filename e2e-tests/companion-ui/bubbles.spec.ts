@@ -20,6 +20,8 @@ test.describe('Форма сообщений', () => {
         gapLeft: Math.round(rect.left - scroll.left),
         gapRight: Math.round(scroll.right - rect.right),
         radius: style.borderRadius,
+        padLeft: parseFloat(style.paddingLeft),
+        padRight: parseFloat(style.paddingRight),
       };
     });
 
@@ -27,12 +29,14 @@ test.describe('Форма сообщений', () => {
     expect(incoming.border).toBe('0px');
     expect(incoming.gapLeft).toBe(0);
     expect(incoming.radius).toMatch(/^0px \d+px \d+px 0px$/);
+    expect(incoming.padLeft, 'внутри входящего сообщения есть отступ со стороны края').toBeGreaterThanOrEqual(8);
 
     for (const id of ['mic:2', 'prompt:3']) {
       const outgoing = await measure(id);
       expect(outgoing.border, id).toBe('0px');
       expect(outgoing.gapRight, id).toBeLessThanOrEqual(1);
       expect(outgoing.radius, id).toMatch(/^\d+px 0px 0px \d+px$/);
+      expect(outgoing.padRight, `${id}: внутри исходящего сообщения есть отступ со стороны края`).toBeGreaterThanOrEqual(8);
     }
   });
 });
