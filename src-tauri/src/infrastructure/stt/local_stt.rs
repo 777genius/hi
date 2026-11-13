@@ -57,6 +57,26 @@ const PARAKEET_MAX_UTTERANCE_MS: usize = 6_000;
 const SPECULATIVE_PAUSE_MS: usize = 150;
 const WHISPER_HALLUCINATION_MAX_SECONDS: f64 = 2.5;
 
+/// Decoder threads (including the ones the inference library spawns from here) must not starve
+/// the app's own request handling: while someone speaks, decoding saturates the cores and an
+/// LLM request used to wait seconds before it even started. UTILITY is below the default QoS of
+/// the async runtime threads, so they win under contention; idle machines see no difference.
+#[cfg(target_os = "macos")]
+fn lower_decoder_thread_priority() {
+    extern "C" {
+        fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+    }
+    const QOS_CLASS_UTILITY: u32 = 0x11;
+    // SAFETY: plain libpthread call that only changes the calling thread's QoS.
+    let status = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0) };
+    if status != 0 {
+        log::debug!("Could not lower the STT decoder thread priority (status {status})");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn lower_decoder_thread_priority() {}
+
 /// Function words Whisper emits alone on near-silence ("and the"); never a real utterance.
 const WHISPER_FILLER_WORDS: &[&str] = &["and", "the", "a", "of", "to", "in", "uh", "um", "so", "but"];
 
@@ -490,6 +510,7 @@ impl SttProvider for LocalSttProvider {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<SttResult<()>>();
 
         let worker = tokio::task::spawn_blocking(move || -> SttResult<()> {
+            lower_decoder_thread_priority();
             // Validate model/session readiness before starting the audio capture.
             let mut session = match model.session() {
                 Ok(session) => {
