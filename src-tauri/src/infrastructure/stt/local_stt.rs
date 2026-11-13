@@ -57,6 +57,26 @@ const PARAKEET_MAX_UTTERANCE_MS: usize = 6_000;
 const SPECULATIVE_PAUSE_MS: usize = 150;
 const WHISPER_HALLUCINATION_MAX_SECONDS: f64 = 2.5;
 
+/// Whisper on silence can loop over its decoding vocabulary ("Glossary, Glossary, ...").
+/// Real speech never repeats one word this many times, whatever the clip length.
+fn is_repetition_loop(text: &str) -> bool {
+    const MIN_WORDS: usize = 6;
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .filter(|word| !word.is_empty())
+        .collect();
+    if words.len() < MIN_WORDS {
+        return false;
+    }
+    let mut counts = std::collections::HashMap::new();
+    for word in &words {
+        *counts.entry(word.as_str()).or_insert(0usize) += 1;
+    }
+    let most = counts.values().copied().max().unwrap_or(0);
+    most >= MIN_WORDS && most * 10 >= words.len() * 7
+}
+
 /// Weights + decode behaviour of one local model. Everything model-specific
 /// lives here so adding a model is one enum arm, not another provider copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,6 +210,7 @@ impl LocalModel {
             .trim_matches(|c: char| !c.is_alphanumeric())
             .to_lowercase();
         normalized.is_empty()
+            || is_repetition_loop(text)
             || (duration_s <= WHISPER_HALLUCINATION_MAX_SECONDS
                 && (WHISPER_HALLUCINATIONS.contains(&normalized.as_str())
                     || WHISPER_HALLUCINATION_FRAGMENTS
@@ -790,6 +811,14 @@ mod tests {
             let error = LocalModel::WhisperLargeV3.resolve_path(&config).unwrap_err();
             assert!(error.to_string().contains(".gguf"), "{error}");
         }
+    }
+
+    #[test]
+    fn whisper_hallucination_guard_drops_vocabulary_repetition_loops() {
+        let w = LocalModel::WhisperLargeV3Turbo;
+        assert!(w.is_hallucination("Glossary, Glossary, Glossary, Glossary, Glossary, Glossary,", 12.0));
+        assert!(w.is_hallucination(&"OpenAI, ".repeat(40), 25.0));
+        assert!(!w.is_hallucination("Мы используем Kafka, а не Kafka Streams, и Kafka Connect отдельно", 6.0));
     }
 
     #[test]
