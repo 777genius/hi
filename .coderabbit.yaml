@@ -1,2 +1,6 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 language: "ru-RU"
+reviews:
+  auto_review:
+    # Ревьюить и Draft PR: новые PR у нас по умолчанию открываются как Draft.
+    drafts: true
