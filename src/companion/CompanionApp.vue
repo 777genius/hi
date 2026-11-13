@@ -1743,33 +1743,6 @@ onUnmounted(() => {
   color: #1d5fbf;
 }
 
-.theme-light .pwa-notice {
-  border-color: rgba(15, 23, 42, 0.1);
-  background: rgba(255, 255, 255, 0.92);
-}
-
-.theme-light .pwa-notice.tone-warn {
-  border-color: rgba(138, 90, 0, 0.28);
-  background: #fff6db;
-}
-
-.theme-light .pwa-notice.tone-error {
-  border-color: rgba(180, 35, 24, 0.28);
-  background: #fdecea;
-}
-
-.theme-light .pwa-notice-icon {
-  color: #1d5fbf;
-}
-
-.theme-light .pwa-notice-icon-button {
-  background: rgba(15, 23, 42, 0.06);
-}
-
-.theme-light .pwa-diagnostic-label {
-  color: var(--color-text);
-}
-
 .summary-label {
   font-size: 12px;
   text-transform: uppercase;
