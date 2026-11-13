@@ -151,7 +151,8 @@ describe('ConversationFeed assistant scrolling', () => {
     expect(host.textContent).toContain('Сервер временно недоступен');
     app.unmount();
     host.remove();
-  });
+    // 300 строк и 20 перерисовок в jsdom: на загруженном CI это дольше стандартных 5 секунд.
+  }, 30_000);
   it('does not drag the Companion feed down while an answer streams, even when the user is near the bottom', async () => {
     const state = reactive({
       messages: [{

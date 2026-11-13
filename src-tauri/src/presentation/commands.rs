@@ -1861,6 +1861,7 @@ pub async fn update_stt_config(
         "backend" => SttProviderType::Backend,
         "parakeetultra" => SttProviderType::ParakeetUltra,
         "whisperlargev3" => SttProviderType::WhisperLargeV3,
+        "whisperlargev3turbo" => SttProviderType::WhisperLargeV3Turbo,
         other => return Err(format!("Unsupported STT provider: {other}")),
     };
 

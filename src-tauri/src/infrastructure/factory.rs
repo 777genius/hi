@@ -31,7 +31,9 @@ impl SttProviderFactory for DefaultSttProviderFactory {
         match config.provider {
             SttProviderType::WhisperLocal => Ok(Box::new(WhisperLocalProvider::new())),
 
-            SttProviderType::ParakeetUltra | SttProviderType::WhisperLargeV3 => {
+            SttProviderType::ParakeetUltra
+            | SttProviderType::WhisperLargeV3
+            | SttProviderType::WhisperLargeV3Turbo => {
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                 {
                     let model = LocalModel::for_provider(config.provider)
@@ -89,7 +91,11 @@ mod tests {
     #[test]
     fn test_create_local_models() {
         let factory = DefaultSttProviderFactory::new();
-        for provider in [SttProviderType::ParakeetUltra, SttProviderType::WhisperLargeV3] {
+        for provider in [
+            SttProviderType::ParakeetUltra,
+            SttProviderType::WhisperLargeV3,
+            SttProviderType::WhisperLargeV3Turbo,
+        ] {
             let config = SttConfig::new(provider);
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             assert!(factory.create(&config).is_ok());

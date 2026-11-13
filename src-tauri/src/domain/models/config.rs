@@ -9,8 +9,10 @@ pub enum SttProviderType {
     /// Parakeet Ultra with per-utterance VAD, local Metal inference on Apple Silicon.
     ParakeetUltra,
     /// Whisper Large-v3 (Q8) with per-utterance VAD, vocabulary and local Metal inference.
-    /// More accurate than Parakeet, but ~1 s slower per phrase.
+    /// Most accurate, ~1 s per phrase.
     WhisperLargeV3,
+    /// Whisper Large-v3-Turbo (Q8): near Large-v3 accuracy with a vocabulary, ~40% faster.
+    WhisperLargeV3Turbo,
     /// AssemblyAI Universal-Streaming v3 (low cost, ultra-low latency)
     AssemblyAI,
     /// Deepgram cloud service (Nova-3 model)
@@ -27,7 +29,10 @@ impl SttProviderType {
     /// Providers that run a local GGUF model over VAD-segmented utterances
     /// (one shared pipeline, different weights).
     pub fn is_local_utterance(self) -> bool {
-        matches!(self, Self::ParakeetUltra | Self::WhisperLargeV3)
+        matches!(
+            self,
+            Self::ParakeetUltra | Self::WhisperLargeV3 | Self::WhisperLargeV3Turbo
+        )
     }
 }
 
@@ -337,6 +342,8 @@ mod tests {
         assert_eq!(serde_json::to_string(&SttProviderType::WhisperLargeV3).unwrap(), "\"whisperlargev3\"");
         assert!(SttProviderType::ParakeetUltra.is_local_utterance());
         assert!(SttProviderType::WhisperLargeV3.is_local_utterance());
+        assert_eq!(serde_json::to_string(&SttProviderType::WhisperLargeV3Turbo).unwrap(), "\"whisperlargev3turbo\"");
+        assert!(SttProviderType::WhisperLargeV3Turbo.is_local_utterance());
         assert!(!SttProviderType::Backend.is_local_utterance());
         assert!(!SttProviderType::WhisperLocal.is_local_utterance());
     }

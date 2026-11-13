@@ -25,9 +25,10 @@ const STOP_TAIL_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 // virtualized macOS runners. A 10s Stop timeout lost valid final utterances.
 // Keep a finite deadline, but allow genuine ongoing local decode to drain.
 const STOP_DECODE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-/// Whisper truncates vocabulary + prompt at ~223 tokens; stay well below that
-/// even for Cyrillic-heavy terms (~2 chars per token).
-const WHISPER_VOCABULARY_MAX_CHARS: usize = 400;
+/// Upper bound on glossary text handed to Whisper. The decoder slot holds ~223
+/// tokens shared with the prompt; transcribe.cpp drops terms from the END of the
+/// list (with a warning) when they do not fit, so the first glossary lines win.
+const WHISPER_VOCABULARY_MAX_CHARS: usize = 1500;
 /// Short Whisper outputs on near-silence that are known hallucinations.
 const WHISPER_HALLUCINATIONS: &[&str] = &[
     "thank you for watching",
@@ -45,6 +46,7 @@ const WHISPER_HALLUCINATION_MAX_SECONDS: f64 = 2.5;
 pub enum LocalModel {
     ParakeetUltra,
     WhisperLargeV3,
+    WhisperLargeV3Turbo,
 }
 
 impl LocalModel {
@@ -52,6 +54,7 @@ impl LocalModel {
         match provider {
             SttProviderType::ParakeetUltra => Some(Self::ParakeetUltra),
             SttProviderType::WhisperLargeV3 => Some(Self::WhisperLargeV3),
+            SttProviderType::WhisperLargeV3Turbo => Some(Self::WhisperLargeV3Turbo),
             _ => None,
         }
     }
@@ -60,13 +63,19 @@ impl LocalModel {
         match self {
             Self::ParakeetUltra => "Parakeet Ultra Q8",
             Self::WhisperLargeV3 => "Whisper Large-v3 Q8",
+            Self::WhisperLargeV3Turbo => "Whisper Large-v3-Turbo Q8",
         }
+    }
+
+    fn is_whisper(self) -> bool {
+        matches!(self, Self::WhisperLargeV3 | Self::WhisperLargeV3Turbo)
     }
 
     fn provider_name(self) -> &'static str {
         match self {
             Self::ParakeetUltra => "parakeet-ultra-local",
             Self::WhisperLargeV3 => "whisper-large-v3-local",
+            Self::WhisperLargeV3Turbo => "whisper-large-v3-turbo-local",
         }
     }
 
@@ -74,6 +83,7 @@ impl LocalModel {
         match self {
             Self::ParakeetUltra => "parakeet-ultra-Q8_0.gguf",
             Self::WhisperLargeV3 => "whisper-large-v3-Q8_0.gguf",
+            Self::WhisperLargeV3Turbo => "whisper-large-v3-turbo-Q8_0.gguf",
         }
     }
 
@@ -81,6 +91,7 @@ impl LocalModel {
         match self {
             Self::ParakeetUltra => "handy-computer/parakeet-ultra-gguf",
             Self::WhisperLargeV3 => "handy-computer/whisper-large-v3-gguf",
+            Self::WhisperLargeV3Turbo => "handy-computer/whisper-large-v3-turbo-gguf",
         }
     }
 
@@ -88,6 +99,7 @@ impl LocalModel {
         match self {
             Self::ParakeetUltra => "HACKINTERVIEW_PARAKEET_MODEL_PATH",
             Self::WhisperLargeV3 => "HACKINTERVIEW_WHISPER_MODEL_PATH",
+            Self::WhisperLargeV3Turbo => "HACKINTERVIEW_WHISPER_TURBO_MODEL_PATH",
         }
     }
 
@@ -96,29 +108,33 @@ impl LocalModel {
         match self {
             Self::ParakeetUltra => 740_363_168,
             Self::WhisperLargeV3 => 1_668_741_440,
+            Self::WhisperLargeV3Turbo => 886_381_728,
         }
     }
 
     /// Pinned Handy catalog revision: parakeet 39eeb55181f0d354fd934f06e92fd8d5037fed8e,
-    /// whisper 274ad1d1cf680b7ee53cc70f78461394cd3a344b.
+    /// whisper 274ad1d1cf680b7ee53cc70f78461394cd3a344b,
+    /// whisper-turbo 18ada752005f5fddef499256f9a458d0b37a203a.
     fn sha256(self) -> &'static str {
         match self {
             Self::ParakeetUltra => "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59",
             Self::WhisperLargeV3 => "2fa1a5f179f8a511a53e2108db270aa4af3ce08cd976af4180e2854666bb4ba3",
+            Self::WhisperLargeV3Turbo => "257aa7ec9121c22c167d5e2c49e3e76b4ba0e6e27ebc13074eba0a80f8190220",
         }
     }
 
-    /// Whisper re-decodes a zero-padded 30 s window (~1 s per call), so live
-    /// previews would only delay the final phrase; Parakeet previews cost ~0.1 s.
+    /// Live previews re-decode the growing phrase every 2 s of speech. Parakeet
+    /// (~0.1 s) and Turbo (~0.65 s) can afford it; Large-v3 re-decodes a
+    /// zero-padded 30 s window in ~1.1 s, which would only delay the final phrase.
     fn emits_previews(self) -> bool {
-        matches!(self, Self::ParakeetUltra)
+        !matches!(self, Self::WhisperLargeV3)
     }
 
     fn run_options(self, glossary: &LocalGlossary) -> transcribe_cpp::RunOptions {
         match self {
             // Automatic RU/EN/UK detection, post-corrected by the glossary.
             Self::ParakeetUltra => transcribe_cpp::RunOptions::default(),
-            Self::WhisperLargeV3 => transcribe_cpp::RunOptions {
+            Self::WhisperLargeV3 | Self::WhisperLargeV3Turbo => transcribe_cpp::RunOptions {
                 vocabulary: glossary.vocabulary(WHISPER_VOCABULARY_MAX_CHARS),
                 family: Some(transcribe_cpp::RunExtension::Whisper(
                     transcribe_cpp::WhisperRunOptions {
@@ -136,7 +152,7 @@ impl LocalModel {
     /// True when `text` is a known Whisper hallucination: punctuation-only
     /// output, or a stock phrase ("Thank you for watching") on a short clip.
     fn is_hallucination(self, text: &str, duration_s: f64) -> bool {
-        if self != Self::WhisperLargeV3 {
+        if !self.is_whisper() {
             return false;
         }
         let normalized = text
@@ -296,6 +312,8 @@ async fn enqueue_final_tail(
 /// v0.4.x permits only one active decode per loaded model.
 pub struct LocalSttProvider {
     kind: LocalModel,
+    /// Emit live previews (defaults to the model's preference; tests may override).
+    previews: bool,
     model: Option<transcribe_cpp::Model>,
     segmenter: Option<UtteranceSegmenter>,
     job_tx: Option<mpsc::Sender<Utterance>>,
@@ -308,6 +326,7 @@ impl LocalSttProvider {
     pub fn new(kind: LocalModel) -> Self {
         Self {
             kind,
+            previews: kind.emits_previews(),
             model: None,
             segmenter: None,
             job_tx: None,
@@ -461,7 +480,7 @@ impl SttProvider for LocalSttProvider {
         let segmenter = self.segmenter.as_mut().ok_or_else(|| {
             SttError::Internal("Local STT segmenter missing".into())
         })?;
-        let emits_previews = self.kind.emits_previews();
+        let emits_previews = self.previews;
         let jobs = segmenter.accept(chunk)?;
         if let Some(tx) = &self.job_tx {
             for job in jobs {
@@ -623,7 +642,13 @@ mod tests {
         assert_eq!(w.sha256().len(), 64);
         assert_eq!(LocalModel::for_provider(SttProviderType::WhisperLargeV3), Some(w));
         assert_eq!(LocalModel::for_provider(SttProviderType::Backend), None);
-        assert!(p.emits_previews() && !w.emits_previews());
+        let t = LocalModel::WhisperLargeV3Turbo;
+        assert_ne!(t.file_name(), w.file_name());
+        assert_ne!(t.sha256(), w.sha256());
+        assert_ne!(t.path_env(), w.path_env());
+        assert_eq!(t.sha256().len(), 64);
+        assert_eq!(LocalModel::for_provider(SttProviderType::WhisperLargeV3Turbo), Some(t));
+        assert!(p.emits_previews() && t.emits_previews() && !w.emits_previews());
     }
 
     #[test]
@@ -649,6 +674,7 @@ mod tests {
         assert!(!w.is_hallucination("Да, использую Redis", 1.2));
         // Parakeet has no such failure mode and is never filtered.
         assert!(!LocalModel::ParakeetUltra.is_hallucination("you", 0.5));
+        assert!(LocalModel::WhisperLargeV3Turbo.is_hallucination("you", 0.8));
     }
 
     /// Real ASR E2E: run ONLY with two distinct 16 kHz mono PCM16 fixtures and
@@ -660,6 +686,7 @@ mod tests {
     async fn e2e_local_stt_two_sources() {
         let provider_type = match std::env::var("LOCAL_STT_MODEL").as_deref() {
             Ok("whisper") => SttProviderType::WhisperLargeV3,
+            Ok("turbo") => SttProviderType::WhisperLargeV3Turbo,
             _ => SttProviderType::ParakeetUltra,
         };
         let kind = LocalModel::for_provider(provider_type).unwrap();

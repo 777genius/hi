@@ -2,7 +2,7 @@
 //! One line per term: `Canonical term = heard variant | another variant`.
 use std::path::PathBuf;
 
-const MAX_RULES: usize = 100;
+const MAX_RULES: usize = 160;
 const MAX_ALIASES_PER_RULE: usize = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,11 +40,12 @@ impl LocalGlossary {
     fn parse(source: &str) -> Self {
         let mut rules = Vec::new();
         let mut terms: Vec<String> = Vec::new();
-        for line in source.lines().take(MAX_RULES) {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
+        let rule_lines = source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .take(MAX_RULES);
+        for line in rule_lines {
             let (canonical, aliases) = line.split_once('=').unwrap_or((line, ""));
             let canonical = canonical.trim();
             if canonical.is_empty() || canonical.chars().count() > 80 {
@@ -159,6 +160,17 @@ mod tests {
         // "Clean Architecture" (18) + 2 fits in 20; the next term does not.
         assert_eq!(glossary.vocabulary(20), vec!["Clean Architecture"]);
         assert!(LocalGlossary::default().vocabulary(100).is_empty());
+    }
+
+    #[test]
+    fn comment_lines_do_not_use_up_the_rule_budget() {
+        let mut source = String::from("# header\n# another header\n");
+        for i in 0..200 {
+            source.push_str(&format!("Term{i} = alias{i}\n"));
+        }
+        let glossary = LocalGlossary::parse(&source);
+        assert_eq!(glossary.vocabulary(usize::MAX).len(), 160, "capped at MAX_RULES terms");
+        assert_eq!(glossary.vocabulary(usize::MAX)[0], "Term0", "file order = priority");
     }
 
     #[test]

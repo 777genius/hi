@@ -33,6 +33,8 @@ describe('local STT provider settings', () => {
 
   it('switches between local models and keeps each choice in the saved draft', () => {
     const store = useSettingsStore();
+    store.setProvider(SttProviderType.WhisperLargeV3Turbo);
+    expect(store.provider).toBe(SttProviderType.WhisperLargeV3Turbo);
     store.setProvider(SttProviderType.WhisperLargeV3);
     expect(store.provider).toBe(SttProviderType.WhisperLargeV3);
     const snapshot = store.currentState;

@@ -179,13 +179,18 @@ export enum SttProviderType {
   WhisperLocal = 'whisperlocal',
   ParakeetUltra = 'parakeetultra',
   WhisperLargeV3 = 'whisperlargev3',
+  WhisperLargeV3Turbo = 'whisperlargev3turbo',
   GoogleCloud = 'googlecloud',
   Azure = 'azure',
 }
 
 /** On-device models that share one VAD-utterance pipeline (mirrors Rust `is_local_utterance`). */
 export function isLocalUtteranceProvider(provider: SttProviderType): boolean {
-  return provider === SttProviderType.ParakeetUltra || provider === SttProviderType.WhisperLargeV3;
+  return (
+    provider === SttProviderType.ParakeetUltra
+    || provider === SttProviderType.WhisperLargeV3
+    || provider === SttProviderType.WhisperLargeV3Turbo
+  );
 }
 
 export interface SttConfig {
