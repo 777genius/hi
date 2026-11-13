@@ -585,6 +585,10 @@ function extractErrorMessage(status: number, payload: CompanionActionResponse | 
   if (status === 401 || status === 403) {
     return 'Ссылка устарела или companion перезапустился. Открой QR из окна приложения заново.';
   }
+  if (status === 413) {
+    // Сервер отвечает техническим "Request body too large": объясняем, что сделать с черновиком.
+    return 'Сообщение слишком большое для отправки: убери часть фото и отправь ещё раз.';
+  }
   return compactResponseError(raw, `Запрос завершился ошибкой: ${status}`);
 }
 
