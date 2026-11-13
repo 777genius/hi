@@ -692,6 +692,7 @@ impl TranscriptionService {
             let on_error_for_refresh = on_error.clone();
             let refresh_task = tokio::spawn(async move {
                 let mut last_refresh = std::time::Instant::now();
+                let mut refresh_number: u32 = 0;
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     if *status.read().await != RecordingStatus::Recording {
@@ -711,7 +712,11 @@ impl TranscriptionService {
                     if !guard.is_capturing() {
                         break;
                     }
-                    log::info!("Refreshing ScreenCaptureKit after {}ms of silence", quiet_ms);
+                    refresh_number += 1;
+                    log::info!(
+                        "Refreshing ScreenCaptureKit #{refresh_number} after {quiet_ms}ms of silence ({}s since the previous refresh)",
+                        last_refresh.elapsed().as_secs()
+                    );
                     // Новый SCStream сразу после остановки старого иногда не стартует: даём системе вдохнуть.
                     let mut result = match guard.stop_capture().await {
                         Ok(()) => {
@@ -727,7 +732,7 @@ impl TranscriptionService {
                     for attempt in 1..=CAPTURE_REFRESH_RETRIES {
                         let Err(error) = &result else { break };
                         log::warn!(
-                            "System audio refresh failed ({error}), retry {attempt}/{CAPTURE_REFRESH_RETRIES}"
+                            "System audio refresh #{refresh_number} failed ({error}; {error:?}), retry {attempt}/{CAPTURE_REFRESH_RETRIES}"
                         );
                         tokio::time::sleep(std::time::Duration::from_millis(1_500 * u64::from(attempt))).await;
                         if *status.read().await != RecordingStatus::Recording {
