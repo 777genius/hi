@@ -131,7 +131,7 @@ impl LocalGlossary {
 
 #[cfg(test)]
 mod tests {
-    use super::LocalGlossary;
+    use super::{LocalGlossary, MAX_RULES};
 
     #[test]
     fn corrects_explicit_aliases_across_three_languages() {

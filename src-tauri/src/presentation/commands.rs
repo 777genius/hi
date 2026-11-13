@@ -3543,6 +3543,7 @@ pub async fn start_haiku_stream(
         system_prompt,
         &answer_style,
     );
+    let system_prompt = crate::presentation::candidate_profile::with_candidate_profile(system_prompt);
     let temperature = crate::presentation::answer_style_prompt::adjusted_answer_temperature(
         temperature,
         &answer_style,
@@ -4388,6 +4389,7 @@ pub async fn start_haiku_chat_stream(
         system_prompt,
         &answer_style,
     );
+    let system_prompt = crate::presentation::candidate_profile::with_candidate_profile(system_prompt);
     let temperature = crate::presentation::answer_style_prompt::adjusted_answer_temperature(
         temperature,
         &answer_style,
@@ -5079,6 +5081,7 @@ pub async fn start_code_explain_stream(
         .or_else(|| std::env::var("LLM_CODE_EXPLAIN_SYSTEM_PROMPT").ok())
         .unwrap_or_else(|| default_system_prompt.to_string());
     let system_prompt = with_interview_answer_style_guard(system_prompt);
+    let system_prompt = crate::presentation::candidate_profile::with_candidate_profile(system_prompt);
 
     let model = match provider {
         crate::domain::LlmProviderType::Anthropic => std::env::var("ANTHROPIC_MODEL")

@@ -1,0 +1,473 @@
+{
+  "name": "en-ai-native",
+  "sttLanguage": "en",
+  "interviewerVoice": "Samantha",
+  "candidateVoice": "Daniel",
+  "interviewerRate": 170,
+  "candidateRate": 175,
+  "turns": [
+    {
+      "id": 1,
+      "q": "Tell me about your background and why this AI-native full-stack role at Luxoft interests you.",
+      "a": "I have built web applications with Ruby on Rails, Node.js and TypeScript, and Python, including services backed by PostgreSQL. I enjoy working across the stack, from a Vue interface to APIs and cloud infrastructure. This role interests me because it combines that experience with practical AI-assisted development and production LLM features."
+    },
+    {
+      "id": 2,
+      "q": "How would you use an agentic coding tool to implement a feature in an unfamiliar Rails service?",
+      "a": "I would first ask the agent to inspect the relevant code, tests, and project conventions, then propose a small implementation plan. I would give it a bounded task with clear acceptance criteria and let it run the existing tests. Before merging, I would review the diff myself, check authorization and data handling, and verify the behavior with targeted tests. The agent can accelerate the work, but I remain accountable for the result.",
+      "llm": {
+        "expect": [
+          "repository context",
+          "acceptance criteria",
+          "tests",
+          "code review"
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "q": "Suppose a team wants to roll out agentic development across several projects. How would you make the adoption effective and measurable?",
+      "a": "I would start with a small pilot and document which tasks are suitable for agents and which require additional review. I would provide shared instructions about repository conventions, security, and handling sensitive data. To measure impact, I would track lead time, review effort, defect rates, and developer feedback, while avoiding metrics that reward the volume of generated code. I would use those results to adjust the workflow before expanding it."
+    },
+    {
+      "id": 4,
+      "q": "How would you design an evaluation process for an LLM feature that answers customer support questions?",
+      "a": "I would build a representative dataset from anonymized support scenarios, including ambiguous questions and cases where the answer is unavailable. I would define criteria for correctness, groundedness, and appropriate refusal, and use human review to validate automated grading. I would run the evaluation against a baseline whenever the model, prompt, or retrieval configuration changes. After release, I would monitor production samples and add newly discovered failures to the dataset.",
+      "llm": {
+        "expect": [
+          "evaluation dataset",
+          "groundedness",
+          "human evaluation",
+          "regression testing"
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "q": "Now imagine those answers must use a large collection of internal documents. How would you build the retrieval workflow?",
+      "a": "I would ingest and chunk the documents, attach access-control metadata, and create embeddings for retrieval. At query time, I would filter results by the user's permissions, retrieve relevant chunks, and provide them to the model with instructions to cite the sources. I would test retrieval quality separately from answer quality, especially for documents with similar terminology. As I mentioned when discussing evaluations, unanswered and ambiguous questions should also be represented in the test set."
+    },
+    {
+      "id": 6,
+      "q": "How would you use Amazon Bedrock to serve this feature, and what would you consider when choosing a model?",
+      "a": "I would call the Bedrock runtime from a backend service using an IAM role with only the required model permissions. I would compare available models on our evaluation dataset, looking at answer quality, latency, cost, and the context window. I would also check regional availability and service quotas before committing to a deployment. The application should handle throttling and timeouts with bounded retries and a clear fallback.",
+      "llm": {
+        "expect": [
+          "Amazon Bedrock",
+          "IAM",
+          "latency",
+          "throttling",
+          "model evaluation"
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "q": "What guardrails would you add before allowing that assistant to answer employees?",
+      "a": "I would enforce document permissions before retrieval and treat retrieved text as untrusted input, since it could contain prompt injection. I would use content filtering and sensitive-data controls where appropriate, including Bedrock Guardrails if they meet the requirements. I would restrict any tool the model can call with server-side authorization and validation. I would also test adversarial inputs and make sure the assistant can decline when evidence is insufficient."
+    },
+    {
+      "id": 8,
+      "q": "A Vue client needs to send questions to a TypeScript API. How would you define a reliable contract between them?",
+      "a": "I would describe the request, response, authentication, and error cases in an OpenAPI specification. The request would include the question and a conversation identifier, while the response would include the answer and source references. I would validate inputs and outputs at the API boundary and generate client types from the contract. For changes, I would preserve backward compatibility where possible and use contract tests in continuous integration.",
+      "llm": {
+        "expect": [
+          "OpenAPI",
+          "schema validation",
+          "backward compatibility",
+          "contract tests"
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "q": "The conversation history is stored in PostgreSQL, and loading a long conversation has become slow. How would you investigate?",
+      "a": "I would inspect the actual query and use explain analyze with buffer statistics to see where time and reads are spent. If the query filters by conversation and orders by creation time, I would consider a composite index matching those columns and the access pattern. I would paginate with a stable cursor instead of loading the entire history at once. I would then measure the improvement against realistic data and check the write cost of the new index."
+    },
+    {
+      "id": 10,
+      "q": "How would you process document ingestion reliably when uploads arrive in bursts?",
+      "a": "I would store uploads in S3 and send ingestion jobs to an SQS queue, with workers running on ECS or Lambda depending on the workload. Each worker would make processing idempotent because queue messages can be delivered more than once. I would configure retries, visibility timeouts, and a dead-letter queue, then monitor queue age and processing failures. I would also limit worker concurrency to protect downstream embedding and database services.",
+      "llm": {
+        "expect": [
+          "S3",
+          "SQS",
+          "idempotency",
+          "dead-letter queue",
+          "concurrency"
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "q": "How would you build a deployment pipeline for the API and the model-related configuration?",
+      "a": "I would run linting, unit tests, integration tests, and security checks on each change, then build a versioned artifact. The pipeline would also run a representative LLM evaluation suite against the proposed prompt and model configuration. I would deploy to a staging environment first and promote the same artifact after the checks pass. In production, I would use a gradual rollout with monitoring and a tested rollback procedure."
+    },
+    {
+      "id": 12,
+      "q": "The business wants to analyze assistant usage in Snowflake without exposing sensitive conversations. What would you propose?",
+      "a": "I would agree with the business on the questions they need answered and collect only the events and attributes required for those analyses. Before data reaches Snowflake, I would remove or mask sensitive fields and avoid exporting raw conversation text unless there is a justified and approved need. I would apply role-based access controls and retention policies, and document the data lineage. I would also validate that aggregates do not expose individuals through very small groups.",
+      "llm": {
+        "expect": [
+          "Snowflake",
+          "data minimization",
+          "masking",
+          "role-based access control",
+          "retention"
+        ]
+      }
+    },
+    {
+      "id": 13,
+      "q": "How would you evaluate a retrieval augmented generation system before releasing it to users?",
+      "a": "I would build a representative dataset of questions with expected answers and relevant source documents. I would measure retrieval quality separately from answer quality, including whether answers are grounded in the retrieved evidence. I would include cases with missing evidence and questions that should be refused. As I mentioned when discussing the deployment pipeline, I would run this evaluation against proposed changes before promotion.",
+      "llm": {
+        "expect": [
+          "retrieval",
+          "groundedness",
+          "evaluation dataset",
+          "relevance"
+        ]
+      }
+    },
+    {
+      "id": 14,
+      "q": "A user asks a question that matches several documents, but only some are relevant. How would you improve the retrieval stage?",
+      "a": "I would start by inspecting the documents, chunk boundaries, and retrieval results for representative queries. I would compare semantic search with keyword search and consider combining them in a hybrid approach. I would then use a reranker to reorder the candidates before sending a limited set to the model. I would measure the impact on retrieval quality, latency, and cost."
+    },
+    {
+      "id": 15,
+      "q": "How would you protect a Bedrock powered assistant from malicious instructions embedded in retrieved documents?",
+      "a": "I would treat retrieved documents as untrusted data and clearly separate them from system instructions. I would use Bedrock Guardrails where appropriate, while recognizing that guardrails alone cannot guarantee protection against prompt injection. I would restrict the assistant's tools and permissions so that document content cannot authorize sensitive actions. I would also test the system with adversarial documents and monitor suspicious behavior.",
+      "llm": {
+        "expect": [
+          "prompt injection",
+          "untrusted input",
+          "Bedrock Guardrails",
+          "least privilege"
+        ]
+      }
+    },
+    {
+      "id": 16,
+      "q": "Suppose an assistant can create a customer refund through a tool. What controls would you put around that action?",
+      "a": "I would require the backend to authenticate the user and authorize the refund independently of the model. I would validate the amount and order against business rules and require explicit confirmation before submitting the action. For high value refunds, I would add human approval. I would also use an idempotency key and record an audit trail of the request and outcome."
+    },
+    {
+      "id": 17,
+      "q": "A Rails endpoint backed by PostgreSQL becomes slow as the orders table grows. How would you investigate it?",
+      "a": "I would first identify the slow query and inspect its execution plan with explain analyze on a safe representative workload. I would check row estimates, index usage, and whether the query reads or sorts more data than necessary. In Rails, I would also look for unnecessary queries and missing eager loading. I would test any index or query change against realistic data and monitor both read performance and write overhead.",
+      "llm": {
+        "expect": [
+          "EXPLAIN ANALYZE",
+          "index",
+          "query plan",
+          "eager loading"
+        ]
+      }
+    },
+    {
+      "id": 18,
+      "q": "How would you design pagination for a frequently updated list of orders?",
+      "a": "I would use cursor based pagination with a stable ordering, such as creation time followed by a unique order identifier. The cursor would encode the last values seen, and the next query would continue from that position. I would create an index aligned with the filters and ordering, then verify its use in the query plan. I would also document that concurrent updates can affect what a client sees unless the product requires a consistent snapshot."
+    },
+    {
+      "id": 19,
+      "q": "A Node service and a Python service need to share a public API contract. How would you keep their implementations and clients aligned?",
+      "a": "I would define the public interface in an OpenAPI specification, including request schemas, responses, and error formats. I would generate or validate types and clients from that contract where the tooling is reliable. Contract tests would check each implementation against the specification, and compatibility checks would flag breaking changes. I would version the interface deliberately and give consumers a migration path when a breaking change is unavoidable.",
+      "llm": {
+        "expect": [
+          "OpenAPI",
+          "schema",
+          "contract tests",
+          "backward compatibility"
+        ]
+      }
+    },
+    {
+      "id": 20,
+      "q": "When would you choose gRPC instead of a REST interface between internal services?",
+      "a": "I would consider gRPC when strongly typed service contracts, efficient binary messages, or streaming are important. It can work well for internal service to service communication where both sides support its tooling. I would still assess operational concerns such as debugging, load balancing, and browser compatibility. For a broadly accessible public interface, REST may be easier for consumers."
+    },
+    {
+      "id": 21,
+      "q": "How would you introduce agentic coding tools across a team without losing engineering oversight?",
+      "a": "I would start with a small pilot and define which repositories, data, and actions the tools may access. Engineers would remain accountable for reviewing generated changes, running tests, and checking security implications. I would measure outcomes such as lead time, defect rates, and review effort rather than counting generated code. Based on the results, I would refine the guidance and expand access gradually.",
+      "llm": {
+        "expect": [
+          "code review",
+          "least privilege",
+          "security",
+          "defect rate"
+        ]
+      }
+    },
+    {
+      "id": 22,
+      "q": "An agent proposes a large refactor that passes the existing tests. How would you decide whether to accept it?",
+      "a": "I would first check whether the refactor solves an agreed problem and whether its scope is justified. Passing tests are useful, but I would inspect the diff for behavioral changes, security risks, and gaps in coverage. I would ask for smaller changes or additional tests where the impact is hard to understand. The team should be able to maintain the result without relying on the agent's explanation alone."
+    },
+    {
+      "id": 23,
+      "q": "How would you diagnose high response latency in a Vue application that calls an AI backed API?",
+      "a": "I would trace a request from the browser through the API, retrieval, and model invocation to see where time is spent. I would distinguish time to first token from total response time and check whether the interface can stream useful output. Depending on the bottleneck, I might reduce retrieval work, adjust model settings, or optimize frontend rendering. I would compare changes using latency percentiles and user experience metrics.",
+      "llm": {
+        "expect": [
+          "distributed tracing",
+          "time to first token",
+          "streaming",
+          "latency percentiles"
+        ]
+      }
+    },
+    {
+      "id": 24,
+      "q": "How would you control the cost of an AI feature as usage grows without degrading the user experience?",
+      "a": "I would track cost per request alongside quality, latency, and usage patterns. I would evaluate smaller models or shorter context for tasks where they meet the required quality bar. I would also consider caching suitable responses and applying appropriate usage limits. As with the evaluation approach I described earlier, I would verify quality before rolling out cost optimizations."
+    },
+    {
+      "id": 25,
+      "q": "How would you build a retrieval augmented generation feature for internal engineering documentation?",
+      "a": "I would split documents into meaningful chunks and attach metadata such as their source and access permissions. I would generate embeddings, store them in a searchable index, and retrieve relevant chunks for each question. The model would receive those chunks as context and return citations so users can inspect the sources. I would also make sure retrieval respects each user's permissions."
+    },
+    {
+      "id": 26,
+      "q": "How would you evaluate whether that retrieval system is actually helping users?",
+      "a": "I would create a representative set of questions with known relevant documents and expected answers. I would measure retrieval recall separately from answer correctness and groundedness, so I can tell where failures originate. I would include difficult cases such as missing information and conflicting sources. I would review results with domain experts and run the same evaluation set on every significant change.",
+      "llm": {
+        "expect": [
+          "retrieval recall",
+          "groundedness",
+          "evaluation dataset",
+          "relevance"
+        ]
+      }
+    },
+    {
+      "id": 27,
+      "q": "What would you do to protect an assistant from prompt injection in retrieved documents?",
+      "a": "I would treat retrieved text as untrusted data, even when it comes from an internal source. I would clearly separate system instructions from retrieved content and avoid giving the model unnecessary tool permissions. For sensitive actions, I would validate tool arguments and require authorization outside the model. I would also test the system with documents that contain malicious instructions and monitor attempted policy violations."
+    },
+    {
+      "id": 28,
+      "q": "How would you use Amazon Bedrock guardrails in a customer facing assistant?",
+      "a": "I would configure guardrails for the application's content policies and sensitive information handling. I would apply them to model inputs and outputs, while keeping authorization and business rules in application code. I would test both blocked and allowed examples, including cases where legitimate requests resemble prohibited ones. I would monitor false positives and policy violations, then update the configuration based on those results.",
+      "llm": {
+        "expect": [
+          "Amazon Bedrock Guardrails",
+          "content filters",
+          "sensitive information",
+          "false positives"
+        ]
+      }
+    },
+    {
+      "id": 29,
+      "q": "Suppose the assistant needs to create a support ticket through an external API. How would you make that action reliable?",
+      "a": "I would define a clear tool schema and validate all model generated arguments before calling the API. The application would check the user's permissions and ask for confirmation when the action requires it. I would use an idempotency key so a retry does not create duplicate tickets. I would record the request and outcome in an audit log without exposing sensitive content unnecessarily."
+    },
+    {
+      "id": 30,
+      "q": "How would you design an API contract shared by a Rails service and a Node service written in TypeScript?",
+      "a": "I would describe the endpoints, request bodies, responses, and errors in an OpenAPI specification. Both services could use generated types or clients, but I would still validate requests at runtime. I would add contract tests to catch incompatible changes before deployment. For breaking changes, I would use a versioning and migration strategy that gives consumers time to move.",
+      "llm": {
+        "expect": [
+          "OpenAPI",
+          "contract testing",
+          "schema validation",
+          "versioning"
+        ]
+      }
+    },
+    {
+      "id": 31,
+      "q": "When would you choose gRPC instead of a REST API between internal services?",
+      "a": "I would consider gRPC when services need efficient communication, streaming, or strongly typed generated clients. Protocol Buffers provide a shared schema, but the team still needs rules for compatible schema evolution. I would also account for operational constraints such as proxy support, debugging, and browser access. For public APIs with broad client compatibility needs, REST may be a simpler choice."
+    },
+    {
+      "id": 32,
+      "q": "A PostgreSQL query that filters customer records by tenant and sorts them by creation time has become slow. How would you investigate it?",
+      "a": "I would inspect the query and use explain analyze with buffer information to understand the actual execution plan. I would compare estimated and actual row counts and check whether statistics are current. Depending on the filters and sort direction, a composite index on tenant and creation time may help. I would test the index against representative data and check its impact on writes before deploying it.",
+      "llm": {
+        "expect": [
+          "EXPLAIN ANALYZE",
+          "execution plan",
+          "composite index",
+          "query statistics"
+        ]
+      }
+    },
+    {
+      "id": 33,
+      "q": "How would you process long running document ingestion jobs on AWS without tying up the API server?",
+      "a": "I would have the API store the job and enqueue a message in Amazon SQS, then return a job identifier. Workers running on ECS or Lambda could process the document and update its status. Because messages can be delivered more than once, the processing steps should be idempotent. I would configure retries, a dead letter queue, and monitoring for failed or stuck jobs."
+    },
+    {
+      "id": 34,
+      "q": "What would your continuous integration and delivery pipeline check before releasing an AI feature?",
+      "a": "I would run unit and integration tests, security checks, and API contract tests on each change. As I mentioned for retrieval, I would also run a versioned evaluation set and compare quality metrics against an agreed baseline. The pipeline should block a release when critical checks fail, while accounting for variation in model outputs. I would deploy progressively and monitor the feature so we can roll back quickly if behavior degrades.",
+      "llm": {
+        "expect": [
+          "CI/CD",
+          "evaluation dataset",
+          "quality metrics",
+          "rollback"
+        ]
+      }
+    },
+    {
+      "id": 35,
+      "q": "How would you use Snowflake to understand adoption and quality of an AI assistant across teams?",
+      "a": "I would send privacy reviewed events to Snowflake with identifiers for the feature version, outcome, latency, and user feedback. I would avoid storing raw prompts or responses unless there is a clear need and an approved retention policy. I would build metrics for adoption, task completion, and failure rates, broken down by relevant cohorts. I would also check for selection bias because users who leave feedback may not represent everyone."
+    },
+    {
+      "id": 36,
+      "q": "How would you scale the use of agentic coding tools across an engineering team while maintaining accountability?",
+      "a": "I would start with a shared policy covering approved tools, data handling, and actions that require human approval. Engineers would remain responsible for reviewing changes and validating them with tests and security checks. I would provide reusable workflows and measure outcomes such as lead time, escaped defects, and developer feedback. We could expand usage gradually, share examples of failures, and adjust the policy as we learn.",
+      "llm": {
+        "expect": [
+          "human review",
+          "data privacy",
+          "security checks",
+          "developer productivity"
+        ]
+      }
+    },
+    {
+      "id": 37,
+      "q": "A prompt injection is hidden in a document retrieved for a customer support assistant. How would you reduce the risk that the assistant follows it?",
+      "a": "I would treat retrieved documents as untrusted data and keep them separate from system instructions. I would restrict the assistant's tools and permissions so a malicious document cannot authorize sensitive actions. I would add tests with adversarial documents and check both the answer and any attempted tool calls. I would also avoid relying on a model instruction alone as the security boundary.",
+      "llm": {
+        "expect": [
+          "prompt injection",
+          "untrusted data",
+          "tool permissions",
+          "adversarial testing"
+        ]
+      }
+    },
+    {
+      "id": 38,
+      "q": "You need to serve a large collection of frequently updated documents through retrieval augmented generation. How would you keep the index current without reprocessing everything?",
+      "a": "I would capture document changes and enqueue only the affected documents for processing. Each job would split the new version into chunks, generate embeddings, and replace the old indexed chunks in an idempotent way. I would track document versions and handle deletions explicitly so stale content does not remain searchable. I would monitor indexing lag and retry failed jobs with a dead letter queue."
+    },
+    {
+      "id": 39,
+      "q": "How would you evaluate a question answering assistant when there can be several valid answers to the same question?",
+      "a": "I would create a representative dataset with reference answers, supporting evidence, and examples of unacceptable behavior. I would score dimensions such as factual correctness, relevance, and faithfulness to the evidence instead of requiring an exact text match. A model based judge can help with scale, but I would calibrate it against human reviews and check where it disagrees. I would report results by category and include uncertainty when comparing versions.",
+      "llm": {
+        "expect": [
+          "evaluation dataset",
+          "factual correctness",
+          "faithfulness",
+          "human review",
+          "model-based judge"
+        ]
+      }
+    },
+    {
+      "id": 40,
+      "q": "Your service uses Amazon Bedrock and occasionally receives throttling errors during traffic spikes. How would you handle them?",
+      "a": "I would first measure request rates, token usage, latency, and throttling against the applicable Bedrock quotas. I would use bounded retries with exponential backoff and jitter, while respecting the user's deadline. I would also apply concurrency limits and queue work that does not need an immediate response. If demand consistently exceeds capacity, I would review quota increases or an appropriate provisioned capacity option for the model."
+    },
+    {
+      "id": 41,
+      "q": "A generated summary must never contain sensitive customer identifiers. How would you design guardrails around that requirement?",
+      "a": "I would minimize sensitive data before it reaches the model and apply detection or masking to inputs where appropriate. I would validate the generated output with a dedicated sensitive data filter before returning it, using Amazon Bedrock Guardrails where it meets the requirement. If validation fails or the filter is unavailable, I would block the response or return a safe fallback rather than expose it. I would test false negatives and false positives with representative examples and keep monitoring for new identifier formats.",
+      "llm": {
+        "expect": [
+          "Amazon Bedrock Guardrails",
+          "sensitive data",
+          "masking",
+          "output validation",
+          "false negatives"
+        ]
+      }
+    },
+    {
+      "id": 42,
+      "q": "A Node service and a Rails service both expose customer records. How would you evolve their public API contracts without breaking existing clients?",
+      "a": "I would define the contract in OpenAPI and agree on compatibility rules across both services. I would prefer additive changes, such as introducing an optional field, and avoid changing the meaning of existing fields. I would run contract tests against both implementations and representative clients. For an unavoidable breaking change, I would introduce a new version, communicate a migration period, and monitor usage before retiring the old one."
+    },
+    {
+      "id": 43,
+      "q": "A PostgreSQL query that lists recent orders for one customer has become slow as the table has grown. How would you investigate and improve it?",
+      "a": "I would start with explain analyze and buffers to see the actual execution plan, row estimates, and disk access. For a query filtering by customer and ordering by creation time, I would consider a composite index on customer identifier and creation time, while checking the actual predicates and sort direction. I would verify the improvement with production-like data and account for the index's write and storage costs. I would also check table statistics and avoid deep offset pagination if clients page through many results.",
+      "llm": {
+        "expect": [
+          "EXPLAIN ANALYZE",
+          "execution plan",
+          "composite index",
+          "query statistics",
+          "pagination"
+        ]
+      }
+    },
+    {
+      "id": 44,
+      "q": "An agent can call a payment tool, but a network timeout occurs after the request is sent. How should the system avoid charging the customer twice?",
+      "a": "I would assign an idempotency key to the payment operation and send the same key on every retry. The payment service should persist the key with the operation state and return the existing result for duplicate requests. After a timeout, I would reconcile the operation's status with the payment provider before creating a new payment. The agent should report an uncertain state rather than claim success or initiate a second charge without confirmation."
+    },
+    {
+      "id": 45,
+      "q": "A Vue interface streams an AI response, but the user navigates away before generation finishes. How would you manage cancellation across the stack?",
+      "a": "The Vue component should cancel its request when it is unmounted or when the user explicitly stops generation. The backend should detect the disconnect or cancellation signal and propagate it to the model request when the provider supports cancellation. I would also stop downstream work and release resources, while recording whether the operation completed or was cancelled. I would test disconnects and races so a late response does not update the wrong conversation.",
+      "llm": {
+        "expect": [
+          "AbortController",
+          "request cancellation",
+          "streaming",
+          "client disconnect",
+          "resource cleanup"
+        ]
+      }
+    }
+  ],
+  "images": {},
+  "llmEvery": 2,
+  "brief": "Full interview IN ENGLISH for: Full-Stack Software Engineer (AI-Native), Luxoft: Ruby on Rails, Node.js + TypeScript, Python, PostgreSQL, API design (REST/OpenAPI/gRPC), AWS (ECS, Lambda, RDS, S3, SQS, IAM, Bedrock), agentic AI coding tools, LLM features (guardrails, evals), CI/CD, Snowflake, Vue. Focus on agentic AI workflows, LLM evals, RAG, Bedrock, guardrails, API contracts, PostgreSQL performance, CI/CD, scaling AI-native development in a team. Interviewer turns 1-3 sentences, candidate answers 3-6 sentences.",
+  "finalRecall": [
+    {
+      "id": "opening",
+      "text": "О чём интервьюер спросил в начале и что кандидат ответил о своём опыте и интересе к роли?",
+      "expect": [
+        "Full-Stack Software Engineer (AI-Native)",
+        "Luxoft",
+        "Ruby on Rails",
+        "Node.js и TypeScript",
+        "Python и PostgreSQL",
+        "Vue",
+        "AI-assisted development и LLM-функции"
+      ],
+      "minHits": 2
+    },
+    {
+      "id": "ingestion",
+      "text": "Какие сервисы AWS и механизмы кандидат предложил для надёжной обработки загрузок документов?",
+      "expect": [
+        "S3 для хранения документов",
+        "SQS для очереди заданий",
+        "ECS или Lambda для воркеров",
+        "идемпотентность обработки",
+        "повторные попытки и visibility timeout",
+        "dead-letter queue",
+        "ограничение параллелизма и мониторинг"
+      ],
+      "minHits": 2
+    },
+    {
+      "id": "evaluation",
+      "text": "Как кандидат предлагал оценивать качество RAG-системы и выявлять причины ошибок?",
+      "expect": [
+        "репрезентативный набор вопросов",
+        "ожидаемые ответы и релевантные документы",
+        "отдельная оценка retrieval и ответа",
+        "корректность и groundedness",
+        "случаи с отсутствующими или противоречивыми источниками",
+        "проверка экспертами",
+        "сравнение с базовой версией при изменениях"
+      ],
+      "minHits": 2
+    }
+  ]
+}

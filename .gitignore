@@ -63,3 +63,4 @@ src-tauri/examples/target/
 .e2e-artifacts/
 api/.env
 api/target/
+.playwright-mcp/

@@ -1668,7 +1668,7 @@ onUnmounted(() => {
   --chat-message-font-size: 17px;
   --chat-bubble-width-scale: 0.8;
   --chat-message-line-height: 1.44;
-  /* Код того же размера, что и текст сообщения. */
+  /* Код ровно того же размера, что и текст сообщения (решение владельца). */
   --chat-code-font-size: var(--chat-message-font-size);
   --chat-code-line-height: var(--chat-message-line-height);
   --chat-inline-code-font-size: 0.9em;
@@ -1722,6 +1722,11 @@ onUnmounted(() => {
   max-width: calc(100% - 6px);
 }
 
+.feed-card :deep(.chat-markdown .code-block pre) {
+  /* Внутренние отступы блока кода не больше 2px. */
+  padding: 2px;
+}
+
 .feed-card :deep(.chat-markdown .code-block pre),
 .feed-card :deep(.chat-markdown .code-block pre code),
 .feed-card :deep(.chat-text-highlighted .shiki),
@@ -1736,7 +1741,7 @@ onUnmounted(() => {
 .feed-card :deep(.chat-row.focus-copy .chat-text-highlighted .code-block[data-lang="plaintext"] .shiki span) {
   min-width: 0;
   font-family: inherit;
-  font-size: var(--chat-message-font-size);
+  font-size: var(--chat-code-font-size);
   line-height: var(--chat-message-line-height);
   white-space: pre-wrap;
   word-break: break-word;
