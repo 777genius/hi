@@ -12,7 +12,13 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import process from 'node:process';
-import { CODE_IMAGES, FINAL_RECALL_PROMPTS, TURNS } from './fixtures/ua-interview-script.mjs';
+import { CODE_IMAGES as DEFAULT_IMAGES, FINAL_RECALL_PROMPTS as DEFAULT_RECALL, TURNS as DEFAULT_TURNS } from './fixtures/ua-interview-script.mjs';
+
+// Активный сценарий: по умолчанию встроенный украинский, либо JSON из e2e-tests/scenarios (флаг --scenario).
+let TURNS = DEFAULT_TURNS;
+let CODE_IMAGES = DEFAULT_IMAGES;
+let FINAL_RECALL_PROMPTS = DEFAULT_RECALL;
+let SCENARIO = { name: 'ua-backend', interviewerVoice: 'Lesya', candidateVoice: 'Lesya', interviewerRate: 160, candidateRate: 172 };
 import { coverage } from './helpers/sttMatch.mjs';
 
 const BRIDGE_FILE = join(homedir(), 'Library/Application Support/HackInterview/companion_bridge.json');
@@ -33,6 +39,8 @@ function parseArgs(argv) {
     artifactsDir: '.e2e-artifacts/ua-interview-audio',
     skipImages: false,
     keepInput: false,
+    scenario: '',
+    judge: true,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -47,10 +55,11 @@ function parseArgs(argv) {
     else if (a === '--artifacts-dir') o.artifactsDir = next();
     else if (a === '--skip-images') o.skipImages = true;
     else if (a === '--keep-input') o.keepInput = true;
+    else if (a === '--scenario') o.scenario = next();
+    else if (a === '--no-judge') o.judge = false;
     else if (a === '--base-url') o.baseUrl = next();
     else throw new Error(`Unknown argument: ${a}`);
   }
-  o.turns = Math.max(1, Math.min(TURNS.length, Math.floor(o.turns)));
   return o;
 }
 
@@ -138,8 +147,10 @@ async function prepareAudio(dir, turns, o) {
     const qW = join(dir, `q${t.id}.wav`);
     const aW = join(dir, `a${t.id}.wav`);
     const aP = join(dir, `a${t.id}.pcm`);
-    await run('say', ['-v', o.voice, '-r', String(o.interviewerRate), '-o', qA, '--', t.q]);
-    await run('say', ['-v', o.voice, '-r', String(o.candidateRate), '-o', aA, '--', t.a]);
+    const qVoice = t.qVoice || SCENARIO.interviewerVoice || o.voice;
+    const aVoice = t.aVoice || SCENARIO.candidateVoice || o.voice;
+    await run('say', ['-v', qVoice, '-r', String(SCENARIO.interviewerRate || o.interviewerRate), '-o', qA, '--', t.q]);
+    await run('say', ['-v', aVoice, '-r', String(SCENARIO.candidateRate || o.candidateRate), '-o', aA, '--', t.a]);
     await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', qA, '-filter:a', `volume=${o.systemGain}`, '-ar', '48000', '-ac', '2', qW]);
     await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', aA, '-filter:a', `volume=${o.micGain}`, '-ar', '48000', '-ac', '2', aW]);
     await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', aA, '-filter:a', `volume=${o.micGain}`, '-f', 's16le', '-ar', '48000', '-ac', '2', aP]);
@@ -234,6 +245,14 @@ async function waitForAnswer(afterSeq, timeoutMs) {
 
 async function main() {
   const o = parseArgs(process.argv.slice(2));
+  if (o.scenario) {
+    SCENARIO = JSON.parse(await readFile(o.scenario, 'utf8'));
+    TURNS = SCENARIO.turns;
+    CODE_IMAGES = Object.fromEntries(Object.entries(SCENARIO.images || {}).map(([id, im]) => [id, { title: im.title || id, code: im.code || '' }]));
+    FINAL_RECALL_PROMPTS = (SCENARIO.finalRecall || []).map((r) => ({ minHits: 2, ...r }));
+    if (o.artifactsDir === '.e2e-artifacts/ua-interview-audio') o.artifactsDir = `.e2e-artifacts/${SCENARIO.name}`;
+  }
+  o.turns = Math.max(1, Math.min(TURNS.length, Math.floor(o.turns > 0 ? Math.min(o.turns, TURNS.length) : TURNS.length)));
   BASE = o.baseUrl.replace(/\/+$/, '');
   TOKEN = process.env.COMPANION_TOKEN || JSON.parse(await readFile(BRIDGE_FILE, 'utf8')).companionAccessToken;
   const health = await api('/api/health');
@@ -303,7 +322,7 @@ async function main() {
     // прогрев STT: играем короткую реплику, пока не придёт первый финал в системном канале
     {
       const warmWav = join(audioDir, 'warmup.wav');
-      await run('say', ['-v', o.voice, '-o', join(audioDir, 'warmup.aiff'), '--', 'Добрий день. Починаємо співбесіду, чуєте мене добре?']);
+      await run('say', ['-v', SCENARIO.interviewerVoice || o.voice, '-o', join(audioDir, 'warmup.aiff'), '--', SCENARIO.sttLanguage === 'en' ? 'Hello. Let us start the interview, can you hear me well?' : 'Добрий день. Починаємо співбесіду, чуєте мене добре?']);
       await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', join(audioDir, 'warmup.aiff'), '-ar', '48000', '-ac', '2', warmWav]);
       for (let attempt = 1; attempt <= 6; attempt += 1) {
         const s = await getState();
@@ -435,6 +454,21 @@ async function main() {
     await restore();
   }
 
+  if (o.judge) {
+    log('judging assistant answers...');
+    report.judge = await judgeAnswers(report, turns).catch((e) => [{ error: String(e) }]);
+    const ok = report.judge.filter((j) => !j.error);
+    const mean = (k) => avg(ok.map((j) => Number(j[k] ?? 0)));
+    report.judgeSummary = {
+      judged: ok.length,
+      correct: mean('correct'), context: mean('context'), concise: mean('concise'),
+      noQuestionsPct: ok.length ? Number((ok.filter((j) => j.noQuestions).length / ok.length).toFixed(3)) : 0,
+      russianPct: ok.length ? Number((ok.filter((j) => j.russian).length / ok.length).toFixed(3)) : 0,
+      firstPersonPct: ok.length ? Number((ok.filter((j) => j.firstPerson).length / ok.length).toFixed(3)) : 0,
+      issues: ok.filter((j) => j.issue).map((j) => `#${j.id}: ${j.issue}`).slice(0, 25),
+    };
+    log('JUDGE', JSON.stringify(report.judgeSummary));
+  }
   const finalState = await getState().catch(() => null);
   report.finishedAt = new Date().toISOString();
   report.wallMinutes = (Date.now() - startedMs) / 60000;
@@ -465,6 +499,48 @@ async function main() {
   log('SUMMARY', JSON.stringify(report.summary));
   log('report:', join(outDir, 'report.md'));
   process.exit(report.errors.length ? 1 : 0);
+}
+
+
+// ---------- LLM-судья качества ответов ассистента (после прогона, последовательно) ----------
+async function readLlmEnv() {
+  const text = await readFile(join(homedir(), '.local/share/hackinterview-sub2api/hackinterview-llm.env'), 'utf8');
+  return Object.fromEntries(text.split('\n').filter((l) => l.includes('=')).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+}
+
+async function judgeAnswers(report, turns) {
+  const env = await readLlmEnv();
+  const results = [];
+  const items = report.turns.filter((t) => t.ai?.text).map((t) => ({ kind: 'turn', id: t.id, q: t.q, a: t.a, text: t.ai.text, hasImage: t.aiKind === 'image-prompt' }));
+  for (const [index, item] of items.entries()) {
+    const prev = turns.filter((x) => x.id < item.id).slice(-3).map((x) => `Интервьюер: ${x.q}\nКандидат: ${x.a}`).join('\n');
+    const prompt = `Ты строгий проверяющий ответов ассистента для технического собеседования. Ассистент отвечает кандидату вслух-готовым текстом. Требования: ответ по-русски (термины на английском), чётко и по делу без воды, НЕ задаёт вопросов и не просит уточнений, говорит от первого лица в мужском роде, длина соответствует сложности вопроса, понимает контекст предыдущих реплик.
+
+Контекст:
+${prev || '(начало)'}
+Вопрос интервьюера: ${item.q}
+${item.hasImage ? '(пользователь прислал скриншот кода, ассистент разбирает его)' : ''}
+Ответ ассистента:
+${item.text}
+
+Оцени и верни ТОЛЬКО JSON: {"correct":0-2,"context":0-2,"concise":0-2,"noQuestions":true/false,"russian":true/false,"firstPerson":true/false,"issue":"одна фраза о главной проблеме или пустая строка"}. 2 = хорошо.`;
+    try {
+      const res = await fetch(`${env.OPENAI_BASE_URL}/responses`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: env.OPENAI_RESPONSES_MODEL, reasoning: { effort: 'low' }, max_output_tokens: 600, input: prompt }),
+        signal: AbortSignal.timeout(120_000),
+      });
+      const j = await res.json();
+      const out = (j.output || []).flatMap((o) => o.content || []).filter((c) => c.type === 'output_text').map((c) => c.text).join('');
+      const m = out.match(/\{[\s\S]*\}/);
+      results.push({ id: item.id, ...JSON.parse(m[0]) });
+    } catch (e) {
+      results.push({ id: item.id, error: String(e.message || e) });
+    }
+    if (index % 10 === 9) log(`judge ${index + 1}/${items.length}`);
+  }
+  return results;
 }
 
 function answerMeta(text) {
@@ -504,6 +580,10 @@ function renderMarkdown(r) {
     L.push(`- mic STT: ${t.micText}`);
     if (t.ai) L.push(`- LLM (${t.aiKind}, ${t.ai.status}): ${String(t.ai.text).slice(0, 700)}`);
     L.push('');
+  }
+  if (r.judgeSummary) {
+    L.push('## LLM judge');
+    L.push('```json\n' + JSON.stringify(r.judgeSummary, null, 2) + '\n```');
   }
   L.push('## Final recall');
   for (const f of r.finalRecall) {
