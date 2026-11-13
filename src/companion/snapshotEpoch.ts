@@ -26,6 +26,10 @@ function optionalText(value: unknown): boolean {
   return value == null || typeof value === 'string';
 }
 
+function optionalFiniteNumber(value: unknown): boolean {
+  return value == null || (typeof value === 'number' && Number.isFinite(value));
+}
+
 function optionalArray(value: unknown, valid: (item: unknown) => boolean): boolean {
   return value == null || (Array.isArray(value) && value.every(valid));
 }
@@ -61,10 +65,11 @@ export function isCompanionSnapshotEnvelope(value: unknown): value is CompanionS
     || !isRecord(data.live)
     || !Array.isArray(data.timeline)) return false;
 
-  // Partial strings are optional, but the containing object is not. Accept
-  // unknown fields so adding server capabilities does not break older phones.
+  // Partial strings/timestamps are optional, but the containing object is not.
+  // Accept unknown fields so adding server capabilities does not break phones.
   const live = data.live;
   if (!['partialText', 'finalText', 'microphonePartialText'].every((key) => optionalText(live[key]))) return false;
+  if (!['partialStartedAtMs', 'microphonePartialStartedAtMs'].every((key) => optionalFiniteNumber(live[key]))) return false;
   const ids = new Set<string>();
   for (const message of data.timeline) {
     if (!validMessage(message)) return false;

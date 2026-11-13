@@ -22,6 +22,8 @@ function validSnapshot() {
 const corruptions: Array<[string, (data: Record<string, unknown>) => void]> = [
   ['missing live state', (data) => { delete data.live; }],
   ['null live state', (data) => { data.live = null; }],
+  ['invalid system timestamp', (data) => { data.live = { partialText: 'live', partialStartedAtMs: { toString: 1, valueOf: null } }; }],
+  ['invalid microphone timestamp', (data) => { data.live = { microphonePartialText: 'live', microphonePartialStartedAtMs: 'invalid' }; }],
   ['null timeline entry', (data) => { data.timeline = [null]; }],
   ['non-string message id', (data) => { data.timeline = [{ ...validSnapshot().data.timeline[0], id: 7 }]; }],
   ['non-string message text', (data) => { data.timeline = [{ ...validSnapshot().data.timeline[0], text: {} }]; }],
@@ -54,6 +56,7 @@ describe('Companion snapshot safety before revision acknowledgement', () => {
     const snapshot = validSnapshot();
     const data: Record<string, unknown> = snapshot.data;
     data.controls = { companionModeEnabled: true, instanceId: null };
+    data.live = { partialStartedAtMs: null, microphonePartialStartedAtMs: 1234 };
     data.futureCapability = { version: 2 };
     expect(isCompanionSnapshotEnvelope(snapshot)).toBe(true);
   });
