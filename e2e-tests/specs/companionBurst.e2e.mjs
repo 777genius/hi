@@ -117,18 +117,19 @@ describe('Native Companion burst / slow-client convergence', () => {
       assert.equal(finalMessages.length, 200);
       assert.equal(new Set(finalMessages.map((item) => item.id)).size, 200, 'no duplicate message IDs');
       assert.equal(new Set(finalMessages.map((item) => item.seq)).size, 200, 'no duplicate sequence numbers');
-      assert.deepEqual(finalMessages.map((item) => item.text).sort(), expectedTexts.sort());
+      assert.deepEqual(finalMessages.map((item) => item.text).sort(), [...expectedTexts].sort());
       for (const candidate of [live.latest, rejoined.latest, desktop]) {
         assert.deepEqual(contents(candidate, prefix), contents(http, prefix));
       }
-      // Overflow is intentional retention, not transport loss. Do not change
-      // production history policy just to make a stress assertion pass.
+      // These plain STT fixtures contain no important-context markers. For
+      // this fixture set, pruning must retain exactly the latest 200 messages.
+      // Do not weaken this to just a count or alter production retention policy.
       for (let offset = 200; offset < 240; offset += 4) {
         await Promise.all(Array.from({ length: 4 }, (_, i) => sendTranscript(offset + i)));
       }
       const retained = await state(base, started.token);
       assert.equal(messages(retained, prefix).length, 200, 'default retention must remain bounded');
-      assert.ok(messages(retained, prefix).some((item) => item.text === expectedTexts[239]));
+      assert.deepEqual(messages(retained, prefix).map((item) => item.text).sort(), expectedTexts.slice(40, 240).sort());
       await waitFor(() => Number(live.latest.revision) >= Number(retained.revision)
         && Number(rejoined.latest.revision) >= Number(retained.revision), { timeoutMs: 20_000 });
       const desktopRetained = nativeResult(await invoke('get_companion_snapshot'), 'desktop retained state');

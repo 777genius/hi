@@ -97,13 +97,18 @@ describe('Built Companion UI over real browser HTTP/SSE (fault-injected server)'
       await $('.dock-record-button').click();
       await waitFor(() => fixture.count('/api/record/start') === 1);
       assert.equal(await $('.dock-record-button').isEnabled(), false);
-      await $('.dock-record-button').click();
+      // Use the protocol click: WebdriverIO's convenience click waits for
+      // enabled=true, which intentionally cannot happen until release().
+      const disabledButton = await $('.dock-record-button');
+      await browser.elementClick(disabledButton.elementId);
       assert.equal(fixture.count('/api/record/start'), 1);
     } finally { release(); }
     await clickTitle('Остановить запись');
     await waitFor(() => fixture.count('/api/record/stop') === 1);
+    assert.equal(fixture.count('/api/record/start'), 1, 'no delayed duplicate start');
     await clickTitle('Замьютить микрофон только в приложении');
     await clickTitle('Включить микрофон в приложении');
+    await waitFor(() => fixture.count('/api/microphone/app/unmute') === 1);
     assert.equal(fixture.count('/api/microphone/app/mute'), 1);
     assert.equal(fixture.count('/api/microphone/app/unmute'), 1);
 
