@@ -69,8 +69,12 @@ const aiComposerOpen = ref(false);
 // Поле сообщения закреплено вверху экрана: внизу его перекрывает экранная клавиатура.
 // visualViewport.offsetTop сдвигает его вместе с видимой областью, если браузер прокрутил страницу при фокусе.
 const composerViewportOffsetTop = ref(0);
+// Высота видимой области над клавиатурой: 100dvh клавиатуру не учитывает, и без этого низ карточки
+// (фото и «Отправить») оказывался под клавиатурой без возможности до него доскроллить.
+const composerViewportHeight = ref(0);
 function syncComposerViewportOffset(): void {
   composerViewportOffsetTop.value = Math.max(0, Math.round(window.visualViewport?.offsetTop ?? 0));
+  composerViewportHeight.value = Math.max(0, Math.round(window.visualViewport?.height ?? 0));
 }
 function bindComposerViewport(): void {
   window.visualViewport?.addEventListener('resize', syncComposerViewportOffset);
@@ -81,7 +85,14 @@ function unbindComposerViewport(): void {
   window.visualViewport?.removeEventListener('resize', syncComposerViewportOffset);
   window.visualViewport?.removeEventListener('scroll', syncComposerViewportOffset);
   composerViewportOffsetTop.value = 0;
+  composerViewportHeight.value = 0;
 }
+const composerStyle = computed(() => ({
+  transform: `translateY(${composerViewportOffsetTop.value}px)`,
+  ...(composerViewportHeight.value > 0
+    ? { '--composer-viewport-height': `${composerViewportHeight.value}px` }
+    : {}),
+}));
 const aiTextareaRef = ref<HTMLTextAreaElement | null>(null);
 watch(aiComposerOpen, (open) => {
   if (open) {
@@ -214,6 +225,11 @@ const actionsDisabled = computed(() => (
   || syncInFlight.value
   || authRequired.value
 ));
+// Черновик (текст и фото) локальный: его можно править и при переподключении, нужна связь только для «Отправить».
+// Иначе каждый обрыв SSE выключал поле, и на телефоне закрывалась клавиатура посреди набора.
+const composerInputDisabled = computed(() => !companionAvailable || authRequired.value);
+// Пока сообщение уходит, черновик не меняем: после успешной отправки он очищается целиком.
+const composerAttachmentsDisabled = computed(() => composerInputDisabled.value || actionInFlight.value);
 const recordActionBlocked = computed(() => actionInFlight.value || recordingStatus.value === 'Processing');
 const recordButtonClass = computed(() => ({
   starting: recordingStatus.value === 'Starting',
@@ -908,7 +924,7 @@ function onAiKeydown(event: KeyboardEvent): void {
 }
 
 function openPromptFilePicker(fromGallery: boolean): void {
-  if (actionsDisabled.value) return;
+  if (composerAttachmentsDisabled.value) return;
   if (promptImages.value.length >= MAX_PROMPT_IMAGES) {
     setTemporaryStatus(`Можно прикрепить не больше ${MAX_PROMPT_IMAGES} фото за раз`, 'warn', 3200);
     return;
@@ -1253,7 +1269,7 @@ onUnmounted(() => {
         <section
           v-if="aiComposerOpen"
           class="ask-card"
-          :style="{ transform: `translateY(${composerViewportOffsetTop}px)` }"
+          :style="composerStyle"
         >
           <div class="ask-card-header">
             <div class="summary-label">Сообщение в AI</div>
@@ -1261,7 +1277,7 @@ onUnmounted(() => {
               <button
                 class="ask-icon-button"
                 title="Сфоткать"
-                :disabled="actionsDisabled"
+                :disabled="composerAttachmentsDisabled"
                 @click="openPromptFilePicker(false)"
               >
                 <span class="mdi mdi-camera-outline" />
@@ -1269,7 +1285,7 @@ onUnmounted(() => {
               <button
                 class="ask-icon-button"
                 title="Выбрать из галереи"
-                :disabled="actionsDisabled"
+                :disabled="composerAttachmentsDisabled"
                 @click="openPromptFilePicker(true)"
               >
                 <span class="mdi mdi-image-outline" />
@@ -1278,6 +1294,16 @@ onUnmounted(() => {
                 <span class="mdi mdi-close" />
               </button>
             </div>
+          </div>
+
+          <!-- Строка статуса вверху экрана закрыта карточкой: ошибки отправки и связи показываем здесь. -->
+          <div
+            v-if="showTopConnectionStatus"
+            class="ask-status"
+            :class="[connectionState, actionStatusTone && `tone-${actionStatusTone}`]"
+            role="status"
+          >
+            {{ topConnectionText }}
           </div>
 
           <input
@@ -1303,7 +1329,8 @@ onUnmounted(() => {
             v-model="aiQuestion"
             class="ask-textarea"
             placeholder="Напиши сообщение или прикрепи фото. Можно оставить пустым и отправить только фото."
-            :disabled="actionsDisabled"
+            :disabled="composerInputDisabled"
+            :readonly="actionInFlight"
             @keydown="onAiKeydown"
           />
 
@@ -1313,7 +1340,7 @@ onUnmounted(() => {
               <button
                 class="prompt-attachment-remove"
                 title="Удалить фото"
-                :disabled="actionsDisabled"
+                :disabled="composerAttachmentsDisabled"
                 @click="removePromptImage(img.id)"
               >
                 <span class="mdi mdi-close" />
@@ -1482,7 +1509,8 @@ onUnmounted(() => {
   min-width: 0;
 }
 
-.top-connection-status {
+.top-connection-status,
+.ask-status {
   min-height: 16px;
   padding: 0 2px;
   color: rgba(255, 255, 255, 0.58);
@@ -1491,21 +1519,31 @@ onUnmounted(() => {
   letter-spacing: 0.01em;
 }
 
+.ask-status {
+  overflow-wrap: anywhere;
+}
+
 .top-connection-status.reconnecting,
-.top-connection-status.tone-warn {
+.top-connection-status.tone-warn,
+.ask-status.reconnecting,
+.ask-status.tone-warn {
   color: #f4c95d;
 }
 
 .top-connection-status.disconnected,
-.top-connection-status.tone-error {
+.top-connection-status.tone-error,
+.ask-status.disconnected,
+.ask-status.tone-error {
   color: #ff9a8f;
 }
 
-.top-connection-status.tone-ok {
+.top-connection-status.tone-ok,
+.ask-status.tone-ok {
   color: #8ee0a1;
 }
 
-.top-connection-status.tone-pending {
+.top-connection-status.tone-pending,
+.ask-status.tone-pending {
   color: #9cc6ff;
 }
 
@@ -1762,6 +1800,7 @@ onUnmounted(() => {
   margin: 0 auto;
   z-index: 30;
   max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px));
+  max-height: calc(var(--composer-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px));
   overflow-y: auto;
   box-sizing: border-box;
   background: var(--color-bg);
@@ -2096,7 +2135,9 @@ onUnmounted(() => {
 
 .ask-slide-enter-active,
 .ask-slide-leave-active {
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  /* transform занят сдвигом под клавиатуру (visualViewport.offsetTop) и анимироваться не должен,
+     иначе в первые 180 мс после открытия карточка «плывёт» вслед за клавиатурой. Выезд делаем через margin-top. */
+  transition: opacity 0.18s ease, margin-top 0.18s ease;
 }
 
 .ask-slide-enter-from,
@@ -2130,6 +2171,7 @@ onUnmounted(() => {
     bottom: auto;
     max-height: calc(100vh - 24px - env(safe-area-inset-top, 0px));
     max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px));
+    max-height: calc(var(--composer-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px));
     margin-bottom: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -2171,6 +2213,7 @@ onUnmounted(() => {
     bottom: auto;
     max-height: calc(100vh - 24px - env(safe-area-inset-top, 0px));
     max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px));
+    max-height: calc(var(--composer-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px));
   }
 
   .controls-side {
@@ -2218,12 +2261,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 360px) {
-  .ask-card {
-    bottom: calc(126px + env(safe-area-inset-bottom, 0px));
-    max-height: calc(100vh - 148px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-    max-height: calc(100dvh - 148px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-  }
-
   .controls-side {
     gap: 10px;
     padding: 7px;
