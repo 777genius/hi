@@ -14,7 +14,7 @@ import { getAuthContainer } from '../features/auth/infrastructure/di/authContain
 import { canRefreshSession, isAccessTokenExpired } from '../features/auth/domain/entities/Session';
 import {
   RecordingStatus,
-  SttProviderType,
+  isLocalUtteranceProvider,
   ConnectionQuality,
   PartialTranscriptionPayload,
   FinalTranscriptionPayload,
@@ -510,7 +510,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     // Во время Starting/Recording показываем пустую строку или "Listening..."
     if (status.value === RecordingStatus.Starting) {
-      return t(useSttConfigStore().provider === SttProviderType.ParakeetUltra
+      return t(isLocalUtteranceProvider(useSttConfigStore().provider)
         ? 'main.loadingLocalModel'
         : 'main.connecting');
     }

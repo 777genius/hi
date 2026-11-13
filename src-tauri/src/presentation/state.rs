@@ -237,6 +237,26 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Loads the selected local STT model for both audio sources in the
+    /// background, so the first recording after startup or a model switch does
+    /// not pay model I/O. No-op for cloud providers.
+    pub(crate) fn spawn_local_model_warm_up(&self) {
+        let system_service = self.transcription_service.clone();
+        let mic_service = self.microphone_transcription_service.clone();
+        tauri::async_runtime::spawn(async move {
+            let (system, mic) = tokio::join!(
+                system_service.warm_up_local_model(),
+                mic_service.warm_up_local_model(),
+            );
+            if let Err(error) = system {
+                log::warn!("System STT warm-up failed: {error}");
+            }
+            if let Err(error) = mic {
+                log::warn!("Microphone STT warm-up failed: {error}");
+            }
+        });
+    }
+
     /// The app never requires login: local access is always granted, without creating
     /// an auth session or manufacturing a backend token.
     pub(crate) fn local_no_auth_mode() -> bool {

@@ -4,7 +4,7 @@
 
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import { SttProviderType } from '@/types';
+import { isLocalUtteranceProvider, SttProviderType } from '@/types';
 import { invoke } from '@tauri-apps/api/core';
 import { isTauriAvailable } from '@/utils/tauri';
 import {
@@ -116,7 +116,7 @@ export const useSettingsStore = defineStore('settings', () => {
 
   // Действия
   function setProvider(value: SttProviderType) {
-    provider.value = value === SttProviderType.ParakeetUltra
+    provider.value = isLocalUtteranceProvider(value)
       ? value
       : SttProviderType.Backend;
   }

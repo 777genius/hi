@@ -1364,8 +1364,7 @@ pub async fn on_microphone_partial(state: &AppState, payload: &PartialTranscript
     }
 
     let now = now_ms();
-    let independent_local_mic = state.config.read().await.stt.provider
-        == crate::domain::SttProviderType::ParakeetUltra;
+    let independent_local_mic = state.config.read().await.stt.provider.is_local_utterance();
     if !independent_local_mic && !is_mic_dominant_now(state, now) {
         clear_microphone_live_buffers(state).await;
         return;
@@ -1532,8 +1531,7 @@ pub async fn on_microphone_final(state: &AppState, payload: &FinalTranscriptionP
     // capture. A loud simultaneous system speaker must not suppress the
     // candidate's words; cross-stream duplicate-text detection below still
     // rejects actual echoes. Keep legacy dominance gating for cloud partials.
-    let independent_local_mic = state.config.read().await.stt.provider
-        == crate::domain::SttProviderType::ParakeetUltra;
+    let independent_local_mic = state.config.read().await.stt.provider.is_local_utterance();
     if !independent_local_mic && !is_mic_dominant_now(state, payload.timestamp) {
         clear_microphone_live_buffers(state).await;
         return;

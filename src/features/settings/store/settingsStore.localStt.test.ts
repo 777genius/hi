@@ -31,6 +31,21 @@ describe('local STT provider settings', () => {
     expect(next.currentState.provider).toBe(SttProviderType.ParakeetUltra);
   });
 
+  it('switches between local models and keeps each choice in the saved draft', () => {
+    const store = useSettingsStore();
+    store.setProvider(SttProviderType.WhisperLargeV3);
+    expect(store.provider).toBe(SttProviderType.WhisperLargeV3);
+    const snapshot = store.currentState;
+
+    store.setProvider(SttProviderType.ParakeetUltra);
+    expect(store.provider).toBe(SttProviderType.ParakeetUltra);
+
+    setActivePinia(createPinia());
+    const next = useSettingsStore();
+    next.applyState(snapshot);
+    expect(next.provider).toBe(SttProviderType.WhisperLargeV3);
+  });
+
   it('switches back to backend without enabling unrelated STT providers', () => {
     const store = useSettingsStore();
     store.setProvider(SttProviderType.ParakeetUltra);

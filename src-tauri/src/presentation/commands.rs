@@ -1229,7 +1229,7 @@ pub async fn stop_recording_raw(
     let session_id = state
         .active_transcription_session_id
         .load(Ordering::Relaxed);
-    let local_stt_enabled = state.config.read().await.stt.provider == SttProviderType::ParakeetUltra;
+    let local_stt_enabled = state.config.read().await.stt.provider.is_local_utterance();
     let mic_expected = state.microphone_transcription_enabled.load(Ordering::Relaxed);
 
     // Always finish the second channel and drain both reducers even if the
@@ -1860,6 +1860,7 @@ pub async fn update_stt_config(
     let provider_type = match provider.trim().to_ascii_lowercase().as_str() {
         "backend" => SttProviderType::Backend,
         "parakeetultra" => SttProviderType::ParakeetUltra,
+        "whisperlargev3" => SttProviderType::WhisperLargeV3,
         other => return Err(format!("Unsupported STT provider: {other}")),
     };
 
@@ -1876,11 +1877,10 @@ pub async fn update_stt_config(
     config.provider = provider_type;
     config.language = language;
 
-    // Preserve the model path on partial language updates; clear legacy model
-    // when first switching to Parakeet so auto-discovery works.
-    if provider_type == SttProviderType::ParakeetUltra
-        && old_stt.provider != SttProviderType::ParakeetUltra
-    {
+    // Preserve the model path on partial language updates. A path belongs to one
+    // provider: clear it on any provider change so the new model is auto-discovered
+    // (a Parakeet file must never be handed to Whisper, or the reverse).
+    if provider_type != old_stt.provider {
         config.model = None;
     }
     if let Some(model) = model {
@@ -1914,8 +1914,7 @@ pub async fn update_stt_config(
     // Do not partially switch only one of the two audio services while a
     // local-model session is active (including asynchronous mic startup).
     let local_model_change =
-        (old_stt.provider == SttProviderType::ParakeetUltra
-            || config.provider == SttProviderType::ParakeetUltra)
+        (old_stt.provider.is_local_utterance() || config.provider.is_local_utterance())
             && (old_stt.provider != config.provider
                 || old_stt.model != config.model
                 || old_stt.language != config.language);
@@ -1930,6 +1929,13 @@ pub async fn update_stt_config(
                     .to_string(),
             );
         }
+    }
+
+    // Fail the switch up front, with install instructions, instead of at the
+    // first Start press when the selected local model file is missing.
+    if config.provider.is_local_utterance() {
+        crate::infrastructure::stt::ensure_local_model_present(&config)
+            .map_err(|e| e.to_string())?;
     }
 
     // Обновляем конфигурацию в сервисе
@@ -1977,6 +1983,10 @@ pub async fn update_stt_config(
                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
             },
         );
+    }
+
+    if local_model_change && config.provider.is_local_utterance() {
+        state.spawn_local_model_warm_up();
     }
 
     log::info!("STT configuration updated and saved successfully");

@@ -5,7 +5,7 @@ use crate::infrastructure::stt::{
     AssemblyAIProvider, BackendProvider, DeepgramProvider, WhisperLocalProvider,
 };
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-use crate::infrastructure::stt::ParakeetUltraProvider;
+use crate::infrastructure::stt::{LocalModel, LocalSttProvider};
 
 /// Factory for creating STT providers based on configuration
 ///
@@ -31,12 +31,16 @@ impl SttProviderFactory for DefaultSttProviderFactory {
         match config.provider {
             SttProviderType::WhisperLocal => Ok(Box::new(WhisperLocalProvider::new())),
 
-            SttProviderType::ParakeetUltra => {
+            SttProviderType::ParakeetUltra | SttProviderType::WhisperLargeV3 => {
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                { Ok(Box::new(ParakeetUltraProvider::new())) }
+                {
+                    let model = LocalModel::for_provider(config.provider)
+                        .expect("local provider types map to a model");
+                    Ok(Box::new(LocalSttProvider::new(model)))
+                }
                 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
                 { Err(SttError::Unsupported(
-                    "Local Parakeet Ultra currently requires macOS Apple Silicon".to_string(),
+                    "Local STT models currently require macOS Apple Silicon".to_string(),
                 )) }
             },
 
@@ -83,13 +87,15 @@ mod tests {
     }
 
     #[test]
-    fn test_create_local_parakeet() {
+    fn test_create_local_models() {
         let factory = DefaultSttProviderFactory::new();
-        let config = SttConfig::new(SttProviderType::ParakeetUltra);
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        assert!(factory.create(&config).is_ok());
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        assert!(factory.create(&config).is_err());
+        for provider in [SttProviderType::ParakeetUltra, SttProviderType::WhisperLargeV3] {
+            let config = SttConfig::new(provider);
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            assert!(factory.create(&config).is_ok());
+            #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+            assert!(factory.create(&config).is_err());
+        }
     }
 
     #[test]

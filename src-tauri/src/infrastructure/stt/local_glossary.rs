@@ -14,6 +14,8 @@ struct Rule {
 #[derive(Clone, Debug, Default)]
 pub struct LocalGlossary {
     rules: Vec<Rule>,
+    /// Canonical terms in file order, used as the Whisper decoding vocabulary.
+    terms: Vec<String>,
 }
 
 impl LocalGlossary {
@@ -37,6 +39,7 @@ impl LocalGlossary {
 
     fn parse(source: &str) -> Self {
         let mut rules = Vec::new();
+        let mut terms: Vec<String> = Vec::new();
         for line in source.lines().take(MAX_RULES) {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -46,6 +49,9 @@ impl LocalGlossary {
             let canonical = canonical.trim();
             if canonical.is_empty() || canonical.chars().count() > 80 {
                 continue;
+            }
+            if !terms.iter().any(|term| term == canonical) {
+                terms.push(canonical.to_string());
             }
             for alias in std::iter::once(canonical)
                 .chain(aliases.split('|').map(str::trim))
@@ -62,7 +68,22 @@ impl LocalGlossary {
         }
         // Prefer the longest phrase when aliases overlap.
         rules.sort_by_key(|rule| std::cmp::Reverse(rule.alias.chars().count()));
-        Self { rules }
+        Self { rules, terms }
+    }
+
+    /// Canonical terms (file order) that fit into `max_chars`, for models that
+    /// accept a decoding vocabulary instead of relying on post-correction only.
+    pub fn vocabulary(&self, max_chars: usize) -> Vec<String> {
+        let mut used = 0;
+        let mut selected = Vec::new();
+        for term in &self.terms {
+            used += term.chars().count() + 2; // separator the decoder adds
+            if used > max_chars {
+                break;
+            }
+            selected.push(term.clone());
+        }
+        selected
     }
 
     pub fn correct(&self, text: &str) -> String {
@@ -124,6 +145,20 @@ mod tests {
             glossary.correct("clean architecture and solid, dry."),
             "Clean Architecture and SOLID, DRY."
         );
+    }
+
+    #[test]
+    fn vocabulary_lists_canonical_terms_once_within_budget() {
+        let glossary = LocalGlossary::parse(
+            "Clean Architecture = клин архитектура\nSOLID = солид\nDRY = драй\nSOLID = солід",
+        );
+        assert_eq!(
+            glossary.vocabulary(1000),
+            vec!["Clean Architecture", "SOLID", "DRY"]
+        );
+        // "Clean Architecture" (18) + 2 fits in 20; the next term does not.
+        assert_eq!(glossary.vocabulary(20), vec!["Clean Architecture"]);
+        assert!(LocalGlossary::default().vocabulary(100).is_empty());
     }
 
     #[test]

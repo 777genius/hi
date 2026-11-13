@@ -444,24 +444,7 @@ pub fn run() {
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     match state.initialize_stt_config().await {
                         Ok(()) => {
-                            if state.config.read().await.stt.provider
-                                == crate::domain::SttProviderType::ParakeetUltra
-                            {
-                                let system_service = state.transcription_service.clone();
-                                let mic_service = state.microphone_transcription_service.clone();
-                                tauri::async_runtime::spawn(async move {
-                                    let (system, mic) = tokio::join!(
-                                        system_service.warm_up_local_model(),
-                                        mic_service.warm_up_local_model(),
-                                    );
-                                    if let Err(error) = system {
-                                        log::warn!("System STT warm-up failed: {error}");
-                                    }
-                                    if let Err(error) = mic {
-                                        log::warn!("Microphone STT warm-up failed: {error}");
-                                    }
-                                });
-                            }
+                            state.spawn_local_model_warm_up();
                             let revision = AppState::bump_revision(&state.stt_config_revision).await;
                             let _ = app_handle.emit(
                                 crate::presentation::EVENT_STATE_SYNC_INVALIDATION,
