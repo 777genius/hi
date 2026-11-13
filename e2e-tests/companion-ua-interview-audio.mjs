@@ -101,8 +101,10 @@ async function api(path, body) {
         body: JSON.stringify(body),
       };
   const res = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(60_000) });
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`${path}: ${res.status} ${JSON.stringify(payload).slice(0, 300)}`);
+  const raw = await res.text();
+  let payload = {};
+  try { payload = raw ? JSON.parse(raw) : {}; } catch { payload = { text: raw }; }
+  if (!res.ok) throw new Error(`${path}: ${res.status} ${raw.slice(0, 300)}`);
   return payload.data ?? payload;
 }
 const getState = () => api(`/api/state?token=${encodeURIComponent(TOKEN)}`);
