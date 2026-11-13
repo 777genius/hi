@@ -142,7 +142,7 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-:global(.theme-light) .profile-window {
+.theme-light .profile-window {
   background: rgba(255, 255, 255, 0.98);
 }
 

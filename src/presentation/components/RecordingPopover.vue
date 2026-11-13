@@ -2320,7 +2320,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
 }
 
-::global(.theme-light) .permission-warning-card {
+:.theme-light .permission-warning-card {
   background: rgba(255, 255, 255, 0.98);
   border: 1px solid rgba(0, 0, 0, 0.12);
 }
@@ -2367,7 +2367,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   margin-bottom: 8px;
 }
 
-::global(.theme-light) .permission-warning-item {
+:.theme-light .permission-warning-item {
   background: rgba(0, 0, 0, 0.04);
 }
 
@@ -2414,11 +2414,11 @@ const onChatMouseDown = (e: MouseEvent) => {
   background: rgba(255, 255, 255, 0.08);
 }
 
-:global(.theme-light) .popover-container {
+.theme-light .popover-container {
   background: transparent;
 }
 
-:global(.theme-light) .popover {
+.theme-light .popover {
   background: #ffffff;
   border: 1px solid rgba(0, 0, 0, 0.08);
 }
@@ -2476,7 +2476,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   cursor: default;
 }
 
-:global(.theme-light) .header {
+.theme-light .header {
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 }
 
@@ -2497,7 +2497,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   color: var(--color-text);
 }
 
-:global(.theme-light) .accessibility-permission-banner {
+.theme-light .accessibility-permission-banner {
   background: rgba(245, 158, 11, 0.14);
   border-color: rgba(180, 83, 9, 0.28);
 }
@@ -2840,15 +2840,15 @@ const onChatMouseDown = (e: MouseEvent) => {
 }
 
 
-:global(.theme-light) .minimize-button:hover,
-:global(.theme-light) .companion-button:hover,
-:global(.theme-light) .accessibility-button:hover,
-:global(.theme-light) .settings-button:hover,
-:global(.theme-light) .profile-button:hover {
+.theme-light .minimize-button:hover,
+.theme-light .companion-button:hover,
+.theme-light .accessibility-button:hover,
+.theme-light .settings-button:hover,
+.theme-light .profile-button:hover {
   background: rgba(0, 0, 0, 0.06);
 }
 
-:global(.theme-light) .minimize-button {
+.theme-light .minimize-button {
   color: #1f2937;
 }
 
@@ -3562,12 +3562,12 @@ const onChatMouseDown = (e: MouseEvent) => {
   display: none;
 }
 
-:global(.theme-light) .footer {
+.theme-light .footer {
   position: relative;
   border-top: none;
 }
 
-:global(.theme-light) .footer::before {
+.theme-light .footer::before {
   content: '';
   position: absolute;
   left: 0;
@@ -3839,8 +3839,8 @@ const onChatMouseDown = (e: MouseEvent) => {
   }
 }
 
-::global(.theme-light) .prompt-button:hover,
-::global(.theme-light) .context-clear-button:hover {
+:.theme-light .prompt-button:hover,
+:.theme-light .context-clear-button:hover {
   background: rgba(0, 0, 0, 0.06);
 }
 </style>
