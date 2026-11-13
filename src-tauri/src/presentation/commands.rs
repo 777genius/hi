@@ -1330,6 +1330,7 @@ pub async fn stop_recording_raw(
             failures.push(error);
         }
         if !failures.is_empty() {
+            log::warn!("Local STT stop finished with problems: {}", failures.join("; "));
             return Err(format!("Local STT Stop did not preserve all finals: {}", failures.join("; ")));
         }
     } else {
