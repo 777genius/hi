@@ -27,7 +27,7 @@ function parseArgs(argv) {
   const o = {
     baseUrl: process.env.COMPANION_BASE_URL || 'http://127.0.0.1:43821',
     durationMin: 40,
-    turns: TURNS.length,
+    turns: 0, // 0 = весь сценарий; ограничение задаётся только явным --turns
     voice: 'Lesya',
     interviewerRate: 160,
     candidateRate: 172,
@@ -48,7 +48,7 @@ function parseArgs(argv) {
     if (a === '--') continue;
     else if (a === '--duration-min') o.durationMin = Number(next());
     else if (a === '--turns') o.turns = Number(next());
-    else if (a === '--voice') o.voice = next();
+    else if (a === '--voice') { o.voice = next(); o.voiceExplicit = true; }
     else if (a === '--mic-gain') o.micGain = Number(next());
     else if (a === '--system-gain') o.systemGain = Number(next());
     else if (a === '--blackhole') o.blackhole = next();
@@ -149,8 +149,9 @@ async function prepareAudio(dir, turns, o) {
     const qW = join(dir, `q${t.id}.wav`);
     const aW = join(dir, `a${t.id}.wav`);
     const aP = join(dir, `a${t.id}.pcm`);
-    const qVoice = t.qVoice || SCENARIO.interviewerVoice || o.voice;
-    const aVoice = t.aVoice || SCENARIO.candidateVoice || o.voice;
+    // Явный --voice важнее голосов сценария; голос конкретной реплики важнее всего.
+    const qVoice = t.qVoice || (o.voiceExplicit ? o.voice : (SCENARIO.interviewerVoice || o.voice));
+    const aVoice = t.aVoice || (o.voiceExplicit ? o.voice : (SCENARIO.candidateVoice || o.voice));
     await run('say', ['-v', qVoice, '-r', String(SCENARIO.interviewerRate || o.interviewerRate), '-o', qA, '--', t.q]);
     await run('say', ['-v', aVoice, '-r', String(SCENARIO.candidateRate || o.candidateRate), '-o', aA, '--', t.a]);
     await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', qA, '-filter:a', `volume=${o.systemGain}`, '-ar', '48000', '-ac', '2', qW]);
@@ -536,7 +537,7 @@ async function judgeAnswers(report, turns) {
   // Профиль кандидата (если есть) считается подтверждённым источником фактов об опыте; HTML-комментарии как в приложении вырезаем.
   const profile = await readFile(process.env.INTERVIEW_PROFILE_FILE || join(homedir(), 'Library/Application Support/HackInterview/candidate_profile.md'), 'utf8')
     .then((t) => t.replace(/<!--[\s\S]*?-->/g, '').slice(0, 30_000)).catch(() => '');
-  const items = report.turns.filter((t) => t.ai?.text).map((t) => ({ kind: 'turn', id: t.id, q: t.q, a: t.a, text: t.ai.text, hasImage: t.aiKind === 'image-prompt' }));
+  const items = report.turns.filter((t) => t.ai?.text).map((t) => ({ kind: 'turn', id: t.id, q: t.q, a: t.a, text: t.ai.text, hasImage: t.aiKind === 'image-prompt', imageCode: (() => { const img = turns.find((x) => x.id === t.id)?.image; const code = img ? CODE_IMAGES[img.id] : null; return code ? `${img.caption ? `Подпись: ${img.caption}\n` : ''}${code.title ? `${code.title}\n` : ''}${code.code}` : ''; })() }));
   for (const [index, item] of items.entries()) {
     const prev = turns.filter((x) => x.id < item.id).slice(-3).map((x) => `Интервьюер: ${x.q}\nКандидат: ${x.a}`).join('\n');
     const prompt = `Ты строгий проверяющий ответов ассистента для технического собеседования. Ассистент отвечает кандидату вслух-готовым текстом. Требования: ответ по-русски (термины на английском), чётко и по делу без воды, НЕ задаёт вопросов и не просит уточнений, говорит от первого лица в мужском роде, длина соответствует сложности вопроса, понимает контекст предыдущих реплик.
@@ -544,7 +545,7 @@ async function judgeAnswers(report, turns) {
 ${profile ? `Профиль кандидата (подтверждённые факты об его опыте; ответ может на них опираться, это не выдумка):\n${profile}\n\n` : ''}Контекст:
 ${prev || '(начало)'}
 Вопрос интервьюера: ${item.q}
-${item.hasImage ? '(пользователь прислал скриншот кода, ассистент разбирает его)' : ''}
+${item.hasImage ? `(пользователь прислал скриншот кода, ассистент разбирает его). Код на скриншоте:\n${item.imageCode || '(содержимое недоступно)'}` : ''}
 Ответ ассистента:
 ${item.text}
 

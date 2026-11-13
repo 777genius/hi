@@ -41,6 +41,9 @@ impl Default for SttProviderType {
         // Local Whisper Large-v3-Turbo: accurate with a glossary, ~1.4 s to the final
         // text, nothing leaves the machine. It runs only on Apple Silicon Macs; every
         // other platform keeps the cloud backend. Both stay an explicit choice.
+        // The model file is installed by the user (Settings > Local STT, or the shared
+        // Hugging Face cache); without it recording reports a configuration error with
+        // the install steps, and switching the provider to Backend restores cloud STT.
         if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             Self::WhisperLargeV3Turbo
         } else {

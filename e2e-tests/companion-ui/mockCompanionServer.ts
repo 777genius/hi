@@ -174,7 +174,8 @@ function summarizeBody(body: Record<string, unknown>): Record<string, unknown> {
 }
 
 function nextSeq(data: CompanionSnapshotData): number {
-  return data.timeline.reduce((max, message) => Math.max(max, message.seq), 0) + 1;
+  const timelineMax = data.timeline.reduce((max, message) => Math.max(max, message.seq), 0);
+  return Math.max(timelineMax, data.controls.historyFloorSeq, data.controls.contextFloorSeq) + 1;
 }
 
 function applyDefaultAction(

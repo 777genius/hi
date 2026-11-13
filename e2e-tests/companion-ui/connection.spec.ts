@@ -13,8 +13,8 @@ test.describe('Связь с компьютером', () => {
   test('обрыв SSE: статус переподключения, затем resync с пропущенными сообщениями', async ({ companion, page }) => {
     await companion.reset(snapshotData([stt(1, 'До обрыва')]));
     await companion.open();
+    await expect.poll(async () => (await companion.log()).openStreams).toBe(1);
     const before = await companion.log();
-    expect(before.openStreams).toBe(1);
 
     // Компьютер недоступен: поток оборван, /api/state не отвечает.
     await companion.configure({ stateOverride: { drop: true, times: 2 } });

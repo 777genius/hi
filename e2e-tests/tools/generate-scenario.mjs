@@ -126,7 +126,10 @@ ${tail || '(это начало интервью)'}
       turns.push(t);
       if (t.image) imagesLeft -= 1;
     }
-    for (const im of got.images || []) images[im.id] = im;
+    for (const im of got.images || []) {
+      if (images[im.id]) throw new Error(`[${name}] duplicate image id ${im.id} in batch ${startId}`);
+      images[im.id] = im;
+    }
     console.error(`[${name}] ${turns.length}/${spec.turns}`);
   }
   const recallPrompt = `По сценарию интервью: ${spec.brief}\n\nВот его ходы:\n${turns.map((t) => `${t.id}. Q: ${t.q}\n   A: ${t.a}`).join('\n').slice(0, 24000)}\n\nСоставь 3 контрольных вопроса ассистенту на проверку памяти контекста (например "О чём спрашивали в начале и что я ответил?", "Какие технологии я называл про X?", "Назови 3 темы, на которых я ошибался/затруднялся"). Для каждого: {"id","text","expect":[5-7 ключевых терминов/фактов из сценария, которые должны быть в верном ответе],"minHits":2}. Верни ТОЛЬКО JSON в блоке \`\`\`json: {"finalRecall":[...]}.`;
