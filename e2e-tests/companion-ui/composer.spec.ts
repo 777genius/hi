@@ -161,6 +161,21 @@ test.describe('Composer сообщения в AI', () => {
     expect(maxHeight).toBeGreaterThan(visibleHeight);
   });
 
+  test('пока сообщение уходит, повторный Ctrl+Enter не дублирует отправку, а поле не редактируется', async ({ companion, page }) => {
+    await companion.openComposer();
+    await companion.textarea.fill('Один раз');
+    await companion.hold('/api/prompt/send');
+    await companion.textarea.press('Control+Enter');
+    await expect(companion.textarea).toHaveAttribute('readonly', '');
+    await expect(page.getByTitle('Выбрать из галереи')).toBeDisabled();
+    await companion.textarea.press('Control+Enter');
+    await companion.textarea.press('X');
+    await expect(companion.textarea).toHaveValue('Один раз');
+    await companion.release('/api/prompt/send');
+    await expect(companion.composer).toHaveCount(0);
+    expect(await companion.posts('/api/prompt/send')).toHaveLength(1);
+  });
+
   test('черновик можно продолжать печатать, пока связь восстанавливается', async ({ companion }) => {
     await companion.openComposer();
     await companion.textarea.fill('Начал писать');

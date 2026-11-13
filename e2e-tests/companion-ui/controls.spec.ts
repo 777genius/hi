@@ -14,7 +14,7 @@ test.describe('Выделение сообщений', () => {
     await companion.open();
   });
 
-  test('тап выделяет, следующие тапы добавляют и снимают, кнопка сбрасывает', async ({ companion, page }) => {
+  test('тап выделяет, следующие тапы добавляют и снимают, кнопка сбрасывает', async ({ page }) => {
     const bubble = (id: string) => page.locator(`[data-msg-id="${id}"] .chat-bubble`);
     await bubble('stt:1').click();
     await expect(page.locator('[data-msg-id="stt:1"]')).toHaveClass(/selected/);
