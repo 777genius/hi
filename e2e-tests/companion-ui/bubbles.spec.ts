@@ -31,10 +31,12 @@ test.describe('Форма сообщений', () => {
     expect(incoming.radius).toMatch(/^0px \d+px \d+px 0px$/);
     expect(incoming.padLeft, 'внутри входящего сообщения есть отступ со стороны края').toBeGreaterThanOrEqual(8);
 
-    for (const id of ['mic:2', 'prompt:3']) {
+    for (const id of ['mic:2', 'prompt:3', 'haiku:4']) {
       const outgoing = await measure(id);
       expect(outgoing.border, id).toBe('0px');
       expect(outgoing.gapRight, id).toBeLessThanOrEqual(1);
+      expect(outgoing.gapLeft, `${id}: слева снаружи есть свободное место`).toBeGreaterThanOrEqual(8);
+      expect(outgoing.padLeft, id).toBeGreaterThanOrEqual(8);
       expect(outgoing.radius, id).toMatch(/^\d+px 0px 0px \d+px$/);
       expect(outgoing.padRight, `${id}: внутри исходящего сообщения есть отступ со стороны края`).toBeGreaterThanOrEqual(8);
     }
