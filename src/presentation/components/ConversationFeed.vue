@@ -673,9 +673,9 @@ onUnmounted(() => {
 
 .scroll-to-bottom-button {
   position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  bottom: 14px;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
   width: 40px;
   height: 40px;
   display: flex;
@@ -693,13 +693,13 @@ onUnmounted(() => {
 }
 
 .scroll-to-bottom-button:hover {
-  transform: translate(-50%, -1px);
+  transform: translateY(calc(-50% - 1px));
   background: rgba(59, 130, 246, 0.22);
   border-color: rgba(59, 130, 246, 0.4);
 }
 
 .scroll-to-bottom-button:active {
-  transform: translateX(-50%);
+  transform: translateY(-50%);
 }
 
 .scroll-to-bottom-button .mdi {
@@ -1389,7 +1389,7 @@ onUnmounted(() => {
 
 @media (max-width: 560px) {
   .scroll-to-bottom-button {
-    bottom: 10px;
+    right: 10px;
     width: 36px;
     height: 36px;
   }
