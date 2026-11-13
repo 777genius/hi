@@ -40,7 +40,8 @@ async function screenshot(name) {
 describe('Built Companion UI over real browser HTTP/SSE (fault-injected server)', () => {
   before(async () => {
     mainHandle = await findWindowHandleByLabel('main');
-    await browser.setWindowSize(430, 850);
+    // WebKitWebDriver hangs on SetWindowRect for this native Tauri window.
+    // Exercise the real page at the existing window size, not a claimed phone viewport.
   });
   beforeEach(async () => { fixture = null; fixture = await startCompanionFixture(); });
   afterEach(async function () {

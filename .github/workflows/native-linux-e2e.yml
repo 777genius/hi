@@ -35,11 +35,15 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       RUST_BACKTRACE: '1'
       WEBKIT_DISABLE_COMPOSITING_MODE: '1'
-      # WebDriver tests must not depend on or send traffic to production APIs.
       VITE_API_URL: http://127.0.0.1:9
       VOICE_TO_TEXT_BACKEND_URL: ws://127.0.0.1:9
     steps:
       - uses: actions/checkout@v4
+      - name: Record tested source provenance
+        run: |
+          mkdir -p .e2e-artifacts
+          git rev-parse HEAD > .e2e-artifacts/source-provenance.txt
+          git ls-files -s src-tauri/src/presentation/companion.rs src-tauri/src/presentation/companion_timeline.rs src-tauri/src/domain/models/config.rs >> .e2e-artifacts/source-provenance.txt
       - name: Install native Tauri and WebDriver dependencies
         run: |
           sudo apt-get update
@@ -84,6 +88,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: companion-ui-linux
-          path: .e2e-artifacts/companion-ui-*.png
-          if-no-files-found: ignore
+          path: |
+            .e2e-artifacts/companion-ui-*.png
+            .e2e-artifacts/source-provenance.txt
+            src-tauri/src/presentation/companion.rs
+            src-tauri/src/presentation/companion_timeline.rs
+            src-tauri/src/domain/models/config.rs
+          if-no-files-found: error
+          include-hidden-files: true
           retention-days: 7
