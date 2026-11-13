@@ -1668,8 +1668,9 @@ onUnmounted(() => {
   --chat-message-font-size: 17px;
   --chat-bubble-width-scale: 0.8;
   --chat-message-line-height: 1.44;
-  --chat-code-font-size: 11.5px;
-  --chat-code-line-height: 1.42;
+  /* Код того же размера, что и текст сообщения. */
+  --chat-code-font-size: var(--chat-message-font-size);
+  --chat-code-line-height: var(--chat-message-line-height);
   --chat-inline-code-font-size: 0.9em;
   --chat-sticky-footer-bottom: calc(126px + env(safe-area-inset-bottom, 0px));
   --chat-scroll-padding: 12px 6px 0 2px;
@@ -1714,6 +1715,13 @@ onUnmounted(() => {
   bottom: calc(126px + env(safe-area-inset-bottom, 0px));
 }
 
+.feed-card :deep(.chat-row .chat-bubble:has(.code-block)) {
+  /* Сообщение с кодом занимает всю ширину ленты (как на десктопе), без сужения 80%. */
+  --chat-bubble-width-scale: 1;
+  width: calc(100% - 6px);
+  max-width: calc(100% - 6px);
+}
+
 .feed-card :deep(.chat-markdown .code-block pre),
 .feed-card :deep(.chat-markdown .code-block pre code),
 .feed-card :deep(.chat-text-highlighted .shiki),
@@ -1728,8 +1736,8 @@ onUnmounted(() => {
 .feed-card :deep(.chat-row.focus-copy .chat-text-highlighted .code-block[data-lang="plaintext"] .shiki span) {
   min-width: 0;
   font-family: inherit;
-  font-size: 15px;
-  line-height: 1.45;
+  font-size: var(--chat-message-font-size);
+  line-height: var(--chat-message-line-height);
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
