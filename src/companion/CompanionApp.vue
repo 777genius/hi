@@ -354,7 +354,11 @@ async function applySnapshot(next: TauriSnapshotEnvelope<CompanionSnapshotData>)
     selectedMessageIds.value = [];
   }
 
-  if (shouldStickBottom && revisionAdvanced) {
+  // Пока идёт ответ LLM, ленту вниз не двигаем: она остаётся там, где её оставил пользователь.
+  const answerStreaming = (next.data?.timeline ?? []).some(
+    (message) => message.kind === 'haiku' && !message.deleted && message.status === 'streaming'
+  );
+  if (shouldStickBottom && revisionAdvanced && !answerStreaming) {
     await stickToBottomIfNeeded();
   }
 }

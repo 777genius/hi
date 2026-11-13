@@ -63,7 +63,7 @@ describe('ConversationFeed assistant scrolling', () => {
     host.remove();
   });
 
-  it('holds position during streaming until the user reaches the end', async () => {
+  it('holds position during streaming even after the user reaches the end', async () => {
     const state = reactive({
       streaming: false,
       messages: [{
@@ -102,7 +102,8 @@ describe('ConversationFeed assistant scrolling', () => {
     state.messages[0].text += ' and the last part';
     await nextTick();
     await nextTick();
-    expect(scroll.scrollTop).toBe(2000);
+    // автоскролла во время ответа нет, даже если пользователь стоит внизу
+    expect(scroll.scrollTop).toBe(1000);
 
     app.unmount();
     host.remove();
@@ -188,7 +189,7 @@ describe('ConversationFeed assistant scrolling', () => {
     host.remove();
   });
 
-  it('stops following the stream when the user scrolls up after reaching the end', async () => {
+  it('never follows the stream: the position the user chose stays, also at the bottom', async () => {
     const state = reactive({
       messages: [{
         id: 'q', kind: 'stt', role: 'incoming', status: 'final',
@@ -212,9 +213,13 @@ describe('ConversationFeed assistant scrolling', () => {
       text: 'First part', createdAtMs: 2, seq: 2,
     } as ConversationFeedMessage);
     await nextTick();
-
-    // пользователь доходит до конца: лента начинает следовать за ответом
     contentHeight = 1500;
+    state.messages[1].text += ' and more';
+    await nextTick();
+    await nextTick();
+    expect(scroll.scrollTop).toBe(500);
+
+    // пользователь сам листает вниз до конца, ответ продолжается: лента не едет
     scroll.dispatchEvent(new WheelEvent('wheel', { bubbles: true }));
     scroll.scrollTop = 1000;
     scroll.dispatchEvent(new Event('scroll'));
@@ -222,19 +227,18 @@ describe('ConversationFeed assistant scrolling', () => {
     state.messages[1].text += ' and following';
     await nextTick();
     await nextTick();
-    expect(scroll.scrollTop).toBe(2000);
-    scroll.dispatchEvent(new Event('scroll'));
+    expect(scroll.scrollTop).toBe(1000);
 
-    // теперь пользователь листает вверх, чтобы перечитать: ответ его не возвращает вниз
     scroll.dispatchEvent(new WheelEvent('wheel', { bubbles: true }));
-    scroll.scrollTop = 1200;
+    scroll.scrollTop = 700;
     scroll.dispatchEvent(new Event('scroll'));
     contentHeight = 2600;
     state.messages[1].text += ' and even more text';
     await nextTick();
     await nextTick();
-    expect(scroll.scrollTop).toBe(1200);
+    expect(scroll.scrollTop).toBe(700);
 
+    // ответ завершён: пока ничего не двигаем, пользователь решает сам
     app.unmount();
     host.remove();
   });

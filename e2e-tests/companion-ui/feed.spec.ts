@@ -29,7 +29,7 @@ test.describe('Автоскролл ленты', () => {
     await expect(button).toBeHidden();
   });
 
-  test('стриминг ответа не тянет ленту вниз, пока пользователь сам не дошёл до конца', async ({ companion, page }) => {
+  test('стриминг ответа никогда не тянет ленту вниз, даже если пользователь стоит внизу', async ({ companion, page }) => {
     await companion.reset(snapshotData(questions(40)));
     await companion.open();
     await companion.userScrollTo('bottom');
@@ -46,11 +46,12 @@ test.describe('Автоскролл ленты', () => {
     expect((await companion.scrollMetrics()).scrollTop).toBe(start.scrollTop);
     await expect(page.locator('.scroll-to-bottom-button')).toBeVisible();
 
-    // Пользователь долистал до конца: дальше лента приклеена к ответу.
+    // Пользователь сам долистал до конца: автоскролла всё равно нет, позиция остаётся той, где он её оставил.
     await companion.userScrollTo('bottom');
+    const atBottom = (await companion.scrollMetrics()).scrollTop;
     await companion.update((data) => { data.timeline.at(-1)!.text = paragraphs(16); });
     await expect(page.locator('[data-msg-id="haiku:41"]')).toContainText('Абзац 15');
-    await expect.poll(async () => (await companion.scrollMetrics()).remaining).toBeLessThanOrEqual(2);
+    expect((await companion.scrollMetrics()).scrollTop).toBe(atBottom);
 
     // Пользователь пролистал вверх перечитать: стриминг его не возвращает вниз.
     await companion.userScrollTo((await companion.scrollMetrics()).scrollTop - 400);
@@ -61,7 +62,7 @@ test.describe('Автоскролл ленты', () => {
 
     // Ответ завершился: позиция всё ещё не меняется.
     await companion.update((data) => { const last = data.timeline.at(-1)!; last.status = 'final'; last.text = paragraphs(24); });
-    await expect(page.locator('[data-msg-id="haiku:41"] .chat-cursor')).toHaveCount(0);
+    await expect(page.locator('.chat-cursor')).toHaveCount(0);
     expect((await companion.scrollMetrics()).scrollTop).toBe(reading);
   });
 

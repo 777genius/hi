@@ -59,7 +59,7 @@ test.describe('Порядок сообщений в ленте', () => {
 
     await expect.poll(() => companion.rowIds()).toEqual(['stt:1', 'stt:live', 'mic:2', 'mic:live']);
     await expect(companion.page.locator('[data-msg-id="stt:live"]')).toHaveClass(/partial/);
-    await expect(companion.page.locator('[data-msg-id="stt:live"] .chat-cursor')).toBeVisible();
+    await expect(companion.page.locator('.chat-cursor')).toHaveCount(0);
 
     // AI начал отвечать на ещё не финальный вопрос.
     await companion.update((data) => {

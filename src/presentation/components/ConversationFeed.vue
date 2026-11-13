@@ -371,12 +371,6 @@ function onScroll(): void {
   if (isAssistantStreaming.value && userScrollIntent && element && !resumeAfterUserScroll) {
     frozenScrollTop = element.scrollTop;
   }
-  if (isAssistantStreaming.value && userScrollIntent && element && !resumeAfterUserScroll &&
-      scrollBottomRemaining(element) <= 2) {
-    resumeAfterUserScroll = true;
-    frozenScrollTop = null;
-    wasNearBottom = true;
-  }
   // Пользователь прокрутил вверх, пока лента "прилипла" к низу: отпускаем и фиксируем позицию,
   // иначе автоскролл возвращает его вниз и выйти из конца ленты невозможно.
   if (element && isAssistantStreaming.value && userScrollIntent && resumeAfterUserScroll &&
@@ -404,8 +398,8 @@ function scrollToBottom(behavior: ScrollBehavior = 'smooth'): void {
   });
   wasNearBottom = true;
   if (isAssistantStreaming.value) {
-    resumeAfterUserScroll = true;
-    frozenScrollTop = null;
+    // Автоскролл во время ответа не включаем: лента остаётся там, где её оставил пользователь.
+    frozenScrollTop = element.scrollHeight - element.clientHeight;
   }
   scheduleScrollStateUpdate();
 }
@@ -611,7 +605,6 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <span v-if="visibleMessageStatus(msg) === 'streaming'" class="chat-cursor">▍</span>
           </template>
         </div>
 
@@ -1388,19 +1381,6 @@ onUnmounted(() => {
   white-space: pre;
   word-break: normal;
   overflow-wrap: normal;
-}
-
-.chat-cursor {
-  display: inline-block;
-  margin-left: 2px;
-  opacity: 0.9;
-  animation: chat-cursor-blink 1s steps(2, end) infinite;
-}
-
-@keyframes chat-cursor-blink {
-  50% {
-    opacity: 0.25;
-  }
 }
 
 @media (max-width: 560px) {
