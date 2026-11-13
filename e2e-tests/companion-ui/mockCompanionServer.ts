@@ -20,8 +20,13 @@ export type MockActionOverride = {
   status?: number;
   /** Тело ответа как есть (строка) или JSON. */
   body?: unknown;
-  /** Оборвать соединение без ответа (как потеря Wi-Fi посреди запроса). */
+  /**
+   * Оборвать соединение без ответа. Chromium может сам повторить такой POST на keep-alive сокете
+   * (тот же X-Companion-Request-Id), поэтому для детерминированной потери ответа есть dropAfterHeaders.
+   */
   drop?: boolean;
+  /** Отправить заголовки 200 и оборвать тело: ответ потерян, браузер запрос не повторяет. */
+  dropAfterHeaders?: boolean;
   /** Задержка перед ответом. */
   delayMs?: number;
   /** Сколько раз применить; по умолчанию один раз. */
@@ -67,6 +72,8 @@ type Session = {
     actionOverrides: Record<string, MockActionOverride | null>;
   };
   held: Map<string, { promise: Promise<void>; release: () => void }>;
+  /** Как CompanionActionIdempotencyCache на desktop: повтор того же request id не выполняет действие снова. */
+  idempotency: Map<string, { state: 'in_flight' } | { state: 'completed'; ok: boolean; actionResult: string }>;
 };
 
 export function emptyCompanionSnapshotData(instanceId = 'mock-instance-a'): CompanionSnapshotData {
@@ -108,6 +115,7 @@ function createSession(data: CompanionSnapshotData = emptyCompanionSnapshotData(
     streamsOpened: 0,
     config: { authorized: true, heartbeat: true, stateOverride: null, actionOverrides: {} },
     held: new Map(),
+    idempotency: new Map(),
   };
 }
 
@@ -337,6 +345,12 @@ export function companionMockServer(): Plugin {
       response.destroy();
       return;
     }
+    if (override.dropAfterHeaders) {
+      response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      response.write('{"ok":tr');
+      setTimeout(() => response.destroy(), 20);
+      return;
+    }
     sendJson(response, override.status ?? 500, override.body ?? 'Mock failure');
   }
 
@@ -401,16 +415,34 @@ export function companionMockServer(): Plugin {
       });
       if (!session.config.authorized) return sendJson(response, 403, 'Forbidden');
 
+      const idempotencyKey = typeof requestId === 'string' ? `${pathname}:${requestId}` : null;
+      const previous = idempotencyKey ? session.idempotency.get(idempotencyKey) : undefined;
+      if (previous?.state === 'in_flight') {
+        return sendJson(response, 409, { ok: false, actionResult: 'busy_transition', snapshot: envelope(session) });
+      }
+      if (previous?.state === 'completed') {
+        return sendJson(response, 200, { ok: previous.ok, actionResult: previous.actionResult, snapshot: envelope(session) });
+      }
+      if (idempotencyKey) session.idempotency.set(idempotencyKey, { state: 'in_flight' });
+
       const held = session.held.get(pathname);
       if (held) await held.promise;
 
       const holder = { value: session.config.actionOverrides[pathname] ?? null };
       const override = consumeOverride(holder);
       session.config.actionOverrides[pathname] = holder.value;
-      if (override && !override.applyAction) return respondWithOverride(response, override);
+      if (override && !override.applyAction) {
+        // Действие не выполнено: повтор с тем же request id выполнится заново.
+        if (idempotencyKey) session.idempotency.delete(idempotencyKey);
+        return respondWithOverride(response, override);
+      }
 
       const actionResult = applyDefaultAction(session, pathname, body);
-      if (!actionResult) return sendJson(response, 404, 'Not Found');
+      if (!actionResult) {
+        if (idempotencyKey) session.idempotency.delete(idempotencyKey);
+        return sendJson(response, 404, 'Not Found');
+      }
+      if (idempotencyKey) session.idempotency.set(idempotencyKey, { state: 'completed', ok: true, actionResult });
       publish(session);
       if (override) return respondWithOverride(response, override);
       return sendJson(response, 200, { ok: true, actionResult, snapshot: envelope(session) });
