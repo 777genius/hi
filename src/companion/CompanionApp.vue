@@ -686,8 +686,13 @@ async function refreshSnapshot(): Promise<void> {
   if (response.status === 401 || response.status === 403) {
     throw new Error('Ссылка устарела или companion перезапустился. Открой QR из окна приложения заново.');
   }
-  if (!response.ok || !isCompanionSnapshotEnvelope(json)) {
-    throw new Error(compactResponseError(raw, `Не удалось получить корректное состояние Companion: ${response.status}`));
+  const invalidStateMessage = `Не удалось получить корректное состояние Companion: ${response.status}`;
+  if (!response.ok) {
+    throw new Error(compactResponseError(raw, invalidStateMessage));
+  }
+  if (!isCompanionSnapshotEnvelope(json)) {
+    // Тело успешного ответа — это сам (битый) snapshot: сырой JSON пользователю не показываем.
+    throw new Error(invalidStateMessage);
   }
 
   await applySnapshot(json);
