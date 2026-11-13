@@ -65,7 +65,8 @@ function contents(snapshot, prefix) {
 }
 
 describe('Native Companion burst / slow-client convergence', () => {
-  it('delivers 200 unique Unicode messages to live, repeatedly rejoined, HTTP and desktop clients', async () => {
+  it('converges across clients for 240 messages and the 200-message retention boundary', async () => {
+    assert.equal(process.env.INTERVIEW_MEMORY_FORCE_DISABLED, 'true', 'native stress must disable external memory ingestion');
     await browser.switchToWindow(await findWindowHandleByLabel('main'));
     await ensureE2E();
     let live;
@@ -79,26 +80,28 @@ describe('Native Companion burst / slow-client convergence', () => {
       live = await probe(base, started.token);
       rejoined = await probe(base, started.token);
       await waitFor(() => !!live.latest && !!rejoined.latest);
+      assert.equal(live.latest.data.timeline.length, 0, 'stress test requires a fresh E2E profile, not real user history');
       const instanceId = live.latest.data.controls.instanceId;
+      const sendTranscript = async (index) => {
+        const text = `${prefix}${index}: Русский / українська / 🎙️`;
+        expectedTexts.push(text);
+        const response = await fetch(`${base}/api/e2e/timeline/system`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Companion-Token': started.token },
+          body: JSON.stringify({ text, sessionId: seed + index }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        assert.equal(response.status, 200, `native transcript ${index} was not accepted`);
+        assert.equal((await response.json()).ok, true);
+      };
 
       for (let round = 0; round < 4; round++) {
         if (round > 0) { await rejoined.close(); rejoined = null; }
         // Four concurrent writers exercise publication ordering. A watch
         // channel may coalesce snapshots; only complete eventual state matters.
         for (let offset = 0; offset < 50; offset += 4) {
-          const writes = Array.from({ length: Math.min(4, 50 - offset) }, async (_, local) => {
-            const index = round * 50 + offset + local;
-            const text = `${prefix}${index}: Русский / українська / 🎙️`;
-            expectedTexts.push(text);
-            const response = await fetch(`${base}/api/e2e/timeline/system`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-Companion-Token': started.token },
-              body: JSON.stringify({ text, sessionId: seed + index }),
-              signal: AbortSignal.timeout(10_000),
-            });
-            assert.equal(response.status, 200, `native transcript ${index} was not accepted`);
-            assert.equal((await response.json()).ok, true);
-          });
+          const writes = Array.from({ length: Math.min(4, 50 - offset) }, (_, local) =>
+            sendTranscript(round * 50 + offset + local));
           await Promise.all(writes);
         }
         const count = (round + 1) * 50;
@@ -118,7 +121,22 @@ describe('Native Companion burst / slow-client convergence', () => {
       for (const candidate of [live.latest, rejoined.latest, desktop]) {
         assert.deepEqual(contents(candidate, prefix), contents(http, prefix));
       }
-      console.log('[PASS] Companion: 200 messages, 4 concurrent writers, 2 SSE clients, 3 reconnects; HTTP/desktop/SSE converge');
+      // Overflow is intentional retention, not transport loss. Do not change
+      // production history policy just to make a stress assertion pass.
+      for (let offset = 200; offset < 240; offset += 4) {
+        await Promise.all(Array.from({ length: 4 }, (_, i) => sendTranscript(offset + i)));
+      }
+      const retained = await state(base, started.token);
+      assert.equal(messages(retained, prefix).length, 200, 'default retention must remain bounded');
+      assert.ok(messages(retained, prefix).some((item) => item.text === expectedTexts[239]));
+      await waitFor(() => Number(live.latest.revision) >= Number(retained.revision)
+        && Number(rejoined.latest.revision) >= Number(retained.revision), { timeoutMs: 20_000 });
+      const desktopRetained = nativeResult(await invoke('get_companion_snapshot'), 'desktop retained state');
+      for (const candidate of [live.latest, rejoined.latest, desktopRetained]) {
+        assert.deepEqual(contents(candidate, prefix), contents(retained, prefix));
+      }
+      assert.equal(new Set(messages(retained, prefix).map((item) => item.id)).size, 200);
+      console.log('[PASS] Companion: 240 accepted, 200 retained, 4 writers, 2 SSE clients, 3 reconnects; HTTP/desktop/SSE converge');
     } finally {
       await Promise.all([live?.close(), rejoined?.close()]);
       nativeResult(await invoke('disable_companion_mode'), 'disable Companion');
