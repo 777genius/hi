@@ -119,10 +119,16 @@ describe('Built Companion UI over real browser HTTP/SSE (fault-injected server)'
     await waitFor(() => fixture.count('/api/ai/request') === 1);
     assert.deepEqual(fixture.posts.find((post) => post.path === '/api/ai/request').body.selectedMessageIds, ['burst:0']);
     await clickTitle('Открыть сообщение в AI');
-    await $('.ask-textarea').setValue('Проверка отправки — українська 🎙️');
+    // WebKitWebDriver's native setValue drops the astral microphone glyph on
+    // Linux. Emoji rendering is covered by the incoming 300-message burst;
+    // this scenario checks exact real keyboard entry, POST, and rendered reply.
+    const promptText = 'Проверка отправки — українська';
+    await $('.ask-textarea').setValue(promptText);
+    assert.equal(await $('.ask-textarea').getValue(), promptText);
     await $('.send-button').click();
-    await waitText('Проверка отправки — українська 🎙️');
+    await waitText(promptText);
     assert.equal(fixture.count('/api/prompt/send'), 1);
+    assert.equal(fixture.posts.find((post) => post.path === '/api/prompt/send').body.text, promptText);
     assert.ok(fixture.posts.every((post) => typeof post.requestId === 'string' && post.requestId.length > 0));
     const idsBeforeClear = await rowIds();
     await clickTitle('Очистить AI контекст');
