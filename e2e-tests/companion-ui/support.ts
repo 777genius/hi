@@ -196,6 +196,47 @@ export class CompanionMock {
   }
 }
 
+/**
+ * Контраст по WCAG между цветом текста элемента и фоном под ним: полупрозрачные подложки предков
+ * накладываются поверх --color-bg страницы (радиальный градиент страницы не учитывается).
+ */
+export function textContrast(page: Page, selector: string): Promise<number> {
+  return page.locator(selector).first().evaluate((element) => {
+    type Rgba = [number, number, number, number];
+    const parse = (color: string): Rgba => {
+      const parts = (color.match(/[\d.]+/g) ?? ['0', '0', '0', '0']).map(Number);
+      return [parts[0], parts[1], parts[2], parts[3] ?? 1];
+    };
+    const over = (top: Rgba, bottom: Rgba): Rgba => [
+      top[0] * top[3] + bottom[0] * (1 - top[3]),
+      top[1] * top[3] + bottom[1] * (1 - top[3]),
+      top[2] * top[3] + bottom[2] * (1 - top[3]),
+      1,
+    ];
+    const luminance = ([r, g, b]: Rgba) => {
+      const channel = (value: number) => {
+        const srgb = value / 255;
+        return srgb <= 0.03928 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4;
+      };
+      return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+    };
+    const probe = document.createElement('div');
+    probe.style.color = getComputedStyle(document.documentElement).getPropertyValue('--color-bg');
+    document.body.append(probe);
+    let background = parse(getComputedStyle(probe).color);
+    probe.remove();
+    const layers: Rgba[] = [];
+    for (let node: Element | null = element; node; node = node.parentElement) {
+      const layer = parse(getComputedStyle(node).backgroundColor);
+      if (layer[3] > 0) layers.unshift(layer);
+    }
+    for (const layer of layers) background = over(layer, background);
+    const text = over(parse(getComputedStyle(element).color), background);
+    const [lighter, darker] = [luminance(text), luminance(background)].sort((a, b) => b - a);
+    return (lighter + 0.05) / (darker + 0.05);
+  });
+}
+
 type Fixtures = {
   companion: CompanionMock;
   pageErrors: string[];

@@ -1707,6 +1707,65 @@ onUnmounted(() => {
   animation: dock-spin 1s linear infinite;
 }
 
+/* Светлая тема (на iPhone по умолчанию): цвета статуса и подложка PWA-подсказки рассчитаны на тёмный фон,
+   жёлтое предупреждение и серый текст подсказки на светлом фоне почти не читались.
+   Без :global(): .theme-light стоит на <html>, а Vue 3.5 компилирует ":global(.a) .b" в один ".a". */
+.theme-light .top-connection-status,
+.theme-light .ask-status {
+  color: var(--color-text-secondary);
+}
+
+.theme-light .top-connection-status.reconnecting,
+.theme-light .top-connection-status.tone-warn,
+.theme-light .ask-status.reconnecting,
+.theme-light .ask-status.tone-warn {
+  color: #8a5a00;
+}
+
+.theme-light .top-connection-status.disconnected,
+.theme-light .top-connection-status.tone-error,
+.theme-light .ask-status.disconnected,
+.theme-light .ask-status.tone-error {
+  color: #b42318;
+}
+
+.theme-light .top-connection-status.tone-ok,
+.theme-light .ask-status.tone-ok {
+  color: #1b7a33;
+}
+
+.theme-light .top-connection-status.tone-pending,
+.theme-light .ask-status.tone-pending {
+  color: #1d5fbf;
+}
+
+.theme-light .pwa-notice {
+  border-color: rgba(15, 23, 42, 0.1);
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.theme-light .pwa-notice.tone-warn {
+  border-color: rgba(138, 90, 0, 0.28);
+  background: #fff6db;
+}
+
+.theme-light .pwa-notice.tone-error {
+  border-color: rgba(180, 35, 24, 0.28);
+  background: #fdecea;
+}
+
+.theme-light .pwa-notice-icon {
+  color: #1d5fbf;
+}
+
+.theme-light .pwa-notice-icon-button {
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.theme-light .pwa-diagnostic-label {
+  color: var(--color-text);
+}
+
 .summary-label {
   font-size: 12px;
   text-transform: uppercase;
