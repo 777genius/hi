@@ -712,8 +712,12 @@ impl TranscriptionService {
                         break;
                     }
                     log::info!("Refreshing ScreenCaptureKit after {}ms of silence", quiet_ms);
+                    // Новый SCStream сразу после остановки старого иногда не стартует: даём системе вдохнуть.
                     let mut result = match guard.stop_capture().await {
-                        Ok(()) => guard.start_capture(on_chunk.clone()).await,
+                        Ok(()) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                            guard.start_capture(on_chunk.clone()).await
+                        }
                         Err(error) => Err(error),
                     };
                     drop(guard);
@@ -732,6 +736,7 @@ impl TranscriptionService {
                         }
                         let mut guard = capture.write().await;
                         let _ = guard.stop_capture().await;
+                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                         result = guard.start_capture(on_chunk.clone()).await;
                     }
                     if let Err(error) = result {
