@@ -1,12 +1,12 @@
 //! Offline local-model STT behind the existing provider contract.
 //! One pipeline (VAD utterances -> background decode worker) serves several GGUF
 //! models; `LocalModel` describes the weights and per-model decode options.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -54,6 +54,7 @@ const WHISPER_HALLUCINATION_FRAGMENTS: &[&str] = &[
 /// one: allow almost the whole window instead of cutting a question at 6 s.
 const WHISPER_MAX_UTTERANCE_MS: usize = 25_000;
 const PARAKEET_MAX_UTTERANCE_MS: usize = 6_000;
+const SPECULATIVE_PAUSE_MS: usize = 150;
 const WHISPER_HALLUCINATION_MAX_SECONDS: f64 = 2.5;
 
 /// Weights + decode behaviour of one local model. Everything model-specific
@@ -137,6 +138,11 @@ impl LocalModel {
             Self::WhisperLargeV3 => "2fa1a5f179f8a511a53e2108db270aa4af3ce08cd976af4180e2854666bb4ba3",
             Self::WhisperLargeV3Turbo => "257aa7ec9121c22c167d5e2c49e3e76b4ba0e6e27ebc13074eba0a80f8190220",
         }
+    }
+
+    /// Pause after which decoding starts speculatively (see `Speculation`).
+    fn speculative_pause_ms(self) -> Option<usize> {
+        Some(SPECULATIVE_PAUSE_MS)
     }
 
     fn max_utterance_ms(self) -> usize {
@@ -260,6 +266,30 @@ impl LocalModel {
         Ok(path)
     }
 
+    /// Loads the weights once per file and process: the microphone and the system
+    /// audio provider share one handle. Decodes are GPU-bound and serialize on the
+    /// model's compute lock either way (measured: two copies and one shared model
+    /// give the same latency with both channels active), so a second copy only
+    /// costs memory and load time. The handle is freed when the last provider drops.
+    fn load_shared(self, path: &Path) -> SttResult<Arc<transcribe_cpp::Model>> {
+        static LOADED: OnceLock<Mutex<HashMap<PathBuf, Weak<transcribe_cpp::Model>>>> = OnceLock::new();
+        // Held across the load so two providers initializing at once load it only once.
+        let mut loaded = LOADED
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(model) = loaded.get(path).and_then(Weak::upgrade) {
+            return Ok(model);
+        }
+        self.verify_integrity(path)?;
+        let model = Arc::new(transcribe_cpp::Model::load(path).map_err(|error| {
+            SttError::Configuration(format!("Cannot load {}: {error}", self.label()))
+        })?);
+        loaded.retain(|_, weak| weak.strong_count() > 0);
+        loaded.insert(path.to_path_buf(), Arc::downgrade(&model));
+        Ok(model)
+    }
+
     /// Size + SHA-256 against the pinned catalog. A successful check is cached
     /// per (path, mtime) so the second audio source does not hash the file again.
     fn verify_integrity(self, path: &Path) -> SttResult<()> {
@@ -335,13 +365,39 @@ async fn enqueue_final_tail(
 }
 
 
-/// Each provider instance owns a different loaded model handle: transcribe.cpp
-/// v0.4.x permits only one active decode per loaded model.
+/// FNV-1a over the samples: cheap identity check for "same audio as the speculative decode".
+fn pcm_fingerprint(pcm: &[i16]) -> u64 {
+    pcm.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, &sample| {
+        (hash ^ u64::from(sample as u16)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// Decoder result of the latest speculative job, reusable by the final utterance
+/// when it carries exactly the same audio (speech did not resume).
+struct Speculation {
+    start_sample: u64,
+    len: usize,
+    fingerprint: u64,
+    text: String,
+    language: Option<String>,
+}
+
+impl Speculation {
+    fn matches(&self, job: &Utterance, fingerprint: u64) -> bool {
+        self.start_sample == job.start_sample && self.len == job.pcm.len() && self.fingerprint == fingerprint
+    }
+}
+
+/// Providers of the same model file share one loaded handle (see `load_shared`);
+/// transcribe.cpp v0.4.x runs one decode at a time per loaded model.
 pub struct LocalSttProvider {
     kind: LocalModel,
     /// Emit live previews (defaults to the model's preference; tests may override).
     previews: bool,
-    model: Option<transcribe_cpp::Model>,
+    /// Pause (ms) after which decoding starts early and is reused by the final
+    /// (`None` = off). Defaults to the model's policy; tests may override.
+    speculative_pause_ms: Option<usize>,
+    model: Option<Arc<transcribe_cpp::Model>>,
     segmenter: Option<UtteranceSegmenter>,
     job_tx: Option<mpsc::Sender<Utterance>>,
     worker: Option<tokio::task::JoinHandle<SttResult<()>>>,
@@ -354,6 +410,7 @@ impl LocalSttProvider {
         Self {
             kind,
             previews: kind.emits_previews(),
+            speculative_pause_ms: kind.speculative_pause_ms(),
             model: None,
             segmenter: None,
             job_tx: None,
@@ -372,12 +429,7 @@ impl SttProvider for LocalSttProvider {
         }
         let kind = self.kind;
         let path = kind.resolve_path(config)?;
-        let model = tokio::task::spawn_blocking(move || -> SttResult<_> {
-            kind.verify_integrity(&path)?;
-            transcribe_cpp::Model::load(path).map_err(|error| {
-                SttError::Configuration(format!("Cannot load {}: {error}", kind.label()))
-            })
-        })
+        let model = tokio::task::spawn_blocking(move || kind.load_shared(&path))
         .await
         .map_err(|error| SttError::Internal(format!("Local model load task: {error}")))??;
         self.model = Some(model);
@@ -398,7 +450,8 @@ impl SttProvider for LocalSttProvider {
             SttError::Configuration("Local STT model not initialized".into())
         })?;
         let kind = self.kind;
-        let segmenter = UtteranceSegmenter::with_max_utterance_ms(kind.max_utterance_ms())?;
+        let previews = self.previews;
+        let segmenter = UtteranceSegmenter::with_options(kind.max_utterance_ms(), self.speculative_pause_ms)?;
         self.cancelled = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::clone(&self.cancelled);
         let (tx, mut rx) = mpsc::channel::<Utterance>(JOB_QUEUE_CAPACITY);
@@ -421,57 +474,85 @@ impl SttProvider for LocalSttProvider {
             };
             let glossary = LocalGlossary::load();
             let opts = kind.run_options(&glossary);
+            let mut speculation: Option<Speculation> = None;
             while let Some(job) = rx.blocking_recv() {
                 if cancelled.load(Ordering::Acquire) {
                     break;
                 }
-                let samples = job.pcm.iter()
-                    .map(|&sample| sample as f32 / 32768.0)
-                    .collect::<Vec<_>>();
-                let duration_s = samples.len() as f64 / 16_000.0;
-                let started = std::time::Instant::now();
-                match session.run(&samples, &opts) {
-                    Ok(result) => {
-                        log::debug!(
-                            "{} decoded {:.1}s in {}ms",
-                            kind.label(),
-                            duration_s,
-                            started.elapsed().as_millis(),
-                        );
-                        if cancelled.load(Ordering::Acquire) {
-                            break;
+                let duration_s = job.pcm.len() as f64 / 16_000.0;
+                let fingerprint = (job.is_final || job.speculative).then(|| pcm_fingerprint(&job.pcm));
+                // A final carrying the audio of the latest speculative decode needs no second pass.
+                let reused = if job.is_final {
+                    speculation.take().filter(|s| fingerprint.is_some_and(|f| s.matches(&job, f)))
+                } else {
+                    None
+                };
+                let (text, language) = if let Some(done) = reused {
+                    log::debug!("{} reused the speculative decode of {:.1}s", kind.label(), duration_s);
+                    (done.text, done.language)
+                } else {
+                    let samples = job.pcm.iter()
+                        .map(|&sample| sample as f32 / 32768.0)
+                        .collect::<Vec<_>>();
+                    let started = std::time::Instant::now();
+                    match session.run(&samples, &opts) {
+                        Ok(result) => {
+                            log::debug!(
+                                "{} decoded {:.1}s in {}ms",
+                                kind.label(),
+                                duration_s,
+                                started.elapsed().as_millis(),
+                            );
+                            (result.text.trim().to_string(), result.language)
                         }
-                        let text = result.text.trim();
-                        if kind.is_hallucination(text, duration_s) {
-                            log::debug!("Dropped {} silence hallucination: {text:?}", kind.label());
-                        } else if !text.is_empty() {
-                            let corrected = glossary.correct(text);
-                            let mut transcription = if job.is_final {
-                                Transcription::final_result(corrected)
-                            } else {
-                                Transcription::partial(corrected)
+                        Err(error) => {
+                            if cancelled.load(Ordering::Acquire) {
+                                break;
                             }
-                            .with_timing(job.start_sample as f64 / 16_000.0, duration_s);
-                            transcription.language = result.language;
-                            // Preserve capture chronology, not decoder completion time.
-                            transcription.timestamp = job.captured_at_ms;
-                            if job.is_final {
-                                on_final(transcription);
-                            } else {
-                                on_partial(transcription);
-                            }
+                            let failure = SttError::Processing(
+                                format!("{} utterance inference failed: {error}", kind.label())
+                            );
+                            on_error(failure.clone());
+                            // Do not return success from Stop after losing a decoded phrase.
+                            return Err(failure);
                         }
                     }
-                    Err(error) => {
-                        if cancelled.load(Ordering::Acquire) {
-                            break;
-                        }
-                        let failure = SttError::Processing(
-                            format!("{} utterance inference failed: {error}", kind.label())
-                        );
-                        on_error(failure.clone());
-                        // Do not return success from Stop after losing a decoded phrase.
-                        return Err(failure);
+                };
+                if cancelled.load(Ordering::Acquire) {
+                    break;
+                }
+                if job.speculative {
+                    if let Some(fingerprint) = fingerprint {
+                        speculation = Some(Speculation {
+                            start_sample: job.start_sample,
+                            len: job.pcm.len(),
+                            fingerprint,
+                            text: text.clone(),
+                            language: language.clone(),
+                        });
+                    }
+                    // Without live previews the speculative pass is only a head start.
+                    if !previews {
+                        continue;
+                    }
+                }
+                if kind.is_hallucination(&text, duration_s) {
+                    log::debug!("Dropped {} silence hallucination: {text:?}", kind.label());
+                } else if !text.is_empty() {
+                    let corrected = glossary.correct(&text);
+                    let mut transcription = if job.is_final {
+                        Transcription::final_result(corrected)
+                    } else {
+                        Transcription::partial(corrected)
+                    }
+                    .with_timing(job.start_sample as f64 / 16_000.0, duration_s);
+                    transcription.language = language;
+                    // Preserve capture chronology, not decoder completion time.
+                    transcription.timestamp = job.captured_at_ms;
+                    if job.is_final {
+                        on_final(transcription);
+                    } else {
+                        on_partial(transcription);
                     }
                 }
             }
@@ -514,7 +595,11 @@ impl SttProvider for LocalSttProvider {
                 // A preview is superseded by the next preview or final result.
                 // Keep the decode queue available for final utterances when the
                 // model is slower than real time on a busy machine.
-                if !job.is_final && (!emits_previews || tx.capacity() < JOB_QUEUE_CAPACITY) {
+                if !job.is_final && !job.speculative && !emits_previews {
+                    continue;
+                }
+                // Previews and speculative decodes yield to anything already queued.
+                if !job.is_final && tx.capacity() < JOB_QUEUE_CAPACITY {
                     continue;
                 }
                 tx.try_send(job).map_err(|error| {
@@ -639,6 +724,7 @@ mod tests {
             start_sample: 0,
             captured_at_ms: 0,
             is_final: true,
+            speculative: false,
         };
         tx.try_send(make_utterance()).expect("fill bounded queue");
 
@@ -657,6 +743,22 @@ mod tests {
             failure.to_string().contains("Timed out flushing local STT tail"),
             "unexpected error: {failure}"
         );
+    }
+
+    #[test]
+    fn fingerprint_separates_audio_that_differs_anywhere() {
+        let a: Vec<i16> = (0..4000).map(|i| (i % 300) as i16).collect();
+        let mut b = a.clone();
+        assert_eq!(pcm_fingerprint(&a), pcm_fingerprint(&b));
+        b[3999] += 1;
+        assert_ne!(pcm_fingerprint(&a), pcm_fingerprint(&b));
+        let spec = Speculation {
+            start_sample: 7, len: a.len(), fingerprint: pcm_fingerprint(&a), text: "x".into(), language: None,
+        };
+        let job = |pcm: Vec<i16>, start| Utterance { pcm, start_sample: start, captured_at_ms: 0, is_final: true, speculative: false };
+        assert!(spec.matches(&job(a.clone(), 7), pcm_fingerprint(&a)));
+        assert!(!spec.matches(&job(a.clone(), 8), pcm_fingerprint(&a)), "different phrase start");
+        assert!(!spec.matches(&job(b.clone(), 7), pcm_fingerprint(&b)), "speech resumed: audio differs");
     }
 
     #[test]
@@ -724,6 +826,9 @@ mod tests {
         if let Ok(flag) = std::env::var("LOCAL_STT_PREVIEWS") {
             provider.previews = flag == "1";
         }
+        if let Ok(ms) = std::env::var("LOCAL_STT_SPEC_MS") {
+            provider.speculative_pause_ms = ms.parse().ok().filter(|ms| *ms > 0);
+        }
         provider.initialize(&SttConfig::new(provider_type)).await.unwrap();
         let clips = std::env::var("LOCAL_STT_CLIPS").expect("clip list required");
         let mut latencies = Vec::new();
@@ -781,8 +886,8 @@ mod tests {
         }
         latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
         println!(
-            "SUMMARY [{}] previews_enabled={} n={} median={:.2}s max={:.2}s",
-            kind.label(), provider.previews, latencies.len(),
+            "SUMMARY [{}] previews_enabled={} spec_pause_ms={:?} n={} median={:.2}s max={:.2}s",
+            kind.label(), provider.previews, provider.speculative_pause_ms, latencies.len(),
             latencies[latencies.len() / 2], latencies.last().copied().unwrap_or(0.0)
         );
     }
