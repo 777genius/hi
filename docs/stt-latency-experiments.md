@@ -16,3 +16,27 @@ the decode is ~0.65 s and almost all of it is the encoder over a fixed 30 s wind
 | Speculative decode at a 150 ms pause, reused by the final when the audio is identical | Turbo final after speech end, 10 clips, mean 1.50 -> 1.25 s; Parakeet median 0.66 -> 0.57 s; final texts identical | **implemented** |
 | Speculative pause 300 ms | no gain over no speculation | rejected |
 | One shared model for microphone and system audio | two channels decoding at once: p50 1.35 s / p95 1.9 s with 2 copies and with 1 shared model; saves 0.9 GB | **implemented** |
+| Thread QoS of the decoder (utility / user-initiated / none), measured on 9 clips x 4 rounds | median 691 / 675 / 666 ms: no difference, the work is on the GPU | no change |
+| Turbo F16 instead of Q8_0 | median 647-663 vs 666-691 ms (3-4%), identical texts, +0.7 GB | rejected |
+| transcribe-cpp 0.4.2 | only change relevant to us: vocabulary is rendered as a comma list instead of `Glossary: ...` (more terms may fit the 223-token budget); no speed changes | not adopted yet, needs an accuracy re-check |
+
+## Spike: Whisper fine-tuned for a short encoder window (FUTO ACFT)
+
+`MahmoudAshraf/acft-whisper-large-v3-turbo` is Turbo fine-tuned so the encoder works on a window shorter than 30 s
+(the vanilla model collapses, see the table above). Converted with `scripts/convert-whisper.py` of transcribe.cpp
+(the safetensors keys needed a `model.` prefix, `tokenizer.json` / `generation_config.json` came from
+`openai/whisper-large-v3-turbo`), window set by patching `stt.frontend.nb_max_frames` / `n_samples` / `chunk_length`.
+Language auto-detect, the vacancy glossary as vocabulary, greedy decoding, F16, M1 Max under heavy background load.
+
+FLEURS test, 120 human-read clips of 3-13 s (40 per language):
+
+| Model, window | median decode | WER all | EN | RU | UK |
+|---|---|---|---|---|---|
+| Turbo Q8 (current), 30 s | 710 ms | 6.4% | 4.8% | 7.3% | 7.4% |
+| ACFT Turbo, 30 s | 676 ms | 6.9% | 4.4% | 7.7% | 9.1% |
+| ACFT Turbo, 20 s | 469 ms | 7.2% | 4.7% | 8.0% | 9.6% |
+| ACFT Turbo, 15 s | 368 ms | 6.8% | 4.5% | 7.7% | 8.8% |
+
+The differences are inside the noise for 650-850 words per language; Ukrainian may be 1-2 points worse.
+A clip longer than the window is chunked and goes wrong (10 s window: loops, 15 s window with a 15.1 s clip: an
+invented trailing word), so a short-window model needs a fallback for long utterances.
