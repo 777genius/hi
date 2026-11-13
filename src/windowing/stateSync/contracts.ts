@@ -162,6 +162,8 @@ export type CompanionSnapshotData = {
     lastUpdatedAtMs?: number | null;
   };
   controls: {
+    /** Changes whenever the desktop Companion listener is recreated. */
+    instanceId?: string | null;
     historyFloorSeq: number;
     contextFloorSeq: number;
     conversationGeneration: number;

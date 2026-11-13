@@ -102,3 +102,15 @@ export function connectionTextForCompanionFailure(
 export function shouldRecoverCompanionConnection(kind: CompanionFailureKind): boolean {
   return kind === 'offline' || kind === 'network' || kind === 'timeout';
 }
+
+/** Retry only commands that set an explicit desired state after an ambiguous HTTP failure. */
+export function canRetryCompanionAction(path: string): boolean {
+  return path === '/api/microphone/mute'
+    || path === '/api/microphone/unmute'
+    || path === '/api/microphone/system/mute'
+    || path === '/api/microphone/system/unmute'
+    || path === '/api/microphone/app/mute'
+    || path === '/api/microphone/app/unmute'
+    || path === '/api/desktop/blackout/enable'
+    || path === '/api/desktop/blackout/disable';
+}

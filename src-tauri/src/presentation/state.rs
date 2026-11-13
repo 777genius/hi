@@ -919,6 +919,12 @@ impl AppState {
                     if let Some(state) = app_handle_for_task.try_state::<AppState>() {
                         state.apply_backend_auth_token_to_stt(None).await;
                     }
+                    // A rejected background refresh bypasses set_auth_session.
+                    // Publish the authRequired change so a connected phone
+                    // immediately disables actions instead of showing stale UI.
+                    if let Err(error) = crate::presentation::companion::publish_snapshot(&app_handle_for_task).await {
+                        log::warn!("[auth-refresh] failed to publish Companion auth invalidation: {}", error);
+                    }
 
                     break;
                 }
