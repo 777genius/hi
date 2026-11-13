@@ -45,7 +45,8 @@ export const config = {
   maxInstances: 1,
   capabilities: [
     {
-      browserName: 'tauri',
+      // browserName нужен встроенному драйверу на macOS; tauri-driver на Linux/Windows с ним отклоняет сессию.
+      ...(process.platform === 'darwin' ? { browserName: 'tauri' } : {}),
       maxInstances: 1,
       'tauri:options': {
         application: resolveAppBinaryPath(),
