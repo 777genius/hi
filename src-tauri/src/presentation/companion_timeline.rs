@@ -17,9 +17,11 @@ const CROSS_STREAM_DEDUP_WINDOW_MS: i64 = 8_000;
 const CROSS_STREAM_DEDUP_RECENT_LIMIT: usize = 6;
 const MIC_DOMINANCE_HOLD_MS: u64 = 1_200;
 const MIC_SYSTEM_LOOKBACK_MS: i64 = 20_000;
-const MAX_CONTEXT_CHARS: usize = 48_000;
+// Часовое интервью (45+ ходов с ответами ассистента) занимает 60-90 тыс. символов: прежние 48 тыс. отрезали начало,
+// и ассистент не помнил, о чём спрашивали в начале. 160 тыс. символов (~45 тыс. токенов) покрывают целое интервью.
+const MAX_CONTEXT_CHARS: usize = 160_000;
 const MAX_CONTEXT_ANCHOR_CHARS: usize = 4_000;
-const RECENT_CONTEXT_CHARS: usize = 32_000;
+const RECENT_CONTEXT_CHARS: usize = 120_000;
 const MAX_PRUNED_IMPORTANT_OLD_MESSAGES: usize = 40;
 const MAX_SELECTED_MESSAGE_IDS: usize = 200;
 
@@ -3048,11 +3050,13 @@ mod tests {
             kind: CompanionMessageKind::Haiku,
             line: format!("ПОМОЩНИК: ASSISTANT-OLD-NOISE-001 {}", "y".repeat(12_000)),
         });
-        for idx in 0..180 {
+        // Свежих сообщений заведомо больше лимита контекста, чтобы обрезка сработала при любом значении лимита.
+        let recent_count = MAX_CONTEXT_CHARS / 100;
+        for idx in 0..recent_count {
             parts.push(ContextPart {
                 id: format!("stt:recent:{idx}"),
                 kind: CompanionMessageKind::Stt,
-                line: format!("ОС: RECENT-HOUR-{idx:03} {}", "z".repeat(220)),
+                line: format!("ОС: RECENT-HOUR-{idx:05} {}", "z".repeat(220)),
             });
         }
 
@@ -3061,7 +3065,7 @@ mod tests {
         assert!(context.chars().count() <= MAX_CONTEXT_CHARS);
         assert!(context.contains("CODE-OLD-00"));
         assert!(context.contains("CODE-OLD-23"));
-        assert!(context.contains("RECENT-HOUR-179"));
+        assert!(context.contains(&format!("RECENT-HOUR-{:05}", recent_count - 1)));
         assert!(!context.contains("ASSISTANT-OLD-NOISE-001"));
     }
 
