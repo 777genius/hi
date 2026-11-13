@@ -2063,11 +2063,14 @@ const onChatMouseDown = (e: MouseEvent) => {
             <template #activator="{ props: tp }">
               <button
                 v-bind="tp"
-                class="web-search-toggle-button no-drag"
+                class="web-search-toggle-button test-interviewer-button active no-drag"
                 :disabled="testInterviewer.busy.value"
                 @click="onTestInterviewerClick"
               >
                 <span class="mdi mdi-account-voice"></span>
+                <span v-if="testInterviewer.lastQuestion.value" class="test-interviewer-counter">
+                  {{ testInterviewer.lastQuestion.value.number }}/{{ testInterviewer.total.value }}
+                </span>
               </button>
             </template>
           </v-tooltip>
@@ -2753,6 +2756,24 @@ const onChatMouseDown = (e: MouseEvent) => {
   border-color: rgba(45, 212, 191, 0.55);
   color: rgba(240, 253, 250, 0.98);
   box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.2), 0 0 16px rgba(20, 184, 166, 0.22);
+}
+
+.test-interviewer-button {
+  position: relative;
+}
+
+.test-interviewer-button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.test-interviewer-counter {
+  position: absolute;
+  right: 2px;
+  bottom: 1px;
+  font-size: 10px;
+  line-height: 1;
+  color: rgba(240, 253, 250, 0.95);
 }
 
 @keyframes haiku-spin {
