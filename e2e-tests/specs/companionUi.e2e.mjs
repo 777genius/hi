@@ -56,6 +56,31 @@ describe('Built Companion UI over real browser HTTP/SSE (fault-injected server)'
   it('recovers initial GET failure, renders 300 unique messages and preserves reading position', async () => {
     fixture.stateFailures = 1;
     await openPage();
+    // The native WebKit PWA notice uses a dark translucent surface even when
+    // the surrounding app is in light mode. Measure the resulting text contrast
+    // against a white backdrop (the conservative case for this surface).
+    const pwaContrast = await browser.execute(() => {
+      const banner = document.querySelector('.pwa-notice');
+      if (!banner) return null;
+      const rgba = (value) => [...value.matchAll(/[0-9.]+/g)].map((part) => Number(part[0]));
+      const background = rgba(getComputedStyle(banner).backgroundColor);
+      const alpha = background[3] ?? 1;
+      const againstWhite = background.slice(0, 3).map((v) => v * alpha + 255 * (1 - alpha));
+      const channel = (v) => {
+        const s = v / 255;
+        return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+      };
+      const lightness = (rgb) => 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2]);
+      const backdrop = lightness(againstWhite);
+      return ['.pwa-notice-title', '.pwa-notice-text'].map((selector) => {
+        const element = banner.querySelector(selector);
+        if (!element) return 0;
+        const foreground = lightness(rgba(getComputedStyle(element).color));
+        return (Math.max(backdrop, foreground) + 0.05) / (Math.min(backdrop, foreground) + 0.05);
+      });
+    });
+    assert.ok(pwaContrast, 'native browser must render the PWA notice');
+    for (const ratio of pwaContrast) assert.ok(ratio >= 4.5, `PWA notice text contrast too low: ${ratio}`);
     // The native WebKit test window is 320px wide; a fixed dock must not
     // strand controls outside the viewport even when its feed is scrollable.
     const dock = await browser.execute(() => ({
