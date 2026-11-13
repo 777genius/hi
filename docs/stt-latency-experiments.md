@@ -40,3 +40,19 @@ FLEURS test, 120 human-read clips of 3-13 s (40 per language):
 The differences are inside the noise for 650-850 words per language; Ukrainian may be 1-2 points worse.
 A clip longer than the window is chunked and goes wrong (10 s window: loops, 15 s window with a 15.1 s clip: an
 invented trailing word), so a short-window model needs a fallback for long utterances.
+
+## Spike: Qwen3-ASR (transcribe-cpp 0.4.1, Q8_0, same clips, vacancy glossary as vocabulary)
+
+FLEURS test, 120 clips (40 per language), M1 Max under background load:
+
+| Model | median decode | EN | RU | UK |
+|---|---|---|---|---|
+| Whisper Turbo Q8 (current) | 740 ms | 4.8% | 7.3% | 7.4% |
+| Qwen3-ASR 1.7B + vocabulary | 793 ms | 3.0% | 7.9% | 41.6% |
+| Qwen3-ASR 1.7B, no vocabulary | 634 ms | 2.9% | 6.7% | 62.6% |
+| Qwen3-ASR 0.6B + vocabulary | 481 ms | 3.9% | 11.2% | 85.0% |
+
+Qwen is better on English, equal on Russian, but Ukrainian is not supported (garbage), the vocabulary prompt costs
+~160 ms because it goes through the 1.7B language model, and with vocabulary it is not faster than Turbo.
+On 9 term-dense TTS phrases: EN 0/53 errors vs 2/53, RU 6/44 vs 9/44, UK 13/42 vs 9/42 (too few to be significant).
+Decision: no switch; it would need a second model for Ukrainian.
