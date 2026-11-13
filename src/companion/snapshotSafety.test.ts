@@ -46,7 +46,8 @@ describe('Companion snapshot safety before revision acknowledgement', () => {
     const snapshot: unknown = validSnapshot();
     expect(isCompanionSnapshotEnvelope(snapshot)).toBe(true);
     if (!isCompanionSnapshotEnvelope(snapshot)) throw new Error('valid fixture rejected');
-    expect(buildCompanionConversationFeedMessages(snapshot)[0]?.text).toBeUndefined();
+    expect(buildCompanionConversationFeedMessages(snapshot.data)[0]?.text)
+      .toBe('Русский / українська / 🎙️');
   });
 
   it('preserves optional legacy fields and unknown future fields', () => {
