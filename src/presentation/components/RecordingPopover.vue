@@ -2444,11 +2444,13 @@ const onChatMouseDown = (e: MouseEvent) => {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* Сообщения вплотную к краям окна: убираем боковой отступ контейнера. */
+  margin-inline: calc(-1 * var(--spacing-sm));
 }
 
 .chat-area :deep(.scroll-to-bottom-button) {
   right: 16px;
-  bottom: 84px;
+  bottom: auto;
   z-index: 27;
 }
 
