@@ -40,6 +40,11 @@ pub struct TranscriptionService {
 /// Сколько раз повторять перезапуск ScreenCaptureKit после сбоя (паузы 1,5 с, 3 с, 4,5 с ... суммарно около 40 с).
 const CAPTURE_REFRESH_RETRIES: u32 = 6;
 
+/// Обновление ScreenCaptureKit делаем только в долгой тишине и не чаще этого интервала. В часовых прогонах
+/// обновление каждые 26 с давало потерянные вопросы: новый поток иногда какое-то время не отдаёт звук.
+const CAPTURE_REFRESH_MIN_QUIET_MS: u64 = 30_000;
+const CAPTURE_REFRESH_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl TranscriptionService {
     /// Load local weights after the UI starts, so the first recording can reuse
     /// the same provider without paying model I/O on the Start button.
@@ -337,7 +342,10 @@ impl TranscriptionService {
         let dropped_chunks_for_processor = dropped_chunks.clone();
         let last_loud_audio_ms = Arc::new(std::sync::atomic::AtomicU64::new(epoch_millis()));
         let last_loud_audio_for_cb = last_loud_audio_ms.clone();
+        let last_any_chunk_ms = Arc::new(std::sync::atomic::AtomicU64::new(epoch_millis()));
+        let last_any_chunk_for_cb = last_any_chunk_ms.clone();
         let on_chunk = Arc::new(move |chunk: crate::domain::AudioChunk| {
+            last_any_chunk_for_cb.store(epoch_millis(), Ordering::Relaxed);
             if chunk.data.iter().any(|sample| sample.unsigned_abs() > 500) {
                 last_loud_audio_for_cb.store(epoch_millis(), Ordering::Relaxed);
             }
@@ -703,8 +711,8 @@ impl TranscriptionService {
                     // including output audio after a long silent interval.
                     let quiet_ms = epoch_millis()
                         .saturating_sub(last_loud_audio_ms.load(Ordering::Relaxed));
-                    if quiet_ms < 15_000
-                        || last_refresh.elapsed() < std::time::Duration::from_secs(25)
+                    if quiet_ms < CAPTURE_REFRESH_MIN_QUIET_MS
+                        || last_refresh.elapsed() < CAPTURE_REFRESH_MIN_INTERVAL
                     {
                         continue;
                     }
@@ -714,8 +722,9 @@ impl TranscriptionService {
                     }
                     refresh_number += 1;
                     log::info!(
-                        "Refreshing ScreenCaptureKit #{refresh_number} after {quiet_ms}ms of silence ({}s since the previous refresh)",
-                        last_refresh.elapsed().as_secs()
+                        "Refreshing ScreenCaptureKit #{refresh_number} after {quiet_ms}ms of silence ({}s since the previous refresh, last chunk of any level {}ms ago)",
+                        last_refresh.elapsed().as_secs(),
+                        epoch_millis().saturating_sub(last_any_chunk_ms.load(Ordering::Relaxed))
                     );
                     // Новый SCStream сразу после остановки старого иногда не стартует: даём системе вдохнуть.
                     let mut result = match guard.stop_capture().await {
