@@ -29,7 +29,7 @@ for name in "${SCENARIOS[@]}"; do
   echo "=== $(date +%T) scenario $name (${MINUTES} min)" | tee -a "$LOG_DIR/driver.log"
   if ! start_app; then echo "app did not start for $name" | tee -a "$LOG_DIR/driver.log"; continue; fi
   sleep 20 # прогрев моделей
-  node e2e-tests/companion-ua-interview-audio.mjs --scenario "e2e-tests/scenarios/$name.json" --duration-min "$MINUTES" \
+  node e2e-tests/companion-ua-interview-audio.mjs --scenario "e2e-tests/scenarios/$name.json" --duration-min "$MINUTES" --turns "${TURNS:-0}" \
     > "$LOG_DIR/$name.log" 2>&1
   echo "=== $(date +%T) $name exit=$? $(grep -E 'SUMMARY|JUDGE' "$LOG_DIR/$name.log" | tail -2 | cut -c1-400)" | tee -a "$LOG_DIR/driver.log"
 done
