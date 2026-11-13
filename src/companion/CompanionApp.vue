@@ -1970,6 +1970,8 @@ onUnmounted(() => {
   gap: 16px;
   z-index: 40;
   pointer-events: none;
+  /* Фон дока тёмный в обеих темах: в светлой теме --color-text тёмный, и иконки сливались с фоном. */
+  --color-text: #ffffff;
 }
 
 .controls-side,

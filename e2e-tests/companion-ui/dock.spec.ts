@@ -30,6 +30,36 @@ test.describe('Нижняя панель управления', () => {
     });
   }
 
+  for (const colorScheme of ['dark', 'light'] as const) {
+    test(`иконки дока контрастны фону дока (${colorScheme} тема)`, async ({ companion, page }) => {
+      await page.emulateMedia({ colorScheme });
+      await companion.reset(snapshotData([stt(1, 'Вопрос')]));
+      await companion.open();
+      await expect(page.locator('html')).toHaveClass(colorScheme === 'light' ? /theme-light/ : /^(?!.*theme-light)/);
+      // Относительная яркость по WCAG: фон дока тёмный, значит иконки должны быть светлыми.
+      const luminance = await page.evaluate(() => {
+        const channel = (value: number) => {
+          const srgb = value / 255;
+          return srgb <= 0.03928 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4;
+        };
+        const parse = (color: string) => color.match(/[\d.]+/g)!.slice(0, 3).map(Number);
+        const relative = (color: string) => {
+          const [r, g, b] = parse(color).map(channel);
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        return {
+          dock: relative(getComputedStyle(document.querySelector('.controls-center')!).backgroundColor),
+          icons: Array.from(document.querySelectorAll('.controls-dock button:not(.dock-record-button)'))
+            .map((button) => [button.getAttribute('title'), relative(getComputedStyle(button).color)] as const),
+        };
+      });
+      for (const [title, icon] of luminance.icons) {
+        const contrast = (Math.max(icon, luminance.dock) + 0.05) / (Math.min(icon, luminance.dock) + 0.05);
+        expect(contrast, `${title}: контраст иконки`).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  }
+
   test('кнопка «вниз» не перекрыта панелью и нажимается', async ({ companion, page }) => {
     const timeline = Array.from({ length: 60 }, (_, i) => stt(i + 1, `Вопрос ${i}`));
     await companion.reset(snapshotData(timeline));
