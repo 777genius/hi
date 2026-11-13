@@ -56,3 +56,26 @@ Qwen is better on English, equal on Russian, but Ukrainian is not supported (gar
 ~160 ms because it goes through the 1.7B language model, and with vocabulary it is not faster than Turbo.
 On 9 term-dense TTS phrases: EN 0/53 errors vs 2/53, RU 6/44 vs 9/44, UK 13/42 vs 9/42 (too few to be significant).
 Decision: no switch; it would need a second model for Ukrainian.
+
+## Spike: transcribe-cpp 0.4.2 and Qwen3-ASR vs Turbo, both with the vocabulary (term-dense phrases)
+
+60 TTS interview phrases (30 EN, 30 RU, 3.6-6.5 s, 2-5 glossary terms each, Russian terms read the Russian way),
+the real glossary as vocabulary, auto language, Q8_0 models, M1 Max under load. "Corrected" WER applies the
+glossary aliases to the output like the app does. Key terms: 44 in-prompt and 64 out-of-prompt occurrences in EN,
+44 and 63 in RU.
+
+| Config | median decode | WER EN / RU (corrected) | key terms in-prompt EN / RU |
+|---|---|---|---|
+| Turbo, 0.4.1, vocabulary (current) | 820 ms (noisy run) | 3.6% / 15.9% | 39/44, 36/44 |
+| Turbo, 0.4.2, vocabulary | 739 ms | 4.3% / 16.1% | 37/44, 36/44 |
+| Turbo, 0.4.2, no vocabulary | 700 ms | 6.5% / 22.8% | 30/44, 22/44 |
+| Qwen3-ASR 1.7B, vocabulary | 615 ms | 6.7% / 22.8% | 35/44, 23/44 |
+| Qwen3-ASR 1.7B, no vocabulary | 452 ms | 8.2% / 39.8% | 29/44, 12/44 |
+
+- 0.4.2 only drops the "Glossary:" prefix of the Whisper prompt: 83 instead of 84 of 141 terms are dropped, i.e. one
+  more term fits. Accuracy is the same within noise (3 words in EN). Not worth the bump.
+- The vocabulary helps Turbo a lot (RU 22.8% -> 15.9%, EN 6.5% -> 3.6%).
+- Qwen with the vocabulary is faster here (short clips) but clearly worse on terms than Turbo with the vocabulary,
+  although on FLEURS (plain sentences) it was better on English. Turbo wins on term-dense speech.
+- Most remaining Turbo misses are spelling variants missing from the aliases ("Sidekick", "Active Record", "Argo CD",
+  "Nest JS", "Event Bridge", "Open telemetry", "C I C D"), which cost nothing to fix in the glossary.
