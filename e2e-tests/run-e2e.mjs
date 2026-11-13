@@ -22,6 +22,8 @@ const result = spawnSync('pnpm', ['wdio', 'run', 'e2e-tests/wdio.conf.mjs'], {
     // Включаем e2e hooks и упрощаем авторизацию в debug режиме.
     VITE_E2E: '1',
     VOICETEXT_E2E: '1',
+    // Synthetic timeline fixtures must never enter an external memory service.
+    INTERVIEW_MEMORY_FORCE_DISABLED: 'true',
   },
 });
 

@@ -975,7 +975,7 @@ function connectEvents(): void {
         setConnection('reconnecting', 'Поток обновлений прервался, обновляю состояние с компьютера...');
         setStatus('Live update повредился, пробую восстановить состояние...', 'warn');
         void resyncConnection({ reconnect: true }).catch((resyncError) => {
-          handleResyncFailure(resyncError, 'Не удалось восстановить поток обновлений с компьютером');
+          handleResyncFailure(resyncError, 'Не удалось восстановить поток обновлений с компьютера');
         });
       }
     })();
@@ -2141,9 +2141,10 @@ onUnmounted(() => {
     padding: 7px;
   }
 
+  /* Keep every fixed-dock action reachable in the 320px native WebKit window. */
   .controls-center {
-    gap: 12px;
-    padding: 7px 8px;
+    gap: 4px;
+    padding: 4px;
   }
 
   .dock-square-button {
@@ -2152,8 +2153,8 @@ onUnmounted(() => {
   }
 
   .dock-circle-button {
-    width: 44px;
-    height: 44px;
+    width: 42px;
+    height: 42px;
   }
 
   .dock-microphone-button {
@@ -2164,8 +2165,8 @@ onUnmounted(() => {
   }
 
   .dock-record-button {
-    width: 56px;
-    height: 56px;
+    width: 52px;
+    height: 52px;
   }
 }
 </style>
