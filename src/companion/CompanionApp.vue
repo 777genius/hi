@@ -2130,6 +2130,12 @@ onUnmounted(() => {
     gap: 8px;
   }
 
+  /* Keep every fixed-dock action reachable in the 320px native WebKit window. */
+  .controls-center {
+    gap: 4px;
+    padding: 4px;
+  }
+
   .ask-card {
     bottom: calc(126px + env(safe-area-inset-bottom, 0px));
     max-height: calc(100vh - 148px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
@@ -2152,8 +2158,8 @@ onUnmounted(() => {
   }
 
   .dock-circle-button {
-    width: 44px;
-    height: 44px;
+    width: 42px;
+    height: 42px;
   }
 
   .dock-microphone-button {
@@ -2164,8 +2170,8 @@ onUnmounted(() => {
   }
 
   .dock-record-button {
-    width: 56px;
-    height: 56px;
+    width: 52px;
+    height: 52px;
   }
 }
 </style>
