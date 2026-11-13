@@ -1691,13 +1691,9 @@ onUnmounted(() => {
 }
 
 .feed-card :deep(.chat-row.incoming .chat-bubble) {
+  /* Размер шрифта общий для всех пузырей (--chat-message-font-size): вопросы не мельче ответов и кода. */
   padding: 10px 12px;
-  font-size: 15px;
-  line-height: 1.45;
-}
-
-.feed-card :deep(.chat-row.focus-copy .chat-bubble) {
-  font-size: 15px;
+  line-height: var(--chat-message-line-height);
 }
 
 .feed-card :deep(.chat-scroll) {
@@ -1722,8 +1718,9 @@ onUnmounted(() => {
   max-width: calc(100% - 6px);
 }
 
-.feed-card :deep(.chat-markdown .code-block pre) {
-  /* Внутренние отступы блока кода не больше 2px. */
+.feed-card :deep(.chat-markdown .code-block pre),
+.feed-card :deep(.chat-text-highlighted .code-block pre) {
+  /* Внутренние отступы блока кода не больше 2px: и в ответах AI (markdown), и в коде из вопросов/prompt (shiki). */
   padding: 2px;
 }
 
