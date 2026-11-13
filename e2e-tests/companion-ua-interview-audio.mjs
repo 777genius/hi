@@ -511,19 +511,22 @@ async function readLlmEnv() {
 async function judgeAnswers(report, turns) {
   const env = await readLlmEnv();
   const results = [];
+  // Профиль кандидата (если есть) считается подтверждённым источником фактов об опыте; HTML-комментарии как в приложении вырезаем.
+  const profile = await readFile(process.env.INTERVIEW_PROFILE_FILE || join(homedir(), 'Library/Application Support/HackInterview/candidate_profile.md'), 'utf8')
+    .then((t) => t.replace(/<!--[\s\S]*?-->/g, '').slice(0, 30_000)).catch(() => '');
   const items = report.turns.filter((t) => t.ai?.text).map((t) => ({ kind: 'turn', id: t.id, q: t.q, a: t.a, text: t.ai.text, hasImage: t.aiKind === 'image-prompt' }));
   for (const [index, item] of items.entries()) {
     const prev = turns.filter((x) => x.id < item.id).slice(-3).map((x) => `Интервьюер: ${x.q}\nКандидат: ${x.a}`).join('\n');
     const prompt = `Ты строгий проверяющий ответов ассистента для технического собеседования. Ассистент отвечает кандидату вслух-готовым текстом. Требования: ответ по-русски (термины на английском), чётко и по делу без воды, НЕ задаёт вопросов и не просит уточнений, говорит от первого лица в мужском роде, длина соответствует сложности вопроса, понимает контекст предыдущих реплик.
 
-Контекст:
+${profile ? `Профиль кандидата (подтверждённые факты об его опыте; ответ может на них опираться, это не выдумка):\n${profile}\n\n` : ''}Контекст:
 ${prev || '(начало)'}
 Вопрос интервьюера: ${item.q}
 ${item.hasImage ? '(пользователь прислал скриншот кода, ассистент разбирает его)' : ''}
 Ответ ассистента:
 ${item.text}
 
-Оцени и верни ТОЛЬКО JSON: {"correct":0-2,"context":0-2,"concise":0-2,"noQuestions":true/false,"russian":true/false,"firstPerson":true/false,"issue":"одна фраза о главной проблеме или пустая строка"}. 2 = хорошо.`;
+Оцени и верни ТОЛЬКО JSON: {"correct":0-2,"context":0-2,"concise":0-2,"noQuestions":true/false,"russian":true/false,"firstPerson":true/false,"issue":"одна фраза о главной проблеме или пустая строка"}. 2 = хорошо. Выдумкой считай только факты, которых нет ни в профиле, ни в репликах интервью.`;
     try {
       const res = await fetch(`${env.OPENAI_BASE_URL}/responses`, {
         method: 'POST',
