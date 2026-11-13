@@ -363,7 +363,7 @@ describe('RecordingPopover Haiku stop hover e2e', () => {
     delete (window as any).__TAURI_INTERNALS__;
   });
 
-  it('stops an active AI answer when the mini stop button is hovered', async () => {
+  it('stops an active AI answer when the loading button is clicked again', async () => {
     app?.mount(host);
     await flushUi();
     await waitFor(() => {
@@ -389,19 +389,20 @@ describe('RecordingPopover Haiku stop hover e2e', () => {
         })
       );
       expect(chatStore.isHaikuStreaming).toBe(true);
-      expect(document.querySelector('[data-testid="haiku-stop-button"]')).toBeTruthy();
+      expect(document.querySelector('.haiku-spinner')).toBeTruthy();
     });
 
-    const stopButton = document.querySelector('[data-testid="haiku-stop-button"]') as HTMLButtonElement;
-    dispatchHover(stopButton);
-    dispatchHover(stopButton);
+    // Клик сразу после наведения игнорируется (защита от случайной отмены), ждём.
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    generateButton.click();
+    generateButton.click();
 
     await waitFor(() => {
       const cancelCalls = mocks.invoke.mock.calls.filter((call) => call[0] === 'cancel_haiku_streams');
       expect(cancelCalls).toHaveLength(1);
       expect(chatStore.isHaikuStreaming).toBe(false);
       expect(chatStore.haikuMessages).toHaveLength(0);
-      expect(document.querySelector('[data-testid="haiku-stop-button"]')).toBeNull();
+      expect(document.querySelector('.haiku-spinner')).toBeNull();
     });
 
     emitTauriEvent('haiku:delta', {
@@ -429,7 +430,47 @@ describe('RecordingPopover Haiku stop hover e2e', () => {
       const startCalls = mocks.invoke.mock.calls.filter((call) => call[0] === 'start_haiku_stream');
       expect(startCalls).toHaveLength(2);
       expect(chatStore.isHaikuStreaming).toBe(true);
-      expect(document.querySelector('[data-testid="haiku-stop-button"]')).toBeTruthy();
+      expect(document.querySelector('.haiku-spinner')).toBeTruthy();
     });
+  });
+
+  it('keeps the partial answer text when the generation is stopped', async () => {
+    // Бэкенд оставляет частичный ответ в таймлайне; снимок в этом тесте не подменяем пустым.
+    const baseInvoke = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((commandName: string, ...rest: any[]) =>
+      commandName === 'cancel_haiku_streams'
+        ? Promise.resolve({ ok: true, actionResult: 'cancelled' })
+        : baseInvoke(commandName, ...rest)
+    );
+    app?.mount(host);
+    await flushUi();
+    await waitFor(() => {
+      expect(mocks.invoke.mock.calls.some((call) => call[0] === 'get_companion_snapshot')).toBe(true);
+    });
+    await flushUi();
+
+    const chatStore = useChatStore();
+    const generateButton = await waitFor(() => {
+      const el = document.querySelector('[data-testid="haiku-generate-button"]');
+      expect(el).toBeTruthy();
+      return el as HTMLButtonElement;
+    });
+    dispatchHover(generateButton);
+    await waitFor(() => expect(chatStore.isHaikuStreaming).toBe(true));
+
+    emitTauriEvent('haiku:delta', { request_id: 'haiku:e2e:1', delta: 'Частичный ответ' });
+    await flushUi();
+
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    generateButton.click();
+
+    await waitFor(() => expect(chatStore.isHaikuStreaming).toBe(false));
+    expect(chatStore.haikuMessages).toHaveLength(1);
+    expect(chatStore.haikuMessages[0].text).toBe('Частичный ответ');
+    expect(chatStore.haikuMessages[0].status).toBe('final');
+
+    emitTauriEvent('haiku:delta', { request_id: 'haiku:e2e:1', delta: ' поздний хвост' });
+    await flushUi();
+    expect(chatStore.haikuMessages[0].text).toBe('Частичный ответ');
   });
 });

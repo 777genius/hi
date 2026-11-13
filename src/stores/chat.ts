@@ -1279,9 +1279,16 @@ export const useChatStore = defineStore('chat', () => {
     // Снимаем индикатор "стримится" (чтобы UI не завис).
     markRequestDone(requestId);
 
-    // Убираем сообщение из чата полностью (без "Сообщение удалено").
+    // Остановка не удаляет ответ: оставляем то, что уже пришло. Пустое сообщение
+    // (ещё ни одного токена) убираем полностью, как и раньше.
     const idx = haikuMessages.value.findIndex((m) => m.id === requestId);
-    if (idx >= 0) haikuMessages.value.splice(idx, 1);
+    if (idx < 0) return;
+    const current = haikuMessages.value[idx];
+    if (!current.text || !current.text.trim()) {
+      haikuMessages.value.splice(idx, 1);
+      return;
+    }
+    haikuMessages.value[idx] = { ...current, status: 'final' };
   }
 
   function cancelActiveHaikuStreams(): void {

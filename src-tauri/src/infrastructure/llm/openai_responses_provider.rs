@@ -197,12 +197,9 @@ fn build_responses_payload(request: &LlmStreamRequest) -> Value {
         "store": false
     });
 
-    if supports_prompt_cache_options(&request.model) {
-        static SESSION_CACHE_KEY: OnceLock<String> = OnceLock::new();
-        let key = SESSION_CACHE_KEY.get_or_init(|| format!("hackinterview-{}", uuid::Uuid::new_v4()));
-        payload["prompt_cache_key"] = serde_json::json!(key);
-        payload["prompt_cache_options"] = serde_json::json!({"mode": "implicit", "ttl": "30m"});
-    }
+    // Постоянный prompt_cache_key + prompt_cache_options замедляли первый токен примерно на 1,5 с
+    // (замер на одном приложении: медиана 3,7 с с ключом против 2,1 с без ключа или с уникальным ключом).
+    // Неявное кэширование префикса работает и без ключа.
 
     // Some callers use a generic LlmStreamRequest without specifying effort.
     // Honor the configured Responses effort there too, while keeping any
@@ -235,10 +232,6 @@ fn build_responses_payload(request: &LlmStreamRequest) -> Value {
     }
 
     payload
-}
-
-fn supports_prompt_cache_options(model: &str) -> bool {
-    model.starts_with("gpt-5.6") || model.starts_with("gpt-6")
 }
 
 fn resolved_reasoning_effort<'a>(
@@ -347,12 +340,10 @@ mod tests {
     }
 
     #[test]
-    fn enables_stable_implicit_prompt_cache_for_supported_models() {
-        let first = build_responses_payload(&LlmStreamRequest::new("gpt-6.1-terra", "system", "first", 64, 0.2));
-        let second = build_responses_payload(&LlmStreamRequest::new("gpt-6.1-terra", "system", "second", 64, 0.2));
-        assert_eq!(first["prompt_cache_options"], serde_json::json!({"mode": "implicit", "ttl": "30m"}));
-        assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
-        assert!(first["prompt_cache_key"].as_str().unwrap().starts_with("hackinterview-"));
+    fn does_not_pin_a_prompt_cache_key() {
+        let payload = build_responses_payload(&LlmStreamRequest::new("gpt-6.1-terra", "system", "first", 64, 0.2));
+        assert!(payload.get("prompt_cache_key").is_none());
+        assert!(payload.get("prompt_cache_options").is_none());
     }
 
     #[test]

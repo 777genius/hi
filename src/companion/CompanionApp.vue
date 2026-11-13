@@ -1482,6 +1482,7 @@ onUnmounted(() => {
 }
 
 .companion-shell {
+  --shell-pad-x: 12px;
   width: min(940px, 100%);
   height: 100vh;
   height: 100dvh;
@@ -1761,15 +1762,17 @@ onUnmounted(() => {
   --chat-code-line-height: var(--chat-message-line-height);
   --chat-inline-code-font-size: 0.9em;
   --chat-sticky-footer-bottom: calc(126px + env(safe-area-inset-bottom, 0px));
-  --chat-scroll-padding: 12px 6px 0 2px;
-  --chat-scroll-mobile-padding: 12px 4px 0 2px;
-  --chat-scroll-narrow-padding: 12px 2px 0 0;
+  --chat-scroll-padding: 12px 0 0 0;
+  --chat-scroll-mobile-padding: 12px 0 0 0;
+  --chat-scroll-narrow-padding: 12px 0 0 0;
   --chat-scroll-end-space: calc(148px + env(safe-area-inset-bottom, 0px));
 
   display: flex;
   min-width: 0;
   min-height: 340px;
   overflow: hidden;
+  /* Лента на всю ширину экрана: сообщения прилегают к его краям (отступ оболочки 12px компенсируем). */
+  margin-inline: calc(-1 * var(--shell-pad-x, 12px));
 }
 
 .feed-card :deep(.chat-area) {
@@ -1796,7 +1799,8 @@ onUnmounted(() => {
 }
 
 .feed-card :deep(.scroll-to-bottom-button) {
-  bottom: calc(126px + env(safe-area-inset-bottom, 0px));
+  /* Справа посередине по вертикали (как на десктопе). */
+  right: 8px;
 }
 
 .feed-card :deep(.chat-row .chat-bubble:has(.code-block)) {
@@ -2200,6 +2204,7 @@ onUnmounted(() => {
 
 @media (max-width: 720px) {
   .companion-shell {
+    --shell-pad-x: 10px;
     padding:
       calc(12px + env(safe-area-inset-top, 0px))
       calc(10px + env(safe-area-inset-right, 0px))

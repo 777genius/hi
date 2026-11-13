@@ -203,6 +203,10 @@ pub struct AppState {
     /// Active AI request metadata for stale-generation guarding.
     pub companion_request_generations: Arc<RwLock<HashMap<String, u64>>>,
 
+    /// Фоновые задачи стриминга ответов LLM по request_id: нужны, чтобы остановить
+    /// генерацию (оборвать HTTP-запрос к провайдеру), а не просто игнорировать дельты.
+    pub llm_stream_tasks: Arc<std::sync::Mutex<HashMap<String, Vec<tauri::async_runtime::JoinHandle<()>>>>>,
+
     /// Фоновая задача refresh токенов (если есть refresh_token).
     pub auth_refresh_task: Arc<RwLock<Option<tauri::async_runtime::JoinHandle<()>>>>,
 
@@ -237,6 +241,38 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Запоминает задачу стриминга ответа, чтобы её можно было оборвать по кнопке «стоп».
+    pub fn register_llm_stream_task(
+        &self,
+        request_id: &str,
+        handle: tauri::async_runtime::JoinHandle<()>,
+    ) {
+        let mut tasks = self
+            .llm_stream_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Завершённые задачи сами не убираются; ограничиваем рост (drop хендла не обрывает задачу).
+        if tasks.len() >= 64 {
+            tasks.clear();
+        }
+        tasks.entry(request_id.to_string()).or_default().push(handle);
+    }
+
+    /// Обрывает стриминг указанных запросов (закрывает соединение с провайдером).
+    pub fn abort_llm_stream_tasks(&self, request_ids: &[String]) {
+        let mut tasks = self
+            .llm_stream_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for id in request_ids {
+            if let Some(handles) = tasks.remove(id) {
+                for handle in handles {
+                    handle.abort();
+                }
+            }
+        }
+    }
+
     /// Loads the selected local STT model for both audio sources in the
     /// background, so the first recording after startup or a model switch does
     /// not pay model I/O. No-op for cloud providers.
@@ -349,6 +385,7 @@ impl AppState {
                     companion_microphone_audio_level_bits: Arc::new(AtomicU32::new(0)),
                     companion_microphone_dominant_until_ms: Arc::new(AtomicU64::new(0)),
                     companion_request_generations: Arc::new(RwLock::new(HashMap::new())),
+            llm_stream_tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
                     auth_refresh_task: Arc::new(RwLock::new(None)),
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     stt_config_loaded: AtomicBool::new(false),
@@ -447,6 +484,7 @@ impl AppState {
                     companion_microphone_audio_level_bits: Arc::new(AtomicU32::new(0)),
                     companion_microphone_dominant_until_ms: Arc::new(AtomicU64::new(0)),
                     companion_request_generations: Arc::new(RwLock::new(HashMap::new())),
+            llm_stream_tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
                     auth_refresh_task: Arc::new(RwLock::new(None)),
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     stt_config_loaded: AtomicBool::new(false),
@@ -556,6 +594,7 @@ impl AppState {
             companion_microphone_audio_level_bits: Arc::new(AtomicU32::new(0)),
             companion_microphone_dominant_until_ms: Arc::new(AtomicU64::new(0)),
             companion_request_generations: Arc::new(RwLock::new(HashMap::new())),
+            llm_stream_tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             auth_refresh_task: Arc::new(RwLock::new(None)),
             stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
             stt_config_loaded: AtomicBool::new(false),

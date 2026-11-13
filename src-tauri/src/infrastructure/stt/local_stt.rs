@@ -57,6 +57,36 @@ const PARAKEET_MAX_UTTERANCE_MS: usize = 6_000;
 const SPECULATIVE_PAUSE_MS: usize = 150;
 const WHISPER_HALLUCINATION_MAX_SECONDS: f64 = 2.5;
 
+/// Decoder threads (including the ones the inference library spawns from here) must not starve
+/// the app's own request handling: while someone speaks, decoding saturates the cores and an
+/// LLM request used to wait seconds before it even started. UTILITY is below the default QoS of
+/// the async runtime threads, so they win under contention; idle machines see no difference.
+#[cfg(target_os = "macos")]
+fn lower_decoder_thread_priority() {
+    extern "C" {
+        fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+    }
+    const QOS_CLASS_UTILITY: u32 = 0x11;
+    // SAFETY: plain libpthread call that only changes the calling thread's QoS.
+    let status = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0) };
+    if status != 0 {
+        log::debug!("Could not lower the STT decoder thread priority (status {status})");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn lower_decoder_thread_priority() {}
+
+/// Function words Whisper emits alone on near-silence ("and the"); never a real utterance.
+const WHISPER_FILLER_WORDS: &[&str] = &["and", "the", "a", "of", "to", "in", "uh", "um", "so", "but"];
+
+fn is_filler_only(normalized: &str) -> bool {
+    let mut words = normalized.split_whitespace().peekable();
+    words.peek().is_some()
+        && normalized.split_whitespace().count() <= 3
+        && normalized.split_whitespace().all(|word| WHISPER_FILLER_WORDS.contains(&word))
+}
+
 /// Whisper on silence can loop over its decoding vocabulary ("Glossary, Glossary, ...").
 /// Real speech never repeats one word this many times, whatever the clip length.
 fn is_repetition_loop(text: &str) -> bool {
@@ -211,6 +241,7 @@ impl LocalModel {
             .to_lowercase();
         normalized.is_empty()
             || is_repetition_loop(text)
+            || (duration_s <= WHISPER_HALLUCINATION_MAX_SECONDS && is_filler_only(&normalized))
             || (duration_s <= WHISPER_HALLUCINATION_MAX_SECONDS
                 && (WHISPER_HALLUCINATIONS.contains(&normalized.as_str())
                     || WHISPER_HALLUCINATION_FRAGMENTS
@@ -479,6 +510,7 @@ impl SttProvider for LocalSttProvider {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<SttResult<()>>();
 
         let worker = tokio::task::spawn_blocking(move || -> SttResult<()> {
+            lower_decoder_thread_priority();
             // Validate model/session readiness before starting the audio capture.
             let mut session = match model.session() {
                 Ok(session) => {
@@ -818,6 +850,10 @@ mod tests {
         let w = LocalModel::WhisperLargeV3Turbo;
         assert!(w.is_hallucination("Glossary, Glossary, Glossary, Glossary, Glossary, Glossary,", 12.0));
         assert!(w.is_hallucination(&"OpenAI, ".repeat(40), 25.0));
+        assert!(w.is_hallucination("and the", 1.0));
+        assert!(w.is_hallucination("And the.", 2.0));
+        assert!(!w.is_hallucination("and the", 6.0), "a long clip is not silence");
+        assert!(!w.is_hallucination("Use the cache", 1.5));
         assert!(!w.is_hallucination("Мы используем Kafka, а не Kafka Streams, и Kafka Connect отдельно", 6.0));
     }
 
