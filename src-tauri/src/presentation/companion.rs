@@ -462,12 +462,11 @@ async fn ensure_persisted_security_token(state: &AppState) -> Result<String, Str
 
     match crate::infrastructure::ConfigStore::load_companion_bridge_token().await {
         Ok(Some(token)) => {
-            let config_snapshot = {
+            {
                 let mut config = state.config.write().await;
                 config.companion_access_token = Some(token.clone());
-                config.clone()
-            };
-            crate::infrastructure::ConfigStore::save_app_config(&config_snapshot)
+            }
+            save_token_into_disk_config(&token)
                 .await
                 .map_err(|e| format!("Failed to restore companion token: {}", e))?;
             persist_companion_bridge_token(&token).await;
@@ -481,18 +480,32 @@ async fn ensure_persisted_security_token(state: &AppState) -> Result<String, Str
     }
 
     let token = generate_security_token();
-    let config_snapshot = {
+    {
         let mut config = state.config.write().await;
         config.companion_access_token = Some(token.clone());
-        config.clone()
-    };
-
-    crate::infrastructure::ConfigStore::save_app_config(&config_snapshot)
+    }
+    save_token_into_disk_config(&token)
         .await
         .map_err(|e| format!("Failed to persist companion token: {}", e))?;
 
     persist_companion_bridge_token(&token).await;
     Ok(token)
+}
+
+/// Companion стартует параллельно с загрузкой конфига при старте: в памяти тогда ещё дефолты.
+/// Поэтому токен дописываем в конфиг С ДИСКА (read-modify-write), а не сохраняем снимок из памяти,
+/// иначе сохранённые настройки пользователя (хоткей, устройства, STT) затираются дефолтами.
+async fn save_token_into_disk_config(token: &str) -> anyhow::Result<()> {
+    let mut on_disk = match crate::infrastructure::ConfigStore::load_app_config().await {
+        Ok(config) => config,
+        Err(error) => {
+            // Нечитаемый конфиг не перезаписываем дефолтами: токен остаётся в памяти и в bridge-файле.
+            log::warn!("Skipping companion token save, app config is unreadable: {}", error);
+            return Ok(());
+        }
+    };
+    on_disk.companion_access_token = Some(token.to_string());
+    crate::infrastructure::ConfigStore::save_app_config(&on_disk).await
 }
 
 async fn persist_companion_bridge_token(token: &str) {

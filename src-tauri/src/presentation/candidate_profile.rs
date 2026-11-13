@@ -10,7 +10,8 @@ const PROFILE_ENV: &str = "INTERVIEW_PROFILE_FILE";
 const PROFILE_FILE_NAME: &str = "HackInterview/candidate_profile.md";
 const BEGIN_MARKER: &str = "=== CANDIDATE PROFILE BEGIN ===";
 const END_MARKER: &str = "=== CANDIDATE PROFILE END ===";
-const WARN_CHARS: usize = 60_000;
+// Жёсткий лимит: профиль уходит в каждый запрос, гигантский файл (или не тот путь) раздувает стоимость и ломает контекст.
+const MAX_PROFILE_CHARS: usize = 60_000;
 
 fn profile_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(PROFILE_ENV).filter(|value| !value.is_empty()) {
@@ -73,15 +74,25 @@ pub(crate) fn with_candidate_profile_text(system_prompt: String, profile: Option
 /// Дописывает профиль кандидата в КОНЕЦ системного промпта (стабильный префикс лучше для prompt cache).
 /// Нет файла или он пуст: промпт возвращается без изменений.
 pub fn with_candidate_profile(system_prompt: String) -> String {
-    let profile = profile_path().and_then(|path| std::fs::read_to_string(path).ok());
-    if let Some(text) = profile.as_deref() {
+    let profile = profile_path().and_then(|path| match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            // Нечитаемый файл (не UTF-8, нет прав) не должен молча выглядеть как «профиля нет».
+            log::warn!("Candidate profile is unreadable ({}): {}", path.display(), error.kind());
+            None
+        }
+    });
+    let profile = profile.map(|text| {
         let chars = text.chars().count();
-        if chars > WARN_CHARS {
-            log::warn!("Candidate profile is large: {chars} chars (~{} tokens)", chars / 3);
+        if chars > MAX_PROFILE_CHARS {
+            log::warn!("Candidate profile is too large: {chars} chars, truncated to {MAX_PROFILE_CHARS}");
+            text.chars().take(MAX_PROFILE_CHARS).collect::<String>()
         } else {
             log::debug!("Candidate profile loaded: {chars} chars (~{} tokens)", chars / 3);
+            text
         }
-    }
+    });
     with_candidate_profile_text(system_prompt, profile.as_deref())
 }
 

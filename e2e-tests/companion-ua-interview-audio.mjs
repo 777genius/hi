@@ -259,6 +259,11 @@ async function main() {
   const initial = await getState();
   log('health', JSON.stringify(health).slice(0, 80), 'recording', initial.recording?.status, 'memory', initial.memory?.mode);
   if (initial.recording?.status !== 'Idle') throw new Error('App must be idle before the experiment');
+  // История теперь сохраняется на диск: чистить её у живого приложения нельзя. Только в тест-режиме (play-audio отвечает 404 вне него).
+  const testMode = await fetch(`${BASE}/api/e2e/play-audio`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-companion-token': TOKEN }, body: '{}' }).then((r) => r.status !== 404).catch(() => false);
+  if (!testMode && process.env.E2E_ALLOW_HISTORY_CLEAR !== '1') {
+    throw new Error('Приложение запущено не в тест-режиме (INTERVIEW_TEST_MODE=1): e2e стёр бы реальную историю. Задай E2E_ALLOW_HISTORY_CLEAR=1, если это осознанно.');
+  }
   await api('/api/history/clear', {}).catch((e) => log('history clear skipped:', e.message));
   await api('/api/context/clear', {}).catch((e) => log('context clear skipped:', e.message));
 

@@ -429,6 +429,7 @@ pub async fn request_ai(
 fn recent_context_images(
     timeline: &[companion::CompanionMessage],
     context_floor_seq: u64,
+    history_floor_seq: u64,
     selected_message_ids: Option<&[String]>,
     max_count: usize,
 ) -> Vec<commands::LlmImageInput> {
@@ -438,6 +439,10 @@ fn recent_context_images(
     let mut newest_first = Vec::new();
     for message in timeline.iter().rev() {
         if message.deleted || message.kind != companion::CompanionMessageKind::Prompt {
+            continue;
+        }
+        // Очищенная история не возвращается в LLM даже через выделение сообщений (как и для текста).
+        if message.seq <= history_floor_seq {
             continue;
         }
         if let Some(ids) = selected_message_ids {
@@ -489,13 +494,16 @@ mod context_image_tests {
     #[test]
     fn carries_recent_images_in_order_and_respects_context_clear() {
         let timeline = vec![prompt("old", 1, "T0xE"), prompt("middle", 2, "TUlE"), prompt("new", 3, "TkVX")];
-        let recent = recent_context_images(&timeline, 0, None, 2);
+        let recent = recent_context_images(&timeline, 0, 0, None, 2);
         assert_eq!(recent.iter().map(|image| image.data_base64.as_str()).collect::<Vec<_>>(), vec!["TUlE", "TkVX"]);
-        let after_clear = recent_context_images(&timeline, 2, None, 2);
+        let after_clear = recent_context_images(&timeline, 2, 0, None, 2);
         assert_eq!(after_clear.len(), 1);
         assert_eq!(after_clear[0].data_base64, "TkVX");
-        let selected = recent_context_images(&timeline, 3, Some(&["old".into()]), 2);
+        let selected = recent_context_images(&timeline, 3, 0, Some(&["old".into()]), 2);
         assert_eq!(selected[0].data_base64, "T0xE");
+        // После очистки истории выделение старого сообщения не возвращает его картинку.
+        let cleared = recent_context_images(&timeline, 3, 1, Some(&["old".into()]), 2);
+        assert!(cleared.is_empty());
     }
 }
 
@@ -538,6 +546,7 @@ pub async fn send_prompt(
     let context_images = recent_context_images(
         &state.companion_timeline.read().await,
         state.companion_context_floor_seq.load(Ordering::Relaxed),
+        state.companion_history_floor_seq.load(Ordering::Relaxed),
         selected_message_ids.as_deref(),
         10usize.saturating_sub(prompt_images.len()).min(2),
     );

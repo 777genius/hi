@@ -12,7 +12,7 @@ BINARY_NAME="Telegram"
 RELEASE_BINARY="$HELPER_DIR/.build/release/$PRODUCT_NAME"
 SIGNING_IDENTITY="${FOCUS_COPY_SIGNING_IDENTITY:-}"
 if [[ -z "$SIGNING_IDENTITY" && -d "$APP_DIR" ]]; then
-  SIGNING_IDENTITY="$(codesign -dvvv "$APP_DIR" 2>&1 | sed -n 's/^Authority=\(Developer ID Application:.*\)$/\1/p' | head -n 1)"
+  SIGNING_IDENTITY="$( (codesign -dvvv "$APP_DIR" 2>&1 || true) | sed -n 's/^Authority=\(Developer ID Application:.*\)$/\1/p' | head -n 1)"
 fi
 
 swift build -c release --package-path "$HELPER_DIR"

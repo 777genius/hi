@@ -2320,7 +2320,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
 }
 
-:.theme-light .permission-warning-card {
+.theme-light .permission-warning-card {
   background: rgba(255, 255, 255, 0.98);
   border: 1px solid rgba(0, 0, 0, 0.12);
 }
@@ -2367,7 +2367,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   margin-bottom: 8px;
 }
 
-:.theme-light .permission-warning-item {
+.theme-light .permission-warning-item {
   background: rgba(0, 0, 0, 0.04);
 }
 
@@ -3839,8 +3839,8 @@ const onChatMouseDown = (e: MouseEvent) => {
   }
 }
 
-:.theme-light .prompt-button:hover,
-:.theme-light .context-clear-button:hover {
+.theme-light .prompt-button:hover,
+.theme-light .context-clear-button:hover {
   background: rgba(0, 0, 0, 0.06);
 }
 </style>
