@@ -649,7 +649,8 @@ onUnmounted(() => {
   min-width: 0;
   width: 100%;
   overflow-y: auto;
-  padding: var(--chat-scroll-padding, var(--spacing-sm));
+  /* Сообщения вплотную к краям: исходящие к правому, входящие к левому. */
+  padding: var(--chat-scroll-padding, var(--spacing-sm) 0);
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -753,8 +754,9 @@ onUnmounted(() => {
   max-width: calc((92% - 40px) * var(--chat-bubble-width-scale, 1));
   min-width: 0;
   padding: 8px 10px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  /* Без рамки, только фон; со стороны края экрана скругления нет: сообщение «выезжает» с края. */
+  border-radius: 0 12px 12px 0;
+  border: none;
   background: rgba(255, 255, 255, 0.06);
   color: var(--color-text);
   font-size: var(--chat-message-font-size, inherit);
@@ -805,8 +807,8 @@ onUnmounted(() => {
 
 .chat-row.outgoing .chat-bubble {
   width: calc((92% - 40px) * var(--chat-bubble-width-scale, 1));
+  border-radius: 12px 0 0 12px;
   background: rgba(59, 130, 246, 0.16);
-  border-color: rgba(59, 130, 246, 0.25);
   color: var(--color-text);
 }
 
@@ -827,7 +829,6 @@ onUnmounted(() => {
 
 .chat-row.outgoing.prompt .chat-bubble {
   background: rgba(168, 85, 247, 0.16);
-  border-color: rgba(168, 85, 247, 0.28);
 }
 
 .chat-attachments {
@@ -873,7 +874,7 @@ onUnmounted(() => {
 }
 
 .chat-row.out-of-context .chat-bubble {
-  border-color: rgba(244, 67, 54, 0.25);
+  background: rgba(244, 67, 54, 0.1);
 }
 
 .chat-row.partial .chat-bubble {
@@ -881,8 +882,7 @@ onUnmounted(() => {
 }
 
 .chat-row.error .chat-bubble {
-  border-color: rgba(244, 67, 54, 0.35);
-  background: rgba(244, 67, 54, 0.12);
+  background: rgba(244, 67, 54, 0.16);
 }
 
 .chat-icon {
@@ -908,7 +908,6 @@ onUnmounted(() => {
 
 .chat-bubble.deleted {
   background: transparent;
-  border-color: transparent;
   cursor: default;
 }
 
@@ -1395,7 +1394,7 @@ onUnmounted(() => {
   }
 
   .chat-scroll {
-    padding: var(--chat-scroll-mobile-padding, 6px 4px 8px 2px);
+    padding: var(--chat-scroll-mobile-padding, 6px 0 8px 0);
     gap: 6px;
   }
 
@@ -1437,12 +1436,16 @@ onUnmounted(() => {
 
 @media (max-width: 420px) {
   .chat-scroll {
-    padding: var(--chat-scroll-narrow-padding, 4px 2px 8px 0);
+    padding: var(--chat-scroll-narrow-padding, 4px 0 8px 0);
   }
 
   .chat-bubble {
     padding: 8px;
-    border-radius: 10px;
+    border-radius: 0 10px 10px 0;
+  }
+
+  .chat-row.outgoing .chat-bubble {
+    border-radius: 10px 0 0 10px;
   }
 
   .chat-row.assistant-response .chat-bubble {
