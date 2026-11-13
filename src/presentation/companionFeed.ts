@@ -208,8 +208,13 @@ export function buildCompanionConversationFeedMessages(
       continue;
     }
 
-    const insertIndex = resolveHaikuInsertIndex(ordered, message);
+    let insertIndex = resolveHaikuInsertIndex(ordered, message);
     if (insertIndex >= 0) {
+      // Несколько ответов к одному вопросу идут в порядке создания: пропускаем уже вставленные ответы,
+      // иначе каждый следующий окажется выше предыдущего (порядок наоборот).
+      while (ordered[insertIndex + 1]?.kind === 'haiku') {
+        insertIndex += 1;
+      }
       ordered.splice(insertIndex + 1, 0, message);
     } else {
       ordered.push(message);

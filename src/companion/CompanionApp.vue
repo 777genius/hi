@@ -66,9 +66,32 @@ const actionInFlight = ref(false);
 const syncInFlight = ref(false);
 const aiQuestion = ref('');
 const aiComposerOpen = ref(false);
+// Поле сообщения закреплено вверху экрана: внизу его перекрывает экранная клавиатура.
+// visualViewport.offsetTop сдвигает его вместе с видимой областью, если браузер прокрутил страницу при фокусе.
+const composerViewportOffsetTop = ref(0);
+function syncComposerViewportOffset(): void {
+  composerViewportOffsetTop.value = Math.max(0, Math.round(window.visualViewport?.offsetTop ?? 0));
+}
+function bindComposerViewport(): void {
+  window.visualViewport?.addEventListener('resize', syncComposerViewportOffset);
+  window.visualViewport?.addEventListener('scroll', syncComposerViewportOffset);
+  syncComposerViewportOffset();
+}
+function unbindComposerViewport(): void {
+  window.visualViewport?.removeEventListener('resize', syncComposerViewportOffset);
+  window.visualViewport?.removeEventListener('scroll', syncComposerViewportOffset);
+  composerViewportOffsetTop.value = 0;
+}
+watch(aiComposerOpen, (open) => {
+  if (open) bindComposerViewport();
+  else unbindComposerViewport();
+});
 const openaiResponsesWebSearchEnabled = ref(readStoredBoolean(OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY, false));
 const promptImages = ref<PromptImageDraft[]>([]);
 const promptFileInputRef = ref<HTMLInputElement | null>(null);
+const promptGalleryInputRef = ref<HTMLInputElement | null>(null);
+// Сервер принимает тело до 32 МБ, фото до ~4,5 МБ (base64 примерно 6 МБ): больше 5 штук не влезет.
+const MAX_PROMPT_IMAGES = 5;
 const pwaStandalone = ref(false);
 const pwaDiagnosticItems = ref<PwaDiagnosticItem[]>([]);
 const pwaDiagnosticChecking = ref(false);
@@ -878,9 +901,13 @@ function onAiKeydown(event: KeyboardEvent): void {
   }
 }
 
-function openPromptFilePicker(): void {
+function openPromptFilePicker(fromGallery: boolean): void {
   if (actionsDisabled.value) return;
-  promptFileInputRef.value?.click();
+  if (promptImages.value.length >= MAX_PROMPT_IMAGES) {
+    setTemporaryStatus(`Можно прикрепить не больше ${MAX_PROMPT_IMAGES} фото за раз`, 'warn', 3200);
+    return;
+  }
+  (fromGallery ? promptGalleryInputRef : promptFileInputRef).value?.click();
 }
 
 function removePromptImage(id: string): void {
@@ -898,6 +925,10 @@ async function onPromptFilesSelected(event: Event): Promise<void> {
   let added = 0;
   let lastError = '';
   for (const file of files) {
+    if (promptImages.value.length >= MAX_PROMPT_IMAGES) {
+      lastError = `Прикреплено максимум ${MAX_PROMPT_IMAGES} фото, остальные пропущены.`;
+      break;
+    }
     try {
       const nextImage = await createPromptImageDraft(file, { prefix: 'img' });
       if (!nextImage) continue;
@@ -1122,6 +1153,7 @@ watch(
 
 onUnmounted(() => {
   componentUnmounted = true;
+  unbindComposerViewport();
   reconnectScheduler.cancel();
   clearStatusTimer();
   cleanupPwaDisplayModeListener();
@@ -1212,17 +1244,29 @@ onUnmounted(() => {
       </section>
 
       <transition name="ask-slide">
-        <section v-if="aiComposerOpen" class="ask-card">
+        <section
+          v-if="aiComposerOpen"
+          class="ask-card"
+          :style="{ transform: `translateY(${composerViewportOffsetTop}px)` }"
+        >
           <div class="ask-card-header">
             <div class="summary-label">Сообщение в AI</div>
             <div class="ask-card-header-actions">
               <button
                 class="ask-icon-button"
-                title="Сфоткать или выбрать фото"
+                title="Сфоткать"
                 :disabled="actionsDisabled"
-                @click="openPromptFilePicker"
+                @click="openPromptFilePicker(false)"
               >
                 <span class="mdi mdi-camera-outline" />
+              </button>
+              <button
+                class="ask-icon-button"
+                title="Выбрать из галереи"
+                :disabled="actionsDisabled"
+                @click="openPromptFilePicker(true)"
+              >
+                <span class="mdi mdi-image-outline" />
               </button>
               <button class="ask-close-button" title="Скрыть" @click="aiComposerOpen = false">
                 <span class="mdi mdi-close" />
@@ -1236,6 +1280,14 @@ onUnmounted(() => {
             type="file"
             accept="image/*"
             capture="environment"
+            multiple
+            @change="onPromptFilesSelected"
+          />
+          <input
+            ref="promptGalleryInputRef"
+            class="prompt-file-input"
+            type="file"
+            accept="image/*"
             multiple
             @change="onPromptFilesSelected"
           />
@@ -1605,7 +1657,9 @@ onUnmounted(() => {
 
 .feed-card {
   --chat-empty-font-size: 14px;
-  --chat-message-font-size: 21px;
+  /* Размер текста сообщений на 20% меньше (было 21px), ширина пузырей на 20% уже. */
+  --chat-message-font-size: 17px;
+  --chat-bubble-width-scale: 0.8;
   --chat-message-line-height: 1.44;
   --chat-code-font-size: 11.5px;
   --chat-code-line-height: 1.42;
@@ -1681,7 +1735,19 @@ onUnmounted(() => {
 .ask-card {
   display: grid;
   gap: 10px;
-  margin-bottom: calc(122px + env(safe-area-inset-bottom, 0px));
+  /* Вверху экрана, поверх ленты: клавиатура снизу его не закрывает. */
+  position: fixed;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  left: calc(12px + env(safe-area-inset-left, 0px));
+  right: calc(12px + env(safe-area-inset-right, 0px));
+  width: auto;
+  max-width: 916px;
+  margin: 0 auto;
+  z-index: 30;
+  max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px));
+  overflow-y: auto;
+  box-sizing: border-box;
+  background: var(--color-bg);
 }
 
 .ask-card-header {
@@ -2017,7 +2083,7 @@ onUnmounted(() => {
 .ask-slide-enter-from,
 .ask-slide-leave-to {
   opacity: 0;
-  transform: translateY(10px);
+  margin-top: -10px;
 }
 
 @media (max-width: 720px) {
@@ -2041,9 +2107,10 @@ onUnmounted(() => {
     position: fixed;
     left: calc(10px + env(safe-area-inset-left, 0px));
     right: calc(10px + env(safe-area-inset-right, 0px));
-    bottom: calc(110px + env(safe-area-inset-bottom, 0px));
-    max-height: calc(100vh - 132px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-    max-height: calc(100dvh - 132px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    top: calc(8px + env(safe-area-inset-top, 0px));
+    bottom: auto;
+    max-height: calc(100vh - 24px - env(safe-area-inset-top, 0px));
+    max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px));
     margin-bottom: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -2081,9 +2148,10 @@ onUnmounted(() => {
   .ask-card {
     left: calc(8px + env(safe-area-inset-left, 0px));
     right: calc(8px + env(safe-area-inset-right, 0px));
-    bottom: calc(134px + env(safe-area-inset-bottom, 0px));
-    max-height: calc(100vh - 156px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-    max-height: calc(100dvh - 156px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    top: calc(8px + env(safe-area-inset-top, 0px));
+    bottom: auto;
+    max-height: calc(100vh - 24px - env(safe-area-inset-top, 0px));
+    max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px));
   }
 
   .controls-side {

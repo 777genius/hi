@@ -125,6 +125,17 @@ const shouldShowAccessibilityPermissionBanner = computed(() => {
   return isMac && !hasAccessibilityPermission.value;
 });
 
+// Статус хоткеев копирования из редактора показываем, пока лента пуста: сразу видно, работают ли они.
+const hotkeyStatusLine = computed(() => {
+  if (!isMac) return '';
+  return hasAccessibilityPermission.value
+    ? '✓ Ctrl+Shift+A и Ctrl+Shift+S готовы: выдели текст в редакторе и нажми'
+    : '✗ Ctrl+Shift+A и Ctrl+Shift+S не работают: нужен доступ Accessibility для Telegram';
+});
+const emptyFeedText = computed(() =>
+  [store.displayText, hotkeyStatusLine.value].filter(Boolean).join('\n\n')
+);
+
 const accessibilityPermissionTooltip = computed(() => {
   return hasAccessibilityPermission.value
     ? 'Открыть Accessibility'
@@ -1934,7 +1945,7 @@ const onChatMouseDown = (e: MouseEvent) => {
           ref="conversationFeedRef"
           :messages="chatStore.messages"
           :assistant-streaming="chatStore.isHaikuStreaming"
-          :empty-text="store.displayText"
+          :empty-text="emptyFeedText"
           :selecting="lassoActive"
           :editing-message-id="editingMessageId"
           :anchor-mode="chatStore.anchorMode"
