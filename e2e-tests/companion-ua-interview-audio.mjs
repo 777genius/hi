@@ -345,7 +345,21 @@ async function main() {
       const f = audio[idx];
       const turnStart = Date.now();
       const before = await getState();
-      if (before.recording?.status !== 'Recording') throw new Error(`Recording stopped before turn ${t.id}: ${before.recording?.status}`);
+      if (before.recording?.status !== 'Recording') {
+        // Запись остановилась сама: это дефект стабильности. Фиксируем и пробуем продолжить, чтобы проверить остальное.
+        const incident = { turn: t.id, status: before.recording?.status, at: new Date().toISOString() };
+        report.incidents = [...(report.incidents || []), incident];
+        log(`INCIDENT: recording stopped before turn ${t.id}: ${before.recording?.status}; restarting`);
+        await api('/api/record/start', {}).catch((e) => log('restart failed:', e.message));
+        for (let k = 0; k < 20; k += 1) {
+          const st = await getState();
+          if (st.recording?.status === 'Recording') break;
+          await sleep(1000);
+        }
+        const again = await getState();
+        if (again.recording?.status !== 'Recording') throw new Error(`Recording stopped before turn ${t.id} and did not restart: ${again.recording?.status}`);
+        await sleep(3000);
+      }
       const baseSeq = maxSeq(before);
       const rec = { id: t.id, baseSeq, q: t.q, a: t.a, aiRequested: false };
 
@@ -498,6 +512,7 @@ async function main() {
     finalRecallOk: report.finalRecall.filter((r) => r.ok).length,
     finalRecallTotal: report.finalRecall.length,
     errors: report.errors.length,
+    incidents: (report.incidents || []).length,
   };
   await writeFile(join(outDir, 'report.json'), JSON.stringify(report, null, 2));
   await writeFile(join(outDir, 'report.md'), renderMarkdown(report));

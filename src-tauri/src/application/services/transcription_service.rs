@@ -37,6 +37,9 @@ pub struct TranscriptionService {
     dropped_audio_chunks: Arc<AtomicUsize>,
 }
 
+/// Сколько раз повторять перезапуск ScreenCaptureKit после сбоя (паузы 1,5 с, 3 с, 4,5 с ... суммарно около 40 с).
+const CAPTURE_REFRESH_RETRIES: u32 = 6;
+
 impl TranscriptionService {
     /// Load local weights after the UI starts, so the first recording can reuse
     /// the same provider without paying model I/O on the Start button.
@@ -704,15 +707,33 @@ impl TranscriptionService {
                     {
                         continue;
                     }
-                    let mut capture = capture.write().await;
-                    if !capture.is_capturing() {
+                    let mut guard = capture.write().await;
+                    if !guard.is_capturing() {
                         break;
                     }
                     log::info!("Refreshing ScreenCaptureKit after {}ms of silence", quiet_ms);
-                    let result = match capture.stop_capture().await {
-                        Ok(()) => capture.start_capture(on_chunk.clone()).await,
+                    let mut result = match guard.stop_capture().await {
+                        Ok(()) => guard.start_capture(on_chunk.clone()).await,
                         Err(error) => Err(error),
                     };
+                    drop(guard);
+                    // Перезапуск захвата иногда временно не удаётся (macOS: "Не удалось включить звук трансляции",
+                    // смена устройства вывода). Раньше первая же ошибка роняла запись целиком. Повторяем с паузами,
+                    // не удерживая блокировку захвата между попытками, и сдаёмся только после всех попыток.
+                    for attempt in 1..=CAPTURE_REFRESH_RETRIES {
+                        let Err(error) = &result else { break };
+                        log::warn!(
+                            "System audio refresh failed ({error}), retry {attempt}/{CAPTURE_REFRESH_RETRIES}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(1_500 * u64::from(attempt))).await;
+                        if *status.read().await != RecordingStatus::Recording {
+                            result = Ok(());
+                            break;
+                        }
+                        let mut guard = capture.write().await;
+                        let _ = guard.stop_capture().await;
+                        result = guard.start_capture(on_chunk.clone()).await;
+                    }
                     if let Err(error) = result {
                         log::error!("System audio stream refresh failed: {error}");
                         on_error_for_refresh(SttError::Processing(format!(
