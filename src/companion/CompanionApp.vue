@@ -82,9 +82,15 @@ function unbindComposerViewport(): void {
   window.visualViewport?.removeEventListener('scroll', syncComposerViewportOffset);
   composerViewportOffsetTop.value = 0;
 }
+const aiTextareaRef = ref<HTMLTextAreaElement | null>(null);
 watch(aiComposerOpen, (open) => {
-  if (open) bindComposerViewport();
-  else unbindComposerViewport();
+  if (open) {
+    bindComposerViewport();
+    // Фокус сразу в поле, чтобы можно было печатать без лишнего тапа (preventScroll: страница не прыгает).
+    void nextTick(() => aiTextareaRef.value?.focus({ preventScroll: true }));
+  } else {
+    unbindComposerViewport();
+  }
 });
 const openaiResponsesWebSearchEnabled = ref(readStoredBoolean(OPENAI_RESPONSES_WEB_SEARCH_STORAGE_KEY, false));
 const promptImages = ref<PromptImageDraft[]>([]);
@@ -1293,6 +1299,7 @@ onUnmounted(() => {
           />
 
           <textarea
+            ref="aiTextareaRef"
             v-model="aiQuestion"
             class="ask-textarea"
             placeholder="Напиши сообщение или прикрепи фото. Можно оставить пустым и отправить только фото."
