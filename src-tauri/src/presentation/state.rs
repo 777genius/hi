@@ -251,10 +251,11 @@ impl AppState {
             .llm_stream_tasks
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Завершённые задачи сами не убираются; ограничиваем рост (drop хендла не обрывает задачу).
-        if tasks.len() >= 64 {
-            tasks.clear();
-        }
+        // Убираем только завершённые задачи: активные нужно сохранить, чтобы их можно было оборвать.
+        tasks.retain(|_, handles| {
+            handles.retain(|handle| !handle.inner().is_finished());
+            !handles.is_empty()
+        });
         tasks.entry(request_id.to_string()).or_default().push(handle);
     }
 

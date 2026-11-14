@@ -2147,6 +2147,7 @@ const onChatMouseDown = (e: MouseEvent) => {
             <button
               class="haiku-button no-drag"
               data-testid="haiku-generate-button"
+              :aria-label="chatStore.isHaikuStreaming ? 'Остановить ответ AI' : 'Отправить в AI'"
               :class="{ loading: chatStore.isHaikuStreaming }"
               :disabled="!chatStore.canRequestHaiku && !chatStore.isHaikuStreaming"
               @pointerenter="onHaikuPointerEnter"

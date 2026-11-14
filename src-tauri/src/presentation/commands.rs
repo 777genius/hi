@@ -3696,7 +3696,6 @@ pub async fn start_haiku_stream(
                     EVENT_HAIKU_CANDIDATE_START,
                     candidate_start_payload(&request_id, &openai_mini_candidate),
                 );
-                let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
                 log::info!(
                     "Command: start_haiku_stream parallel request_id={} prompt_len={}",
@@ -3829,6 +3828,7 @@ pub async fn start_haiku_stream(
                     }
                 });
                 state.register_llm_stream_task(&request_id, stream_task);
+                let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
                 return Ok(request_id);
             }
@@ -3854,7 +3854,6 @@ pub async fn start_haiku_stream(
         },
     )
     .await;
-    let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
     log::info!(
         "Command: start_haiku_stream request_id={} prompt_len={}",
         request_id,
@@ -3953,6 +3952,7 @@ pub async fn start_haiku_stream(
         }
     });
     state.register_llm_stream_task(&request_id, stream_task);
+    let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
     Ok(request_id)
 }
@@ -4593,7 +4593,6 @@ pub async fn start_haiku_chat_stream(
                     EVENT_HAIKU_CANDIDATE_START,
                     candidate_start_payload(&request_id, &openai_mini_candidate),
                 );
-                let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
                 log::info!(
                     "Command: start_haiku_chat_stream parallel request_id={} ctx_len={} q_len={} images={}",
@@ -4765,6 +4764,7 @@ pub async fn start_haiku_chat_stream(
                     }
                 });
                 state.register_llm_stream_task(&request_id, stream_task);
+                let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
                 return Ok(request_id);
             }
@@ -4793,7 +4793,6 @@ pub async fn start_haiku_chat_stream(
         },
     )
     .await;
-    let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
     log::info!(
         "Command: start_haiku_chat_stream request_id={} ctx_len={} q_len={} images={}",
         request_id,
@@ -4988,6 +4987,7 @@ pub async fn start_haiku_chat_stream(
         }
     });
     state.register_llm_stream_task(&request_id, stream_task);
+    let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
     Ok(request_id)
 }

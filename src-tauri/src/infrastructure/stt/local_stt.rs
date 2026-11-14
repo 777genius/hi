@@ -62,20 +62,69 @@ const WHISPER_HALLUCINATION_MAX_SECONDS: f64 = 2.5;
 /// LLM request used to wait seconds before it even started. UTILITY is below the default QoS of
 /// the async runtime threads, so they win under contention; idle machines see no difference.
 #[cfg(target_os = "macos")]
-fn lower_decoder_thread_priority() {
+mod qos {
+    use std::ffi::c_void;
+
     extern "C" {
+        fn pthread_self() -> *mut c_void;
+        fn pthread_get_qos_class_np(
+            thread: *mut c_void,
+            qos_class: *mut u32,
+            relative_priority: *mut i32,
+        ) -> i32;
         fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
     }
+
+    const QOS_CLASS_DEFAULT: u32 = 0x15;
     const QOS_CLASS_UTILITY: u32 = 0x11;
-    // SAFETY: plain libpthread call that only changes the calling thread's QoS.
-    let status = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0) };
-    if status != 0 {
-        log::debug!("Could not lower the STT decoder thread priority (status {status})");
+
+    /// Returns the thread to its previous QoS on drop: `spawn_blocking` threads go back to the
+    /// shared Tokio pool, and the next task (model loading, file work) must not inherit UTILITY.
+    pub struct DecoderPriorityGuard {
+        previous: Option<(u32, i32)>,
+    }
+
+    impl DecoderPriorityGuard {
+        pub fn lower() -> Self {
+            let mut class = 0u32;
+            let mut relative = 0i32;
+            // SAFETY: plain libpthread calls that only read/change the calling thread's QoS.
+            let read = unsafe { pthread_get_qos_class_np(pthread_self(), &mut class, &mut relative) };
+            let status = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0) };
+            if status != 0 {
+                log::debug!("Could not lower the STT decoder thread priority (status {status})");
+                return Self { previous: None };
+            }
+            // An unspecified class cannot be set back; DEFAULT is what pool threads normally have.
+            let class = if read == 0 && class != 0 { class } else { QOS_CLASS_DEFAULT };
+            Self {
+                previous: Some((class, relative)),
+            }
+        }
+    }
+
+    impl Drop for DecoderPriorityGuard {
+        fn drop(&mut self) {
+            if let Some((class, relative)) = self.previous.take() {
+                // SAFETY: restores the QoS of the same thread that lowered it.
+                unsafe { pthread_set_qos_class_self_np(class, relative) };
+            }
+        }
     }
 }
 
+#[cfg(target_os = "macos")]
+use qos::DecoderPriorityGuard;
+
 #[cfg(not(target_os = "macos"))]
-fn lower_decoder_thread_priority() {}
+struct DecoderPriorityGuard;
+
+#[cfg(not(target_os = "macos"))]
+impl DecoderPriorityGuard {
+    fn lower() -> Self {
+        Self
+    }
+}
 
 /// Function words Whisper emits alone on near-silence ("and the"); never a real utterance.
 const WHISPER_FILLER_WORDS: &[&str] = &["and", "the", "a", "of", "to", "in", "uh", "um", "so", "but"];
@@ -510,7 +559,7 @@ impl SttProvider for LocalSttProvider {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<SttResult<()>>();
 
         let worker = tokio::task::spawn_blocking(move || -> SttResult<()> {
-            lower_decoder_thread_priority();
+            let _decoder_priority = DecoderPriorityGuard::lower();
             // Validate model/session readiness before starting the audio capture.
             let mut session = match model.session() {
                 Ok(session) => {
