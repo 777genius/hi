@@ -3696,7 +3696,6 @@ pub async fn start_haiku_stream(
                     EVENT_HAIKU_CANDIDATE_START,
                     candidate_start_payload(&request_id, &openai_mini_candidate),
                 );
-                let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
                 log::info!(
                     "Command: start_haiku_stream parallel request_id={} prompt_len={}",
@@ -3712,7 +3711,7 @@ pub async fn start_haiku_stream(
                 let anthropic_candidate_clone = anthropic_candidate.clone();
                 let openai_mini_candidate_clone = openai_mini_candidate.clone();
 
-                tauri::async_runtime::spawn(async move {
+                let stream_task = tauri::async_runtime::spawn(async move {
                     let anthropic_writer = spawn_companion_delta_writer(
                         app_handle_clone.clone(),
                         request_id_clone.clone(),
@@ -3828,6 +3827,8 @@ pub async fn start_haiku_stream(
                         );
                     }
                 });
+                state.register_llm_stream_task(&request_id, stream_task);
+                let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
                 return Ok(request_id);
             }
@@ -3853,7 +3854,6 @@ pub async fn start_haiku_stream(
         },
     )
     .await;
-    let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
     log::info!(
         "Command: start_haiku_stream request_id={} prompt_len={}",
         request_id,
@@ -3867,7 +3867,7 @@ pub async fn start_haiku_stream(
     let system_prompt_clone = system_prompt.clone();
     let provider_clone = provider;
 
-    tauri::async_runtime::spawn(async move {
+    let stream_task = tauri::async_runtime::spawn(async move {
         let app_handle_delta = app_handle_clone.clone();
         let request_id_delta = request_id_clone.clone();
         let companion_delta_writer =
@@ -3951,6 +3951,8 @@ pub async fn start_haiku_stream(
             }
         }
     });
+    state.register_llm_stream_task(&request_id, stream_task);
+    let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
     Ok(request_id)
 }
@@ -4591,7 +4593,6 @@ pub async fn start_haiku_chat_stream(
                     EVENT_HAIKU_CANDIDATE_START,
                     candidate_start_payload(&request_id, &openai_mini_candidate),
                 );
-                let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
                 log::info!(
                     "Command: start_haiku_chat_stream parallel request_id={} ctx_len={} q_len={} images={}",
@@ -4612,7 +4613,7 @@ pub async fn start_haiku_chat_stream(
                 let anthropic_candidate_clone = anthropic_candidate.clone();
                 let openai_mini_candidate_clone = openai_mini_candidate.clone();
 
-                tauri::async_runtime::spawn(async move {
+                let stream_task = tauri::async_runtime::spawn(async move {
                     let combined_text = build_chat_user_text(&context_clone, &question_clone);
 
                     let anthropic_writer = spawn_companion_delta_writer(
@@ -4762,6 +4763,8 @@ pub async fn start_haiku_chat_stream(
                         );
                     }
                 });
+                state.register_llm_stream_task(&request_id, stream_task);
+                let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
                 return Ok(request_id);
             }
@@ -4790,7 +4793,6 @@ pub async fn start_haiku_chat_stream(
         },
     )
     .await;
-    let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
     log::info!(
         "Command: start_haiku_chat_stream request_id={} ctx_len={} q_len={} images={}",
         request_id,
@@ -4811,7 +4813,7 @@ pub async fn start_haiku_chat_stream(
     let context_clone = llm_context.clone();
     let question_clone = llm_question.clone();
 
-    tauri::async_runtime::spawn(async move {
+    let stream_task = tauri::async_runtime::spawn(async move {
         let request_id_for_done = request_id_clone.clone();
         let request_id_for_error = request_id_clone.clone();
         let request_id_for_delta_anthropic = request_id_clone.clone();
@@ -4915,10 +4917,19 @@ pub async fn start_haiku_chat_stream(
                 )
             };
 
+            let stream_started_at = std::time::Instant::now();
+            let mut first_delta_logged = false;
             llm_provider
                 .stream_text(
                     &request,
                     Box::new(move |delta| {
+                        if !first_delta_logged {
+                            first_delta_logged = true;
+                            log::info!(
+                                "First LLM delta after {}ms (request sent to the provider, not counting context assembly)",
+                                stream_started_at.elapsed().as_millis()
+                            );
+                        }
                         let delta_text = delta.to_string();
                         let _ = app_handle_delta_openai.emit(
                             EVENT_HAIKU_DELTA,
@@ -4975,6 +4986,8 @@ pub async fn start_haiku_chat_stream(
             }
         }
     });
+    state.register_llm_stream_task(&request_id, stream_task);
+    let _ = crate::presentation::companion::publish_snapshot(&app_handle).await;
 
     Ok(request_id)
 }

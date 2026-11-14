@@ -318,7 +318,7 @@ pub async fn cancel_ai(
     app_handle: &AppHandle,
 ) -> Result<CompanionActionResponse, String> {
     let changed =
-        crate::presentation::companion_timeline::cancel_active_haiku_generation(state).await;
+        crate::presentation::companion_timeline::settle_active_haiku_generation(state).await;
     if !changed {
         return noop(app_handle, "noop").await;
     }

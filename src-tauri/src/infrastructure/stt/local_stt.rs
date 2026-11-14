@@ -57,6 +57,85 @@ const PARAKEET_MAX_UTTERANCE_MS: usize = 6_000;
 const SPECULATIVE_PAUSE_MS: usize = 150;
 const WHISPER_HALLUCINATION_MAX_SECONDS: f64 = 2.5;
 
+/// Decoder threads (including the ones the inference library spawns from here) must not starve
+/// the app's own request handling: while someone speaks, decoding saturates the cores and an
+/// LLM request used to wait seconds before it even started. UTILITY is below the default QoS of
+/// the async runtime threads, so they win under contention; idle machines see no difference.
+#[cfg(target_os = "macos")]
+mod qos {
+    use std::ffi::c_void;
+
+    extern "C" {
+        fn pthread_self() -> *mut c_void;
+        fn pthread_get_qos_class_np(
+            thread: *mut c_void,
+            qos_class: *mut u32,
+            relative_priority: *mut i32,
+        ) -> i32;
+        fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+    }
+
+    const QOS_CLASS_DEFAULT: u32 = 0x15;
+    const QOS_CLASS_UTILITY: u32 = 0x11;
+
+    /// Returns the thread to its previous QoS on drop: `spawn_blocking` threads go back to the
+    /// shared Tokio pool, and the next task (model loading, file work) must not inherit UTILITY.
+    pub struct DecoderPriorityGuard {
+        previous: Option<(u32, i32)>,
+    }
+
+    impl DecoderPriorityGuard {
+        pub fn lower() -> Self {
+            let mut class = 0u32;
+            let mut relative = 0i32;
+            // SAFETY: plain libpthread calls that only read/change the calling thread's QoS.
+            let read = unsafe { pthread_get_qos_class_np(pthread_self(), &mut class, &mut relative) };
+            let status = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0) };
+            if status != 0 {
+                log::debug!("Could not lower the STT decoder thread priority (status {status})");
+                return Self { previous: None };
+            }
+            // An unspecified class cannot be set back; DEFAULT is what pool threads normally have.
+            let class = if read == 0 && class != 0 { class } else { QOS_CLASS_DEFAULT };
+            Self {
+                previous: Some((class, relative)),
+            }
+        }
+    }
+
+    impl Drop for DecoderPriorityGuard {
+        fn drop(&mut self) {
+            if let Some((class, relative)) = self.previous.take() {
+                // SAFETY: restores the QoS of the same thread that lowered it.
+                unsafe { pthread_set_qos_class_self_np(class, relative) };
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+use qos::DecoderPriorityGuard;
+
+#[cfg(not(target_os = "macos"))]
+struct DecoderPriorityGuard;
+
+#[cfg(not(target_os = "macos"))]
+impl DecoderPriorityGuard {
+    fn lower() -> Self {
+        Self
+    }
+}
+
+/// Function words Whisper emits alone on near-silence ("and the"); never a real utterance.
+const WHISPER_FILLER_WORDS: &[&str] = &["and", "the", "a", "of", "to", "in", "uh", "um", "so", "but"];
+
+fn is_filler_only(normalized: &str) -> bool {
+    let mut words = normalized.split_whitespace().peekable();
+    words.peek().is_some()
+        && normalized.split_whitespace().count() <= 3
+        && normalized.split_whitespace().all(|word| WHISPER_FILLER_WORDS.contains(&word))
+}
+
 /// Whisper on silence can loop over its decoding vocabulary ("Glossary, Glossary, ...").
 /// Real speech never repeats one word this many times, whatever the clip length.
 fn is_repetition_loop(text: &str) -> bool {
@@ -211,6 +290,7 @@ impl LocalModel {
             .to_lowercase();
         normalized.is_empty()
             || is_repetition_loop(text)
+            || (duration_s <= WHISPER_HALLUCINATION_MAX_SECONDS && is_filler_only(&normalized))
             || (duration_s <= WHISPER_HALLUCINATION_MAX_SECONDS
                 && (WHISPER_HALLUCINATIONS.contains(&normalized.as_str())
                     || WHISPER_HALLUCINATION_FRAGMENTS
@@ -479,6 +559,7 @@ impl SttProvider for LocalSttProvider {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<SttResult<()>>();
 
         let worker = tokio::task::spawn_blocking(move || -> SttResult<()> {
+            let _decoder_priority = DecoderPriorityGuard::lower();
             // Validate model/session readiness before starting the audio capture.
             let mut session = match model.session() {
                 Ok(session) => {
@@ -818,6 +899,10 @@ mod tests {
         let w = LocalModel::WhisperLargeV3Turbo;
         assert!(w.is_hallucination("Glossary, Glossary, Glossary, Glossary, Glossary, Glossary,", 12.0));
         assert!(w.is_hallucination(&"OpenAI, ".repeat(40), 25.0));
+        assert!(w.is_hallucination("and the", 1.0));
+        assert!(w.is_hallucination("And the.", 2.0));
+        assert!(!w.is_hallucination("and the", 6.0), "a long clip is not silence");
+        assert!(!w.is_hallucination("Use the cache", 1.5));
         assert!(!w.is_hallucination("Мы используем Kafka, а не Kafka Streams, и Kafka Connect отдельно", 6.0));
     }
 
