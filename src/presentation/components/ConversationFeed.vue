@@ -447,7 +447,7 @@ function rememberStickToBottomIfCurrentlyPinned(): void {
 watch(latestAssistantMessageId, (id, previousId) => {
   if (!id || id === previousId || userScrollIntent || (!previousId && !isAssistantStreaming.value)) return;
   answerAnchorId = id;
-  answerAnchorOffset = (scrollEl.value?.clientHeight ?? 0) * 0.42;
+  answerAnchorOffset = (scrollEl.value?.clientHeight ?? 0) * 0.32;
   frozenScrollTop = scrollEl.value?.scrollTop ?? 0;
   wasNearBottom = false;
   shouldStickToBottomAfterRender = false;
@@ -603,12 +603,6 @@ onUnmounted(() => {
           <template v-else>
             <span v-if="msg.kind === 'mic'" class="chat-icon mdi mdi-microphone" />
             <span v-if="msg.kind === 'signal'" class="chat-icon mdi mdi-message-text-outline" />
-            <span
-              v-if="(msg.kind === 'stt' || msg.kind === 'mic') && msg.status === 'streaming'"
-              class="chat-preview-label"
-              title="Распознавание продолжается, текст может измениться"
-            >предварительно</span>
-
             <template v-if="editingMessageId === msg.id">
               <span
                 class="chat-text chat-text-editable"
@@ -932,7 +926,7 @@ onUnmounted(() => {
 }
 
 .chat-bubble.clickable:hover {
-  background: rgba(255, 255, 255, 0.1);
+  filter: brightness(0.9);
 }
 
 .chat-row.anchor .chat-bubble {
@@ -968,15 +962,6 @@ onUnmounted(() => {
   font-size: 16px;
   opacity: 0.9;
   margin-right: 6px;
-}
-
-.chat-preview-label {
-  display: inline-block;
-  margin-right: 6px;
-  font-size: 0.72em;
-  line-height: 1.2;
-  opacity: 0.65;
-  vertical-align: baseline;
 }
 
 .chat-text {
@@ -1341,10 +1326,21 @@ onUnmounted(() => {
   font-size: var(--chat-inline-code-font-size, 0.92em);
   padding: 1px 5px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.16);
+  color: #f4f8ff;
   white-space: break-spaces;
   word-break: break-word;
   overflow-wrap: anywhere;
+}
+
+.theme-light .chat-markdown :deep(code) {
+  background: rgba(15, 23, 42, 0.12);
+  color: #172033;
+}
+
+.chat-markdown :deep(.code-block pre code) {
+  background: transparent;
+  color: inherit;
 }
 
 .chat-markdown :deep(a) {

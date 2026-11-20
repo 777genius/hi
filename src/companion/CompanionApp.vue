@@ -288,6 +288,19 @@ function clearSelectedMessages(): void {
   selectedMessageIds.value = [];
 }
 
+function onOutsideFeedMessageClick(event: MouseEvent): void {
+  const target = event.target as HTMLElement | null;
+  // Action controls can send the selected messages as context on this same click.
+  if (target?.closest('.chat-bubble, button, [role="button"], a, input, textarea, select, [contenteditable="true"]')) return;
+  clearSelectedMessages();
+
+  const selection = window.getSelection?.();
+  const anchor = selection?.anchorNode;
+  if (selection && anchor && scrollEl.value?.contains(anchor)) {
+    selection.removeAllRanges();
+  }
+}
+
 function isFeedMessageSelected(id: string): boolean {
   return selectedMessageIdSet.value.has(id);
 }
@@ -1191,7 +1204,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main class="companion-page">
+  <main class="companion-page" @click.capture="onOutsideFeedMessageClick">
     <section class="companion-shell" :class="{ 'feed-scrolled': feedScrolledDown }">
         <div
           v-if="showTopConnectionStatus"

@@ -312,12 +312,12 @@ const CODE_EXPLAIN_SYSTEM_PROMPT = `Ты — ассистент на техни�
 
 Твоя задача:
 1) Понять, что пользователь хочет про выделенный фрагмент: объяснить, исправить, улучшить, ответить на вопрос, или дать краткий разбор.
-2) Дать лучший краткий ответ по делу (без воды), используя контекст чата, но не пересказывая его целиком.
-3) Если запрос неясен из-за распознавания/обрывков — задай 1 уточняющий вопрос и предложи 1–2 вероятные интерпретации.
+2) Дать ясный ответ по делу, используя контекст чата, но не пересказывая его целиком.
+3) Если запрос неясен из-за распознавания/обрывков — выбери наиболее вероятный смысл и ответь прямо.
 
 Формат ответа:
-- Сначала 3–7 буллетов (каждый пункт начинай с "- ").
-- Затем (если нужно) короткий пример кода (в fenced-блоке).
+- Начни с краткой сути **жирным**, затем объясни важные детали разговорно и без переусложнения.
+- Используй список только для нескольких самостоятельных пунктов. Пример кода добавляй, когда он помогает ответу.
 
 Правила для кода:
 - Для упоминаний технических идентификаторов используй inline code (одинарные обратные кавычки).
@@ -1536,6 +1536,20 @@ const clearMessageSelection = () => {
   chatStore.clearSelection();
 };
 
+const onOutsideMessageClick = (event: MouseEvent) => {
+  const target = event.target as HTMLElement | null;
+  // Keep selected context until an action button has consumed it.
+  if (target?.closest('.chat-bubble, .code-selection-robot-button, button, [role="button"], a, input, textarea, select, [contenteditable="true"]')) return;
+  if (chatStore.selectedCount > 0) chatStore.clearSelection();
+
+  const selection = window.getSelection?.();
+  const anchor = selection?.anchorNode;
+  if (selection && anchor && chatScrollRef.value?.contains(anchor)) {
+    selection.removeAllRanges();
+    hideCodeSelectionUi();
+  }
+};
+
 const clearAllHistory = async () => {
   await runCompanionClear(CMD_COMPANION_CLEAR_HISTORY);
 };
@@ -1629,7 +1643,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 </script>
 
 <template>
-  <div class="popover-container">
+  <div class="popover-container" @click.capture="onOutsideMessageClick">
     <div class="popover">
       <div
         v-if="shouldShowSystemAudioPermissionWarning || shouldShowMicrophonePermissionWarning"

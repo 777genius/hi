@@ -8,7 +8,7 @@ describe('ConversationFeed assistant scrolling', () => {
     // jsdom has no layout: model an already centered row for the scroll-lock cases.
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
       const scroll = this.closest('.chat-scroll');
-      const top = this.matches('.chat-row') && scroll ? scroll.clientHeight * 0.42 : 0;
+      const top = this.matches('.chat-row') && scroll ? scroll.clientHeight * 0.32 : 0;
       return new DOMRect(0, top, 0, 0);
     });
   });
@@ -28,14 +28,14 @@ describe('ConversationFeed assistant scrolling', () => {
     });
     state.messages.push({ id: 'new', kind: 'haiku', role: 'incoming', status: 'streaming', text: 'First words', createdAtMs: 2, seq: 2 });
     await nextTick(); await nextTick(); await nextTick();
-    expect(scroll.scrollTop).toBe(1748); // top of answer at 252px = 42% of viewport
+    expect(scroll.scrollTop).toBe(1808); // top of answer at 192px = 32% of viewport
     answerTop = 1100; // older answer collapsed after rendering
     state.messages[1].text += ' more words';
     await nextTick(); await nextTick();
-    expect(scroll.scrollTop).toBe(848);
+    expect(scroll.scrollTop).toBe(908);
     state.messages[1].text += ' a much longer response';
     await nextTick(); await nextTick();
-    expect(scroll.scrollTop).toBe(848);
+    expect(scroll.scrollTop).toBe(908);
     scroll.dispatchEvent(new WheelEvent('wheel', { bubbles: true }));
     scroll.scrollTop = 950; scroll.dispatchEvent(new Event('scroll'));
     answerTop = 1000;
@@ -44,7 +44,7 @@ describe('ConversationFeed assistant scrolling', () => {
     expect(scroll.scrollTop).toBe(950);
     app.unmount(); host.remove();
   });
-  it('labels only live speech previews and removes the label when finalized', async () => {
+  it('shows live speech without a preview label', async () => {
     const state = reactive({ messages: [
       { id: 'stt', kind: 'stt', role: 'incoming', status: 'streaming', text: 'Visible question fragment', createdAtMs: 1, seq: 1 },
       { id: 'mic', kind: 'mic', role: 'outgoing', status: 'streaming', text: 'Visible microphone fragment', createdAtMs: 2, seq: 2 },
@@ -55,9 +55,9 @@ describe('ConversationFeed assistant scrolling', () => {
     const app = createApp({ render: () => h(ConversationFeed, { messages: state.messages, emptyText: '' }) });
     app.mount(host);
     await nextTick();
-    expect(host.querySelectorAll('.chat-preview-label')).toHaveLength(2);
+    expect(host.querySelectorAll('.chat-preview-label')).toHaveLength(0);
     expect(host.querySelector('[data-msg-id="stt"] .chat-text')?.textContent).toBe('Visible question fragment');
-    expect(host.querySelector('[data-msg-id="mic"] .chat-preview-label')?.textContent).toBe('предварительно');
+    expect(host.querySelector('[data-msg-id="mic"] .chat-text')?.textContent).toBe('Visible microphone fragment');
     expect(host.querySelector('[data-msg-id="answer"] .chat-preview-label')).toBeNull();
     state.messages[0].status = 'final';
     state.messages[1].status = 'final';
