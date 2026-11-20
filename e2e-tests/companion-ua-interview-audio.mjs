@@ -9,7 +9,8 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import process from 'node:process';
 import { CODE_IMAGES as DEFAULT_IMAGES, FINAL_RECALL_PROMPTS as DEFAULT_RECALL, TURNS as DEFAULT_TURNS } from './fixtures/ua-interview-script.mjs';
@@ -23,7 +24,7 @@ import { coverage } from './helpers/sttMatch.mjs';
 
 const BRIDGE_FILE = join(homedir(), 'Library/Application Support/HackInterview/companion_bridge.json');
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const o = {
     baseUrl: process.env.COMPANION_BASE_URL || 'http://127.0.0.1:43821',
     durationMin: 40,
@@ -44,6 +45,8 @@ function parseArgs(argv) {
     alternating: false,
     preserveHistory: false,
     strict: false,
+    tolerateTermErrors: false,
+    earlyReplyEvery: 0,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -63,6 +66,11 @@ function parseArgs(argv) {
     else if (a === '--alternating') o.alternating = true;
     else if (a === '--preserve-history') o.preserveHistory = true;
     else if (a === '--strict') o.strict = true;
+    else if (a === '--tolerate-term-errors') o.tolerateTermErrors = true;
+    else if (a === '--early-reply-every') {
+      o.earlyReplyEvery = Number(next());
+      if (!Number.isInteger(o.earlyReplyEvery) || o.earlyReplyEvery < 1) throw new Error('--early-reply-every requires a positive integer');
+    }
     else if (a === '--base-url') o.baseUrl = next();
     else throw new Error(`Unknown argument: ${a}`);
   }
@@ -94,6 +102,12 @@ function runSync(cmd, args) {
 // ---------- companion api ----------
 let TOKEN = '';
 let BASE = '';
+export function companionApiError(path, status = null) {
+  // Never persist query credentials, response bodies or underlying fetch errors.
+  const pathname = new URL(path, 'http://companion.local').pathname;
+  return new Error(`${pathname}: ${Number.isInteger(status) ? `HTTP ${status}` : 'transport failure'}`);
+}
+
 async function api(path, body) {
   const init = body === undefined
     ? {}
@@ -106,14 +120,26 @@ async function api(path, body) {
         },
         body: JSON.stringify(body),
       };
-  const res = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(60_000) });
-  const raw = await res.text();
+  let res;
+  let raw;
+  try {
+    res = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(60_000) });
+    // Failed response bodies can echo authentication credentials.
+    if (!res.ok) throw companionApiError(path, res.status);
+    raw = await res.text();
+  } catch {
+    throw companionApiError(path, res && !res.ok ? res.status : null);
+  }
   let payload = {};
   try { payload = raw ? JSON.parse(raw) : {}; } catch { payload = { text: raw }; }
-  if (!res.ok) throw new Error(`${path}: ${res.status} ${raw.slice(0, 300)}`);
   return payload.data ?? payload;
 }
-const getState = () => api(`/api/state?token=${encodeURIComponent(TOKEN)}`);
+let observeState = null;
+const getState = async () => {
+  const state = await api(`/api/state?token=${encodeURIComponent(TOKEN)}`);
+  observeState?.(state);
+  return state;
+};
 const maxSeq = (s) => Math.max(0, ...(s.timeline || []).map((m) => m.seq || 0));
 
 // ---------- text matching (устойчиво к ru/uk различиям STT) ----------
@@ -143,6 +169,66 @@ function keyScore(text, keys) {
   const h = norm(text);
   const hits = keys.filter((k) => keyHit(h, k));
   return { score: keys.length ? hits.length / keys.length : 1, hits, missed: keys.filter((k) => !hits.includes(k)) };
+}
+
+// A term mismatch is diagnostic under the explicit tolerance flag. Empty text,
+// lost coverage and invented suffixes remain failures in either mode.
+export function transcriptJunk(text) {
+  const raw = String(text || '');
+  const words = norm(raw).split(' ').filter(Boolean);
+  const glossaryEcho = /\bglossary\s*:/i.test(raw) || /(?:^|[.!?\n]\s*)glossary\b/i.test(raw.trim());
+  let repetitionLoop = /(?:\.([a-z0-9]{1,8}))(?:\.\1){3,}/i.test(raw);
+  for (let width = 1; width <= 12 && !repetitionLoop; width += 1) {
+    const repeats = width === 1 ? 5 : 3;
+    for (let start = 0; start + width * repeats <= words.length; start += 1) {
+      const phrase = words.slice(start, start + width).join(' ');
+      if (Array.from({ length: repeats - 1 }, (_, i) =>
+        words.slice(start + width * (i + 1), start + width * (i + 2)).join(' ') === phrase).every(Boolean)) {
+        repetitionLoop = true;
+        break;
+      }
+    }
+  }
+  return { glossaryEcho, repetitionLoop, junk: glossaryEcho || repetitionLoop };
+}
+
+export function transcriptAcceptance(text, score, terms, threshold, tolerateTermErrors) {
+  const junk = transcriptJunk(text);
+  const contentOk = Boolean(String(text || '').trim()) && score >= threshold && !junk.junk;
+  const termsOk = terms.every((term) => term.found);
+  return { ...junk, contentOk, termsOk, ok: contentOk && (tolerateTermErrors || termsOk) };
+}
+
+export function earlyReplyPreview(expectedQuestion, preview) {
+  const text = String(preview || '').trim();
+  const score = text ? coverage(expectedQuestion, text) : 0;
+  return { text, coverage: score, eligible: Boolean(text) && score >= 0.6,
+    skippedReason: !text ? 'empty-live-preview' : score < 0.6 ? 'insufficient-preview-coverage' : null };
+}
+
+// Actual snapshot identity fields: recording.activeSessionId and controls.instanceId/conversationGeneration.
+// Timeline message generation belongs to STT and is deliberately not session identity.
+export function recordingIdentity(state) {
+  return { activeSessionId: state.recording?.activeSessionId ?? null, instanceId: state.controls?.instanceId ?? null, conversationGeneration: state.controls?.conversationGeneration ?? null };
+}
+
+export function assertRecordingContinuity(expected, state) {
+  if (state.recording?.status !== 'Recording') throw new Error('Recording stopped');
+  const actual = recordingIdentity(state);
+  for (const key of ['activeSessionId', 'instanceId', 'conversationGeneration']) {
+    if (expected[key] !== null && actual[key] !== expected[key]) throw new Error(`Recording identity changed: ${key}`);
+  }
+}
+
+export function needsAnswerQualityReview(judgeEnabled, turns, recall, judgments = []) {
+  if (!judgeEnabled || judgments.some((item) => item.error) || recall.some((item) => !item.ok)) return true;
+  const answers = turns.filter((turn) => turn.aiRequested);
+  return answers.some((turn) => {
+    const judgment = judgments.find((item) => item.id === turn.id && !item.error);
+    return !turn.ai?.ok || turn.ai?.qualityNeedsReview || !judgment || Boolean(judgment.issue)
+      || ['correct', 'context', 'concise'].some((key) => judgment[key] !== 2)
+      || ['noQuestions', 'russian', 'firstPerson'].some((key) => judgment[key] !== true);
+  });
 }
 
 // ---------- audio ----------
@@ -238,8 +324,7 @@ async function waitForSystemFinal(afterSeq, timeoutMs) {
   return null;
 }
 
-async function waitForAnswer(afterSeq, timeoutMs) {
-  const start = Date.now();
+async function waitForAnswer(afterSeq, timeoutMs, start = Date.now()) {
   let last = null;
   let firstTextMs = null;
   while (Date.now() - start < timeoutMs) {
@@ -338,6 +423,9 @@ async function main() {
     turns: [],
     finalRecall: [],
     errors: [],
+    timingNote: 'observedAtMs and firstTextMs are polling observations; createdAtMs is the native segment timestamp, not a measured audio-end timestamp',
+    finalSegments: [],
+    idleFinals: [],
   };
 
   const startedMs = Date.now();
@@ -355,6 +443,34 @@ async function main() {
     log('recording', started.recording?.status, 'mic', JSON.stringify(started.microphone));
     if (started.recording?.status !== 'Recording') throw new Error('Recording did not start');
     const recordingStartedMs = Date.now();
+    report.recordingStartedAtMs = recordingStartedMs;
+    report.recordingIdentity = recordingIdentity(started);
+    let phase = 'warmup';
+    let activeTurnId = null;
+    const seenFinals = new Set();
+    const recordingBaseSeq = maxSeq(started);
+    observeState = (state) => {
+      if (o.strict) assertRecordingContinuity(report.recordingIdentity, state);
+      for (const item of state.timeline || []) {
+        if (item.seq <= recordingBaseSeq || item.status !== 'final' || !['stt', 'mic'].includes(item.kind)) continue;
+        // Revisions to a finalized segment must also be inspected.
+        const key = `${item.seq}:${item.text}`;
+        if (seenFinals.has(key)) continue;
+        seenFinals.add(key);
+        const segment = { ...item, observedAtMs: Date.now(), phase, turnId: activeTurnId, ...transcriptJunk(item.text) };
+        report.finalSegments.push(segment);
+        if (phase === 'idle' || phase === 'endurance' || phase === 'recall') report.idleFinals.push(segment);
+        if (o.strict && segment.junk) throw new Error(`Invented STT text in ${phase}: ${item.kind} seq=${item.seq}: ${String(item.text).slice(0, 160)}`);
+      }
+    };
+    // Poll during gaps so final text emitted between turns is retained and checked.
+    const monitoredSleep = async (ms) => {
+      const until = Date.now() + ms;
+      while (Date.now() < until) {
+        await sleep(Math.min(1000, until - Date.now()));
+        await getState();
+      }
+    };
     // прогрев STT: играем короткую реплику, пока не придёт первый финал в системном канале
     {
       const warmWav = join(audioDir, 'warmup.wav');
@@ -374,6 +490,8 @@ async function main() {
     for (let idx = 0; idx < turns.length; idx += 1) {
       const t = turns[idx];
       const f = audio[idx];
+      activeTurnId = t.id;
+      phase = 'turn';
       const turnStart = Date.now();
       const before = await getState();
       if (before.recording?.status !== 'Recording') {
@@ -392,13 +510,7 @@ async function main() {
         await sleep(3000);
       }
       const baseSeq = maxSeq(before);
-      const rec = { id: t.id, baseSeq, q: t.q, qSpeech: t.qSpeech || t.q, a: t.a, aSpeech: t.aSpeech || t.a, aiRequested: false };
-
-      // 1) интервьюер говорит в системный звук
-      log(`turn ${t.id}/${turns.length}: interviewer (${f.qSec.toFixed(1)}s)`);
-      await playSystem(f.qWav);
-      const heardQ = await waitForSystemFinal(baseSeq, 20_000);
-      rec.questionHeardAfterMs = heardQ ? Date.now() - turnStart : null;
+      const rec = { id: t.id, baseSeq, q: t.q, qSpeech: t.qSpeech || t.q, a: t.a, aSpeech: t.aSpeech || t.a, aiRequested: false, startedAtMs: turnStart, audio: { questionDurationMs: f.qSec * 1000, answerDurationMs: f.aSec * 1000 } };
 
       // 2) LLM-ответ на вопрос (пока кандидат "думает/отвечает")
       let aiPromise = null;
@@ -407,6 +519,9 @@ async function main() {
         const s = await getState();
         aiBaseSeq = maxSeq(s);
         rec.aiRequested = true;
+        rec.aiRequestedAtMs = Date.now();
+        rec.submittedBeforePlaybackEnd = rec.audio.questionFinishedAtMs == null;
+        if (rec.earlyAttempt && !rec.submittedBeforePlaybackEnd && !rec.earlySkippedReason) rec.earlySkippedReason = 'playback-ended-before-submit';
         if (t.image && !o.skipImages) {
           const png = await readFile(join(imagesDir, `${t.image.id}.png`));
           await api('/api/prompt/send', {
@@ -422,7 +537,7 @@ async function main() {
           return null;
         }
         const expect = t.image && !o.skipImages ? t.image.expect : t.llm.expect;
-        const answer = await waitForAnswer(aiBaseSeq, o.aiTimeoutMs);
+        const answer = await waitForAnswer(aiBaseSeq, o.aiTimeoutMs, rec.aiRequestedAtMs);
         const text = answer.item?.text || '';
         const sc = keyScore(text, expect);
         // Ключи на латинице, а ответ русский с вкраплениями терминов: достаточно одного совпадения, смысл оценивается по транскриптам.
@@ -432,6 +547,7 @@ async function main() {
           timedOut: Boolean(answer.timedOut),
           latencyMs: answer.latencyMs,
           firstTextMs: answer.firstTextMs,
+          finalMs: Date.now() - rec.aiRequestedAtMs,
           chars: text.length,
           expect,
           hits: sc.hits,
@@ -441,13 +557,52 @@ async function main() {
           text,
         };
       };
-      if (t.llm || (t.image && !o.skipImages)) aiPromise = sendAi().catch((e) => ({ status: 'exception', ok: false, error: String(e.message || e), text: '' }));
+      // A memoized request promise prevents the early and normal paths sending twice.
+      const startAiOnce = () => {
+        if (!aiPromise) aiPromise = sendAi().catch((e) => ({ status: 'exception', ok: false, error: String(e.message || e), text: '' }));
+        return aiPromise;
+      };
+      const earlyScheduled = o.earlyReplyEvery > 0 && (idx + 1) % o.earlyReplyEvery === 0;
+      const earlyEligible = earlyScheduled && Boolean(t.llm) && !(t.image && !o.skipImages);
+      rec.earlyAttempt = earlyEligible;
+      rec.earlySkippedReason = !o.earlyReplyEvery ? 'disabled' : !earlyScheduled ? 'not-scheduled' : !t.llm ? 'not-llm-turn' : t.image && !o.skipImages ? 'image-prompt' : null;
+
+      // Keep actual question audio running while inspecting its live system preview.
+      log(`turn ${t.id}/${turns.length}: interviewer (${f.qSec.toFixed(1)}s)`);
+      rec.audio.questionStartedAtMs = Date.now();
+      const playback = playSystem(f.qWav).then(
+        () => { rec.audio.questionFinishedAtMs = Date.now(); return { error: null }; },
+        (error) => { rec.audio.questionFinishedAtMs = Date.now(); return { error }; },
+      );
+      try {
+        if (earlyEligible) {
+          await sleep(f.qSec * 1000 * 0.8);
+          const previewState = await getState();
+          rec.earlyPreviewObservedAtMs = Date.now();
+          rec.earlyPreview = earlyReplyPreview(t.q, previewState.live?.partialText);
+          rec.earlySkippedReason = rec.audio.questionFinishedAtMs != null ? 'playback-already-ended' : rec.earlyPreview.skippedReason;
+          if (rec.earlyPreview.eligible && rec.audio.questionFinishedAtMs == null) startAiOnce();
+        }
+      } finally {
+        // Both success and failure are joined even if preview inspection throws.
+        const result = await playback;
+        if (result.error) throw result.error;
+      }
+      const heardQ = await waitForSystemFinal(baseSeq, 20_000);
+      rec.questionHeardAfterMs = heardQ ? Date.now() - turnStart : null;
+      rec.questionFinalObservedAtMs = heardQ ? Date.now() : null;
+      rec.questionFinalAfterPlaybackMs = heardQ ? Date.now() - rec.audio.questionFinishedAtMs : null;
+      if (t.llm || (t.image && !o.skipImages)) startAiOnce();
 
       await sleep(1800);
 
       // 3) кандидат отвечает в микрофон (BlackHole)
       log(`turn ${t.id}: candidate (${f.aSec.toFixed(1)}s)${rec.aiRequested || aiPromise ? ' + LLM' : ''}`);
-      if (!o.alternating || !t.llm) await playMic(f.aPcm, o.blackhole);
+      if (!o.alternating || !t.llm) {
+        rec.audio.answerStartedAtMs = Date.now();
+        await playMic(f.aPcm, o.blackhole);
+        rec.audio.answerFinishedAtMs = Date.now();
+      }
       await sleep(4500);
       if (aiPromise) {
         rec.ai = await aiPromise;
@@ -471,25 +626,30 @@ async function main() {
       });
       rec.systemTerms = termChecks(t.systemTerms, sys);
       rec.micTerms = o.alternating && t.llm ? [] : termChecks(t.micTerms, mic);
-      // Coverage alone misses an unrelated hallucinated suffix after correct speech.
-      const hasRepetitionLoop = (text) => /(?:\.([a-z0-9]{1,8}))(?:\.\1){7,}/i.test(text) || /\b([\p{L}\p{N}]+)(?:[\s,]+\1){7,}\b/iu.test(text);
-      rec.systemRepetitionLoop = hasRepetitionLoop(sys);
-      rec.micRepetitionLoop = hasRepetitionLoop(mic);
+      rec.systemAcceptance = transcriptAcceptance(sys, rec.systemQ.score, rec.systemTerms, o.sttMatchThreshold, o.tolerateTermErrors);
+      rec.micAcceptance = transcriptAcceptance(mic, rec.micA.score, rec.micTerms, o.sttMatchThreshold, o.tolerateTermErrors);
+      rec.systemRepetitionLoop = rec.systemAcceptance.repetitionLoop;
+      rec.micRepetitionLoop = rec.micAcceptance.repetitionLoop;
       rec.repetitionLoop = rec.systemRepetitionLoop || rec.micRepetitionLoop;
-      rec.systemOk = rec.systemQ.score >= o.sttMatchThreshold && !rec.systemRepetitionLoop && rec.systemTerms.every((term) => term.found);
-      rec.micOk = o.alternating && t.llm ? null : rec.micA.score >= o.sttMatchThreshold && !rec.micRepetitionLoop && rec.micTerms.every((term) => term.found);
+      rec.systemOk = rec.systemAcceptance.ok;
+      rec.micOk = o.alternating && t.llm ? null : rec.micAcceptance.ok;
+      rec.finalSegments = report.finalSegments.filter((segment) => segment.seq > baseSeq);
+      rec.finishedAtMs = Date.now();
       rec.elapsedSec = (Date.now() - turnStart) / 1000;
       report.turns.push(rec);
       await writeFile(join(outDir, 'report.partial.json'), JSON.stringify(report, null, 2));
       log(`turn ${t.id}: system ${rec.systemQ.score.toFixed(2)} mic ${rec.micA.score.toFixed(2)} leakA->sys ${rec.leakA_in_system.toFixed(2)}`);
-      if (o.strict && (!rec.systemOk || rec.micOk === false || rec.repetitionLoop || rec.systemTerms.some((term) => !term.found) || rec.micTerms.some((term) => !term.found) || (rec.aiRequested && (rec.ai?.status !== 'final' || !rec.ai?.text)))) throw new Error(`Strict turn failure ${t.id}: system=${rec.systemQ.score.toFixed(2)} mic=${rec.micOk} repetition=${rec.repetitionLoop} missing=${[...rec.systemTerms, ...rec.micTerms].filter((term) => !term.found).map((term) => term.term).join(',')} AI=${rec.ai?.status || 'not requested'}`);
+      if (o.strict && (!rec.systemOk || rec.micOk === false || rec.repetitionLoop || (rec.aiRequested && (!rec.ai?.ok || rec.ai?.timedOut)))) throw new Error(`Strict turn failure ${t.id}: system=${rec.systemQ.score.toFixed(2)} mic=${rec.micOk} repetition=${rec.repetitionLoop} missing=${[...rec.systemTerms, ...rec.micTerms].filter((term) => !term.found).map((term) => term.term).join(',')} AI=${rec.ai?.status || 'not requested'}`);
 
       // 4) пауза до следующего вопроса, чтобы уложиться в бюджет времени
       const targetEnd = startedMs + ((idx + 1) / turns.length) * (budgetSec - 150) * 1000 + 8000;
       const wait = Math.max(gapSec * 1000 * 0.5, targetEnd - Date.now());
-      if (idx < turns.length - 1) await sleep(Math.min(wait, gapSec * 1000 * 2.5));
+      phase = 'idle';
+      activeTurnId = null;
+      if (idx < turns.length - 1) await monitoredSleep(Math.min(wait, gapSec * 1000 * 2.5));
     }
 
+    phase = 'endurance';
     if (o.strict) {
       while (Date.now() - recordingStartedMs < budgetSec * 1000) {
         const current = await getState();
@@ -499,13 +659,15 @@ async function main() {
       report.continuousRecordingMs = Date.now() - recordingStartedMs;
     }
 
+    phase = 'recall';
     // финальные проверки памяти контекста
     for (const p of FINAL_RECALL_PROMPTS) {
       log(`final recall: ${p.id}`);
       const s = await getState();
       const base = maxSeq(s);
+      const requestedAtMs = Date.now();
       await api('/api/prompt/send', { text: p.text });
-      const answer = await waitForAnswer(base, o.aiTimeoutMs);
+      const answer = await waitForAnswer(base, o.aiTimeoutMs, requestedAtMs);
       const text = answer.item?.text || '';
       const sc = keyScore(text, p.expect);
       report.finalRecall.push({
@@ -513,6 +675,9 @@ async function main() {
         prompt: p.text,
         status: answer.item?.status || 'none',
         latencyMs: answer.latencyMs,
+        firstTextMs: answer.firstTextMs,
+        finalMs: answer.latencyMs,
+        timedOut: Boolean(answer.timedOut),
         hits: sc.hits,
         missed: sc.missed,
         ok: answer.item?.status === 'final' && sc.hits.length >= p.minHits,
@@ -524,6 +689,7 @@ async function main() {
     report.errors.push(String(error.stack || error));
     log('ERROR', error.message || error);
   } finally {
+    observeState = null;
     await api('/api/record/stop', {}).catch((e) => report.errors.push(`stop: ${e.message}`));
     await restore();
   }
@@ -555,16 +721,24 @@ async function main() {
     systemOk: ts.filter((t) => t.systemOk).length,
     micOk: ts.filter((t) => t.micOk).length,
     micTurns: micTurns.length,
+    acceptanceCriterion: o.tolerateTermErrors ? 'content-and-transport-with-term-mismatches-reported' : 'content-transport-and-keyterms',
+    verbatimFidelityVerified: false,
+    contentFailures: ts.filter((t) => !t.systemAcceptance?.contentOk || (t.micOk !== null && !t.micAcceptance?.contentOk)).length,
+    junkSegments: report.finalSegments.filter((segment) => segment.junk).length,
+    idleFinals: report.idleFinals.length,
     sttFailures: ts.filter((t) => !t.systemOk || t.micOk === false).length,
+    termFidelityFailures: ts.filter((t) => !t.systemAcceptance?.termsOk || (t.micOk !== null && !t.micAcceptance?.termsOk)).length,
     missingTerms: ts.flatMap((t) => [...(t.systemTerms || []), ...(t.micTerms || [])]).filter((term) => !term.found).length,
     continuousRecordingMs: report.continuousRecordingMs ?? null,
-    answerQualityReviewRequired: !o.judge,
+    answerQualityReviewRequired: needsAnswerQualityReview(o.judge, ts, report.finalRecall, report.judge),
     avgSystemScore: avg(ts.map((t) => t.systemQ?.score ?? 0)),
     avgMicScore: avg(micTurns.map((t) => t.micA?.score ?? 0)),
     avgLeakCandidateIntoSystem: avg(ts.map((t) => t.leakA_in_system ?? 0)),
+    earlyReplyAttempts: ts.filter((t) => t.earlyAttempt).length,
+    earlyRepliesSubmitted: ts.filter((t) => t.submittedBeforePlaybackEnd).length,
     aiTurns: aiTurns.length,
     aiOk: aiTurns.filter((t) => t.ai?.ok).length,
-    aiErrors: aiTurns.filter((t) => t.ai?.status !== 'final').length,
+    aiErrors: aiTurns.filter((t) => !t.ai?.ok || t.ai?.timedOut).length,
     avgAiLatencySec: avg(aiTurns.map((t) => (t.ai?.latencyMs || 0) / 1000)),
     answersUk: [...aiTurns.map((t) => t.ai?.meta), ...report.finalRecall.map((r) => r.meta)].filter((m) => m?.lang === 'uk').length,
     answersRu: [...aiTurns.map((t) => t.ai?.meta), ...report.finalRecall.map((r) => r.meta)].filter((m) => m?.lang === 'ru').length,
@@ -579,7 +753,7 @@ async function main() {
   await writeFile(join(outDir, 'report.md'), renderMarkdown(report));
   log('SUMMARY', JSON.stringify(report.summary));
   log('report:', join(outDir, 'report.md'));
-  process.exit(report.errors.length || (report.incidents || []).length || report.summary.sttFailures || report.summary.aiErrors ? 1 : 0);
+  process.exit(report.errors.length || (report.incidents || []).length || report.summary.sttFailures || report.summary.junkSegments || report.summary.aiErrors || report.finalRecall.some((r) => !r.ok) ? 1 : 0);
 }
 
 
@@ -682,7 +856,9 @@ function renderMarkdown(r) {
   return L.join('\n');
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

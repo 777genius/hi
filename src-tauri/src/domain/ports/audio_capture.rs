@@ -55,4 +55,11 @@ pub trait AudioCapture: Send + Sync {
     fn supports_quiet_refresh(&self) -> bool {
         false
     }
+
+    /// Age of the last native buffer after this capture established healthy
+    /// delivery. None means the source is unarmed or cannot report liveness.
+    /// A gap is a recovery hint, not proof of a fault: sources may become idle.
+    fn capture_starvation_ms(&self) -> Option<u64> {
+        None
+    }
 }

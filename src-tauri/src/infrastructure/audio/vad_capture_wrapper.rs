@@ -208,6 +208,9 @@ impl AudioCapture for VadCaptureWrapper {
     fn supports_quiet_refresh(&self) -> bool {
         self.inner.supports_quiet_refresh()
     }
+    fn capture_starvation_ms(&self) -> Option<u64> {
+        self.inner.capture_starvation_ms()
+    }
 }
 
 #[cfg(test)]

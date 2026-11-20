@@ -2,7 +2,8 @@ import {appendFile,mkdir} from 'node:fs/promises';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 const exec=promisify(execFile);
-await mkdir('artifacts/flutter-soak',{recursive:true});
+const artifactDir=process.env.FLUTTER_SOAK_ARTIFACTS_DIR || 'artifacts/flutter-soak';
+await mkdir(artifactDir,{recursive:true});
 let stop=false; process.on('SIGTERM',()=>{stop=true});process.on('SIGINT',()=>{stop=true});
 while(!stop){
  const at=new Date().toISOString();
@@ -12,8 +13,8 @@ while(!stop){
   const {stdout}=await exec('docker',['exec','hackinterview-sub2api-postgres-1','psql','-U','sub2api','-d','sub2api','-t','-A','-F','|','-c','SELECT id,account_id,model,first_token_ms,duration_ms,input_tokens,cache_read_tokens,created_at FROM usage_logs ORDER BY id DESC LIMIT 1'],{timeout:10000});
   const {stdout:processStats}=await exec('ps',['-Ao','pid,pcpu,rss,comm'],{timeout:5000});
   const core=processStats.split('\n').find(line=>line.includes('/HackInterviewCore'))?.trim()??null;
-  const record={at,httpStatus:health.status,responseMs,lastUsage:stdout.trim(),core};await appendFile('artifacts/flutter-soak/service-monitor.jsonl',JSON.stringify(record)+'\n');
+  const record={at,httpStatus:health.status,responseMs,lastUsage:stdout.trim(),core};await appendFile(`${artifactDir}/service-monitor.jsonl`,JSON.stringify(record)+'\n');
   if(!health.ok)console.error(JSON.stringify(record));
- } catch(e){const record={at,error:String(e)};await appendFile('artifacts/flutter-soak/service-monitor.jsonl',JSON.stringify(record)+'\n');console.error(JSON.stringify(record));}
+ } catch(e){const record={at,error:String(e)};await appendFile(`${artifactDir}/service-monitor.jsonl`,JSON.stringify(record)+'\n');console.error(JSON.stringify(record));}
  await new Promise(r=>setTimeout(r,30000));
 }
