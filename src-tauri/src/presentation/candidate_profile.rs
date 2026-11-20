@@ -74,6 +74,11 @@ pub(crate) fn with_candidate_profile_text(system_prompt: String, profile: Option
 /// Дописывает профиль кандидата в КОНЕЦ системного промпта (стабильный префикс лучше для prompt cache).
 /// Нет файла или он пуст: промпт возвращается без изменений.
 pub fn with_candidate_profile(system_prompt: String) -> String {
+    // An explicitly selected resume is authoritative; do not append the legacy
+    // global profile as a second, potentially conflicting candidate biography.
+    if system_prompt.contains("<resume>") && system_prompt.contains("</resume>") {
+        return remove_existing_block(&system_prompt);
+    }
     let profile = profile_path().and_then(|path| match std::fs::read_to_string(&path) {
         Ok(text) => Some(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,

@@ -2,7 +2,7 @@
 //! One line per term: `Canonical term = heard variant | another variant`.
 use std::path::PathBuf;
 
-const MAX_RULES: usize = 400;
+const MAX_RULES: usize = 800;
 const MAX_ALIASES_PER_RULE: usize = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,13 +24,22 @@ impl LocalGlossary {
             return Self::default();
         };
         match std::fs::read_to_string(&path) {
-            Ok(source) => Self::parse(&source),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Ok(source) => Self::from_profile_source(source),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::from_profile_source(String::new()),
             Err(error) => {
                 log::warn!("Could not read local STT glossary at {}: {error}", path.display());
                 Self::default()
             }
         }
+    }
+
+    fn from_profile_source(mut source: String) -> Self {
+        let selected = dirs::config_dir().and_then(|root| std::fs::read_to_string(root.join("HackInterview/stt_profile.txt")).ok());
+        let flutter_profile = selected.as_deref().map(str::trim) == Some("flutter");
+        if flutter_profile {
+            source = format!("{}\n{}", include_str!("flutter_glossary.txt"), source);
+        }
+        Self::parse(&source)
     }
 
     pub fn path() -> Option<PathBuf> {

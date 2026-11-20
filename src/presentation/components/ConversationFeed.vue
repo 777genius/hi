@@ -56,7 +56,10 @@ let resumeAfterUserScroll = false;
 let frozenScrollTop: number | null = null;
 let userScrollIntent = false;
 let lastScrollTop = 0;
+let scrollResizeObserver: ResizeObserver | null = null;
 let wasNearBottom = true;
+let answerAnchorId: string | null = null;
+let answerAnchorOffset = 0;
 
 defineExpose({
   scrollEl,
@@ -201,7 +204,7 @@ function expandCollapsedMessage(message: ConversationFeedMessage, event: MouseEv
 function renderHaikuMarkdown(text: string): string {
   const answer = String(text ?? '').trim();
   const singleBullet = answer.match(/^[-*•]\s+([^\n]+)$/);
-  return renderMarkdownToSafeHtml(singleBullet ? singleBullet[1] : answer);
+  return renderMarkdownToSafeHtml(singleBullet ? singleBullet[1] : answer, { answerSentences: true });
 }
 
 function candidateList(message: ConversationFeedMessage) {
@@ -269,7 +272,7 @@ function rowClasses(message: ConversationFeedMessage): Record<string, boolean> {
 }
 
 function isMessageClickable(message: ConversationFeedMessage): boolean {
-  return props.messagesClickable && message.kind !== 'haiku' && !message.deleted && message.status === 'final';
+  return props.messagesClickable && !message.deleted && message.status === 'final';
 }
 
 function onMessageClick(event: MouseEvent, message: ConversationFeedMessage): void {
@@ -365,7 +368,7 @@ function scheduleScrollStateUpdate(): void {
 
 function onScroll(): void {
   const element = scrollEl.value;
-  if (element && !shouldStickToBottomAfterRender && !isAssistantStreaming.value) {
+  if (element && !shouldStickToBottomAfterRender && !isAssistantStreaming.value && frozenScrollTop === null) {
     wasNearBottom = isNearBottom(element);
   }
   if (isAssistantStreaming.value && userScrollIntent && element && !resumeAfterUserScroll) {
@@ -384,11 +387,36 @@ function onScroll(): void {
   updateScrollToBottomVisibility();
 }
 
+function restoreFrozenScroll(): void {
+  const element = scrollEl.value;
+  if (!element || frozenScrollTop === null) return;
+  if (answerAnchorId) {
+    const row = Array.from(element.querySelectorAll<HTMLElement>('[data-msg-id]'))
+      .find((item) => item.dataset.msgId === answerAnchorId);
+    if (row) {
+      const leading = Number.parseFloat(element.style.getPropertyValue('--chat-scroll-answer-leading')) || 0;
+      const rowTop = row.getBoundingClientRect().top - element.getBoundingClientRect().top + element.scrollTop;
+      const neededLeading = Math.max(0, answerAnchorOffset - (rowTop - leading));
+      element.style.setProperty('--chat-scroll-answer-leading', `${neededLeading}px`);
+      frozenScrollTop = Math.max(0, rowTop + neededLeading - leading - answerAnchorOffset);
+    }
+  }
+  // A capped history or collapsed answer can shrink the scroll range during a response.
+  // Retain enough trailing space so the browser cannot clamp the saved position.
+  const spacer = Number.parseFloat(element.style.getPropertyValue('--chat-scroll-freeze-extra')) || 0;
+  const needed = Math.max(0, frozenScrollTop + element.clientHeight - (element.scrollHeight - spacer));
+  element.style.setProperty('--chat-scroll-freeze-extra', `${needed}px`);
+  element.scrollTop = frozenScrollTop;
+}
+
 function onUserScrollIntent(): void {
+  answerAnchorId = null;
   userScrollIntent = true;
+  if (!isAssistantStreaming.value) frozenScrollTop = null;
 }
 
 function scrollToBottom(behavior: ScrollBehavior = 'smooth'): void {
+  answerAnchorId = null;
   const element = scrollEl.value;
   if (!element) return;
 
@@ -416,10 +444,40 @@ function rememberStickToBottomIfCurrentlyPinned(): void {
   scheduleStickToBottomAfterRender();
 }
 
+watch(latestAssistantMessageId, (id, previousId) => {
+  if (!id || id === previousId || userScrollIntent || (!previousId && !isAssistantStreaming.value)) return;
+  answerAnchorId = id;
+  answerAnchorOffset = (scrollEl.value?.clientHeight ?? 0) * 0.32;
+  frozenScrollTop = scrollEl.value?.scrollTop ?? 0;
+  wasNearBottom = false;
+  shouldStickToBottomAfterRender = false;
+  void nextTick(() => {
+    observeAnswerLayout();
+    restoreFrozenScroll();
+  });
+}, { flush: 'post' });
+
+function observeAnswerLayout(): void {
+  const element = scrollEl.value;
+  if (!element || !scrollResizeObserver) return;
+  // Observe actual row geometry: collapse/highlighting can settle after Vue's render.
+  scrollResizeObserver.disconnect();
+  scrollResizeObserver.observe(element);
+  if (answerAnchorId) {
+    for (const row of element.querySelectorAll<HTMLElement>('[data-msg-id]')) {
+      scrollResizeObserver.observe(row);
+      if (row.dataset.msgId === answerAnchorId) break;
+    }
+  }
+}
+
 watch(isAssistantStreaming, (streaming) => {
   resumeAfterUserScroll = false;
   userScrollIntent = false;
-  frozenScrollTop = streaming ? (scrollEl.value?.scrollTop ?? null) : null;
+  if (streaming) {
+    answerAnchorId = null;
+    frozenScrollTop = scrollEl.value?.scrollTop ?? null;
+  }
   shouldStickToBottomAfterRender = false;
   if (streaming) wasNearBottom = false;
 }, { flush: 'sync' });
@@ -443,6 +501,11 @@ function scheduleStickToBottomAfterRender(): void {
 watch(
   scrollEl,
   (element, previous) => {
+    scrollResizeObserver?.disconnect();
+    if (element && typeof ResizeObserver !== 'undefined') {
+      scrollResizeObserver = new ResizeObserver(() => restoreFrozenScroll());
+      scrollResizeObserver.observe(element);
+    }
     previous?.removeEventListener('scroll', onScroll);
     element?.addEventListener('scroll', onScroll, { passive: true });
     if (element) wasNearBottom = isNearBottom(element);
@@ -458,7 +521,7 @@ watch(
     if (isAssistantStreaming.value && !resumeAfterUserScroll && frozenScrollTop !== null) {
       void nextTick(() => {
         if (isAssistantStreaming.value && !resumeAfterUserScroll && scrollEl.value) {
-          scrollEl.value.scrollTop = frozenScrollTop!;
+          restoreFrozenScroll();
         }
       });
     }
@@ -494,6 +557,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  scrollResizeObserver?.disconnect();
   scrollEl.value?.removeEventListener('scroll', onScroll);
   if (typeof window !== 'undefined') {
     window.removeEventListener('resize', scheduleScrollStateUpdate);
@@ -507,7 +571,7 @@ onUnmounted(() => {
     <div
       ref="scrollEl"
       class="chat-scroll"
-      :class="{ 'scroll-frozen': assistantStreaming && !resumeAfterUserScroll, selecting }"
+      :class="{ 'scroll-frozen': isAssistantStreaming && !resumeAfterUserScroll, selecting }"
       @mousedown="emit('scroll-mousedown', $event)"
       @wheel.passive="onUserScrollIntent"
       @touchmove.passive="onUserScrollIntent"
@@ -539,7 +603,6 @@ onUnmounted(() => {
           <template v-else>
             <span v-if="msg.kind === 'mic'" class="chat-icon mdi mdi-microphone" />
             <span v-if="msg.kind === 'signal'" class="chat-icon mdi mdi-message-text-outline" />
-
             <template v-if="editingMessageId === msg.id">
               <span
                 class="chat-text chat-text-editable"
@@ -631,6 +694,7 @@ onUnmounted(() => {
 <style scoped>
 .chat-area {
   --chat-sticky-footer-bottom: 30px;
+  --chat-scroll-end-space: 150px;
 
   min-height: 60px;
   min-width: 0;
@@ -651,11 +715,13 @@ onUnmounted(() => {
   overflow-y: auto;
   /* Сообщения вплотную к краям: исходящие к правому, входящие к левому. */
   padding: var(--chat-scroll-padding, var(--spacing-sm) 0);
+  padding-top: calc(var(--spacing-sm) + var(--chat-scroll-answer-leading, 0px));
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
   position: relative;
+  overflow-anchor: none;
 }
 
 .chat-scroll.scroll-frozen {
@@ -665,7 +731,7 @@ onUnmounted(() => {
 .chat-scroll::after {
   content: '';
   display: block;
-  flex: 0 0 var(--chat-scroll-end-space, 0px);
+  flex: 0 0 calc(var(--chat-scroll-end-space, 0px) + var(--chat-scroll-freeze-extra, 0px));
 }
 
 .chat-scroll.selecting {
@@ -813,8 +879,8 @@ onUnmounted(() => {
 }
 
 .chat-row.assistant-response .chat-bubble {
-  width: calc((100% - 32px) * var(--chat-bubble-width-scale, 1));
-  max-width: calc((100% - 32px) * var(--chat-bubble-width-scale, 1));
+  width: calc((100% - 10px) * var(--chat-bubble-width-scale, 1));
+  max-width: calc((100% - 10px) * var(--chat-bubble-width-scale, 1));
 }
 
 .chat-row.focus-copy .chat-bubble {
@@ -860,7 +926,7 @@ onUnmounted(() => {
 }
 
 .chat-bubble.clickable:hover {
-  background: rgba(255, 255, 255, 0.1);
+  filter: brightness(0.9);
 }
 
 .chat-row.anchor .chat-bubble {
@@ -1095,6 +1161,11 @@ onUnmounted(() => {
   margin: 4px 0;
 }
 
+.chat-markdown :deep(.answer-sentence) {
+  display: block;
+  text-indent: 0.75em;
+}
+
 .chat-markdown :deep(h1),
 .chat-markdown :deep(h2),
 .chat-markdown :deep(h3),
@@ -1255,10 +1326,21 @@ onUnmounted(() => {
   font-size: var(--chat-inline-code-font-size, 0.92em);
   padding: 1px 5px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.16);
+  color: #f4f8ff;
   white-space: break-spaces;
   word-break: break-word;
   overflow-wrap: anywhere;
+}
+
+.theme-light .chat-markdown :deep(code) {
+  background: rgba(15, 23, 42, 0.12);
+  color: #172033;
+}
+
+.chat-markdown :deep(.code-block pre code) {
+  background: transparent;
+  color: inherit;
 }
 
 .chat-markdown :deep(a) {
@@ -1414,12 +1496,12 @@ onUnmounted(() => {
   }
 
   .chat-row.outgoing .chat-bubble {
-    width: calc((100% - 28px) * var(--chat-bubble-width-scale, 1));
+    width: calc((100% - 9px) * var(--chat-bubble-width-scale, 1));
   }
 
   .chat-row.assistant-response .chat-bubble {
-    width: calc((100% - 28px) * var(--chat-bubble-width-scale, 1));
-    max-width: calc((100% - 28px) * var(--chat-bubble-width-scale, 1));
+    width: calc((100% - 9px) * var(--chat-bubble-width-scale, 1));
+    max-width: calc((100% - 9px) * var(--chat-bubble-width-scale, 1));
   }
 
   .chat-row.outgoing .chat-actions {
@@ -1456,8 +1538,24 @@ onUnmounted(() => {
   }
 
   .chat-row.assistant-response .chat-bubble {
-    width: calc((100% - 24px) * var(--chat-bubble-width-scale, 1));
-    max-width: calc((100% - 24px) * var(--chat-bubble-width-scale, 1));
+    width: calc((100% - 8px) * var(--chat-bubble-width-scale, 1));
+    max-width: calc((100% - 8px) * var(--chat-bubble-width-scale, 1));
   }
 }
+
+/* Symmetric edge gutter for incoming and outgoing messages. */
+.chat-row .chat-bubble { max-width: calc(100% - 10px); }
+.chat-row.outgoing .chat-bubble,
+.chat-row.assistant-response .chat-bubble,
+.chat-row.focus-copy .chat-bubble { width: calc(100% - 10px); max-width: calc(100% - 10px); }
+.chat-row .chat-bubble:has(.code-block),
+.chat-row .chat-bubble:has(.chat-collapsible-message) { padding-bottom: 0; overflow: hidden; }
+.chat-row .chat-bubble:has(.code-block) { padding: 0; }
+.chat-text-highlighted :deep(.code-block),
+.chat-markdown :deep(.code-block) { margin: 0; border-radius: inherit; }
+.chat-collapse-toggle { position: relative; bottom: 0; margin: 0 -10px; width: calc(100% + 20px); border-radius: 0; }
+.chat-text-highlighted :deep(.code-block-toggle),
+.chat-markdown :deep(.code-block-toggle) { position: relative !important; bottom: 0 !important; margin: 0; border-radius: 0; }
+.chat-text-highlighted :deep(.code-block-collapsible .shiki),
+.chat-markdown :deep(.code-block-collapsible pre) { padding-bottom: 0; margin-bottom: 0; }
 </style>

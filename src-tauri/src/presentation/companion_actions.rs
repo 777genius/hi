@@ -360,7 +360,8 @@ pub async fn request_ai(
         if context_text.trim().is_empty() {
             return noop(app_handle, "noop").await;
         }
-        let inferred_question = infer_hover_question_from_context(&context_text);
+        let inferred_question =
+            infer_hover_question_from_context(&context_text, selected_message_ids.is_some());
         let insert_after_id =
             crate::presentation::companion_timeline::resolve_insert_after_id(state).await;
         if let Some(inferred_question) = inferred_question {
@@ -592,30 +593,42 @@ async fn build_request_context(
         .await
 }
 
-fn infer_hover_question_from_context(context_text: &str) -> Option<String> {
-    context_text
-        .lines()
-        .rev()
-        .filter_map(context_line_as_current_request)
-        .find(|text| !is_farewell_request(text))
-}
+const INTERVIEWER_CONTEXT_REQUEST: &str = "Ответь на последний содержательный вопрос собеседника в строках ОС контекста. Учитывай предшествующие реплики и фрагменты этого вопроса, чтобы сохранить его тему и смысл. Последняя короткая реплика может быть продолжением, а не отдельным вопросом. Реплики МИКРОФОН используй как контекст ответа кандидата, а не как замену вопроса собеседника. Не отвечай на прощание вместо содержательного вопроса.";
+const SELECTED_CONTEXT_REQUEST: &str = "Ответь на запрос в выбранных сообщениях контекста, учитывая их вместе и сохраняя тему предшествующих фрагментов. Выбранные сообщения МИКРОФОН также могут содержать запрос пользователя.";
+const MICROPHONE_CONTEXT_REQUEST: &str = "Ответь на последний содержательный запрос в контексте, учитывая предшествующие реплики и фрагменты, чтобы сохранить его тему и смысл. Не отвечай на прощание вместо содержательного запроса.";
 
-fn context_line_as_current_request(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with("ПОМОЩНИК:") {
-        return None;
+fn infer_hover_question_from_context(context_text: &str, selected: bool) -> Option<String> {
+    if selected {
+        return (!context_text.trim().is_empty()).then(|| SELECTED_CONTEXT_REQUEST.to_string());
     }
 
+    let requests: Vec<_> = context_text
+        .lines()
+        .filter_map(context_line_as_current_request)
+        .filter(|(_, text)| !is_farewell_request(text))
+        .collect();
+    let (latest_source, latest_text) = requests.last()?;
+    // A typed prompt is already explicit. For speech, keep the full click-time
+    // context authoritative instead of promoting a possibly partial line to ЗАПРОС.
+    if *latest_source == "ЗАПРОС:" {
+        return Some(latest_text.to_string());
+    }
+    let instruction = if requests.iter().any(|(source, _)| *source == "ОС:") {
+        INTERVIEWER_CONTEXT_REQUEST
+    } else {
+        MICROPHONE_CONTEXT_REQUEST
+    };
+    Some(instruction.to_string())
+}
+
+fn context_line_as_current_request(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim();
     for prefix in ["ОС:", "МИКРОФОН:", "ЗАПРОС:"] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             let text = rest.trim();
-            if !text.is_empty() {
-                return Some(text.to_string());
-            }
-            return None;
+            return (!text.is_empty()).then_some((prefix, text));
         }
     }
-
     None
 }
 
@@ -639,7 +652,9 @@ fn is_farewell_request(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::infer_hover_question_from_context;
+    use super::{
+        infer_hover_question_from_context, INTERVIEWER_CONTEXT_REQUEST, SELECTED_CONTEXT_REQUEST,
+    };
 
     #[test]
     fn hover_question_skips_assistant_farewell_and_uses_latest_real_question() {
@@ -651,8 +666,8 @@ mod tests {
 "#;
 
         assert_eq!(
-            infer_hover_question_from_context(context),
-            Some("Расскажи про Salt Edge AI document verification.".to_string())
+            infer_hover_question_from_context(context, false),
+            Some(INTERVIEWER_CONTEXT_REQUEST.to_string())
         );
     }
 
@@ -664,8 +679,26 @@ mod tests {
 "#;
 
         assert_eq!(
-            infer_hover_question_from_context(context),
+            infer_hover_question_from_context(context, false),
             Some("объясни LangSmith eval framework".to_string())
+        );
+    }
+
+    #[test]
+    fn hover_question_keeps_interviewer_fragments_in_full_context_despite_later_microphone() {
+        let context = "ОС: Что такое контекст у AI?\nОС: Иногда переполняется... Что это?\nМИКРОФОН: ну да, сейчас\nПОМОЩНИК: старый ответ";
+        let request = infer_hover_question_from_context(context, false).unwrap();
+        assert_eq!(request, INTERVIEWER_CONTEXT_REQUEST);
+        assert_ne!(request, "Иногда переполняется... Что это?");
+        assert_ne!(request, "ну да, сейчас");
+    }
+
+    #[test]
+    fn hover_question_honors_selected_outgoing_context() {
+        let context = "ОС: старый вопрос\nМИКРОФОН: Объясни мой выбранный вариант решения";
+        assert_eq!(
+            infer_hover_question_from_context(context, true),
+            Some(SELECTED_CONTEXT_REQUEST.to_string())
         );
     }
 }

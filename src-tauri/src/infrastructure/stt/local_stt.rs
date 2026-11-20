@@ -136,13 +136,12 @@ fn is_filler_only(normalized: &str) -> bool {
         && normalized.split_whitespace().all(|word| WHISPER_FILLER_WORDS.contains(&word))
 }
 
-/// Whisper on silence can loop over its decoding vocabulary ("Glossary, Glossary, ...").
-/// Real speech never repeats one word this many times, whatever the clip length.
+/// Whisper on silence can loop over single words or whole vocabulary phrases.
 fn is_repetition_loop(text: &str) -> bool {
     const MIN_WORDS: usize = 6;
     let words: Vec<String> = text
-        .split_whitespace()
-        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(str::to_lowercase)
         .filter(|word| !word.is_empty())
         .collect();
     if words.len() < MIN_WORDS {
@@ -153,7 +152,33 @@ fn is_repetition_loop(text: &str) -> bool {
         *counts.entry(word.as_str()).or_insert(0usize) += 1;
     }
     let most = counts.values().copied().max().unwrap_or(0);
-    most >= MIN_WORDS && most * 10 >= words.len() * 7
+    if most >= MIN_WORDS && most * 10 >= words.len() * 7 {
+        return true;
+    }
+    // Require at least three complete copies, allowing an unfinished last copy.
+    // Two occurrences of a technical phrase in a real sentence are not a loop.
+    (2..=words.len() / 3).any(|period| {
+        words.iter().enumerate().all(|(i, word)| word == &words[i % period])
+    })
+}
+
+/// Older native Whisper prompts prepended "Glossary:" to the vocabulary.
+/// Recognize only its bare identifier-list echo, not sentences about a glossary
+/// or technical speech containing these same identifiers.
+fn is_glossary_list_echo(text: &str) -> bool {
+    let mut entries = text.trim().trim_end_matches([',', '.', ' ']).split([',', ':']);
+    if !entries.next().is_some_and(|label| label.trim().eq_ignore_ascii_case("glossary")) {
+        return false;
+    }
+    let mut count = 0;
+    for entry in entries {
+        let term = entry.trim();
+        if term.is_empty() || !term.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return false;
+        }
+        count += 1;
+    }
+    count >= 2
 }
 
 /// Weights + decode behaviour of one local model. Everything model-specific
@@ -279,7 +304,7 @@ impl LocalModel {
     }
 
     /// True when `text` is a known Whisper hallucination: punctuation-only
-    /// output, or a stock phrase ("Thank you for watching") on a short clip.
+    /// output, vocabulary echoes/loops, or a stock phrase on a short clip.
     fn is_hallucination(self, text: &str, duration_s: f64) -> bool {
         if !self.is_whisper() {
             return false;
@@ -290,6 +315,7 @@ impl LocalModel {
             .to_lowercase();
         normalized.is_empty()
             || is_repetition_loop(text)
+            || is_glossary_list_echo(text)
             || (duration_s <= WHISPER_HALLUCINATION_MAX_SECONDS && is_filler_only(&normalized))
             || (duration_s <= WHISPER_HALLUCINATION_MAX_SECONDS
                 && (WHISPER_HALLUCINATIONS.contains(&normalized.as_str())
@@ -641,7 +667,7 @@ impl SttProvider for LocalSttProvider {
                 if kind.is_hallucination(&text, duration_s) {
                     log::debug!("Dropped {} silence hallucination: {text:?}", kind.label());
                 } else if !text.is_empty() {
-                    let corrected = glossary.correct(&text);
+                    let corrected = LocalGlossary::load().correct(&text);
                     let mut transcription = if job.is_final {
                         Transcription::final_result(corrected)
                     } else {
@@ -904,6 +930,41 @@ mod tests {
         assert!(!w.is_hallucination("and the", 6.0), "a long clip is not silence");
         assert!(!w.is_hallucination("Use the cache", 1.5));
         assert!(!w.is_hallucination("Мы используем Kafka, а не Kafka Streams, и Kafka Connect отдельно", 6.0));
+    }
+
+    #[test]
+    fn whisper_hallucination_guard_drops_reported_glossary_echo_and_phrase_loops() {
+        for model in [LocalModel::WhisperLargeV3, LocalModel::WhisperLargeV3Turbo] {
+            for text in [
+                "Glossary, AppLifecycleState, RenderObjectWidget,",
+                "Glossary: AppLifecycleState, RenderObjectWidget.",
+                "AppLifecycleState, RenderObjectWidget, AppLifecycleState, RenderObjectWidget, AppLifecycleState, RenderObjectWidget,",
+                "Clean Architecture. Clean Architecture. Clean Architecture.",
+                "AppLifecycleState,RenderObjectWidget,AppLifecycleState,RenderObjectWidget,AppLifecycleState,RenderObjectWidget",
+            ] {
+                assert!(model.is_hallucination(text, 12.0), "{model:?}: {text}");
+                assert!(!LocalModel::ParakeetUltra.is_hallucination(text, 12.0));
+            }
+        }
+    }
+
+    #[test]
+    fn whisper_hallucination_guard_preserves_real_technical_speech() {
+        for model in [LocalModel::WhisperLargeV3, LocalModel::WhisperLargeV3Turbo] {
+            for text in [
+                "AppLifecycleState, RenderObjectWidget",
+                "Glossary",
+                "The glossary contains AppLifecycleState and RenderObjectWidget.",
+                "Glossary, AppLifecycleState, RenderObjectWidget are the terms we discussed.",
+                "В glossary добавлены AppLifecycleState и RenderObjectWidget.",
+                "У glossary є AppLifecycleState та RenderObjectWidget.",
+                "AppLifecycleState tracks the lifecycle, RenderObjectWidget creates a render object.",
+                "Clean Architecture, Clean Architecture",
+                "Use Kafka for events, Kafka Streams for processing, Kafka Connect for ingestion.",
+            ] {
+                assert!(!model.is_hallucination(text, 1.5), "{model:?}: {text}");
+            }
+        }
     }
 
     #[test]

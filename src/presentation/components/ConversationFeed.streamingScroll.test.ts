@@ -1,9 +1,73 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp, h, nextTick, reactive } from 'vue';
 import ConversationFeed from './ConversationFeed.vue';
 import type { ConversationFeedMessage } from '../conversationFeed';
 
 describe('ConversationFeed assistant scrolling', () => {
+  beforeEach(() => {
+    // jsdom has no layout: model an already centered row for the scroll-lock cases.
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const scroll = this.closest('.chat-scroll');
+      const top = this.matches('.chat-row') && scroll ? scroll.clientHeight * 0.32 : 0;
+      return new DOMRect(0, top, 0, 0);
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('anchors the new answer after earlier rows collapse, then yields to manual scrolling', async () => {
+    const state = reactive({ messages: [{ id: 'old', kind: 'haiku', role: 'incoming', status: 'final', text: 'Old answer', createdAtMs: 1, seq: 1 }] as ConversationFeedMessage[] });
+    const host = document.createElement('div'); document.body.append(host);
+    const app = createApp({ render: () => h(ConversationFeed, { messages: state.messages, emptyText: '' }) });
+    app.mount(host); await nextTick();
+    const scroll = host.querySelector('.chat-scroll') as HTMLElement;
+    Object.defineProperty(scroll, 'scrollHeight', { get: () => 4000 });
+    Object.defineProperty(scroll, 'clientHeight', { get: () => 600 });
+    let answerTop = 2000;
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockImplementation(function (this: HTMLElement) {
+      return new DOMRect(0, this.dataset.msgId === 'new' ? answerTop - scroll.scrollTop : 0, 100, 100);
+    });
+    state.messages.push({ id: 'new', kind: 'haiku', role: 'incoming', status: 'streaming', text: 'First words', createdAtMs: 2, seq: 2 });
+    await nextTick(); await nextTick(); await nextTick();
+    expect(scroll.scrollTop).toBe(1808); // top of answer at 192px = 32% of viewport
+    answerTop = 1100; // older answer collapsed after rendering
+    state.messages[1].text += ' more words';
+    await nextTick(); await nextTick();
+    expect(scroll.scrollTop).toBe(908);
+    state.messages[1].text += ' a much longer response';
+    await nextTick(); await nextTick();
+    expect(scroll.scrollTop).toBe(908);
+    scroll.dispatchEvent(new WheelEvent('wheel', { bubbles: true }));
+    scroll.scrollTop = 950; scroll.dispatchEvent(new Event('scroll'));
+    answerTop = 1000;
+    state.messages[1].text += ' final words';
+    await nextTick(); await nextTick();
+    expect(scroll.scrollTop).toBe(950);
+    app.unmount(); host.remove();
+  });
+  it('shows live speech without a preview label', async () => {
+    const state = reactive({ messages: [
+      { id: 'stt', kind: 'stt', role: 'incoming', status: 'streaming', text: 'Visible question fragment', createdAtMs: 1, seq: 1 },
+      { id: 'mic', kind: 'mic', role: 'outgoing', status: 'streaming', text: 'Visible microphone fragment', createdAtMs: 2, seq: 2 },
+      { id: 'answer', kind: 'haiku', role: 'incoming', status: 'streaming', text: 'Assistant response', createdAtMs: 3, seq: 3 },
+    ] as ConversationFeedMessage[] });
+    const host = document.createElement('div');
+    document.body.append(host);
+    const app = createApp({ render: () => h(ConversationFeed, { messages: state.messages, emptyText: '' }) });
+    app.mount(host);
+    await nextTick();
+    expect(host.querySelectorAll('.chat-preview-label')).toHaveLength(0);
+    expect(host.querySelector('[data-msg-id="stt"] .chat-text')?.textContent).toBe('Visible question fragment');
+    expect(host.querySelector('[data-msg-id="mic"] .chat-text')?.textContent).toBe('Visible microphone fragment');
+    expect(host.querySelector('[data-msg-id="answer"] .chat-preview-label')).toBeNull();
+    state.messages[0].status = 'final';
+    state.messages[1].status = 'final';
+    await nextTick();
+    expect(host.querySelectorAll('.chat-preview-label')).toHaveLength(0);
+    expect(host.querySelector('[data-msg-id="stt"] .chat-text')?.textContent).toBe('Visible question fragment');
+    app.unmount();
+    host.remove();
+  });
+
   it('shows a single assistant bullet as a plain sentence', async () => {
     const host = document.createElement('div');
     document.body.append(host);
@@ -63,6 +127,26 @@ describe('ConversationFeed assistant scrolling', () => {
     host.remove();
   });
 
+  it('freezes an already pinned feed while the request is pending, before a response exists', async () => {
+    const state = reactive({ pending: false, messages: [{
+      id: 'question', kind: 'stt', role: 'incoming', status: 'final', text: 'Question', createdAtMs: 1, seq: 1,
+    }] as ConversationFeedMessage[] });
+    const host = document.createElement('div'); document.body.append(host);
+    const app = createApp({ render: () => h(ConversationFeed, { messages: state.messages, emptyText: '', assistantStreaming: state.pending }) });
+    app.mount(host); await nextTick();
+    const scroll = host.querySelector('.chat-scroll') as HTMLElement;
+    let height = 1000;
+    Object.defineProperty(scroll, 'scrollHeight', { get: () => height });
+    Object.defineProperty(scroll, 'clientHeight', { get: () => 500 });
+    scroll.scrollTop = 500; scroll.dispatchEvent(new Event('scroll'));
+    state.pending = true; await nextTick();
+    height = 1300;
+    state.messages.push({ id: 'mic', kind: 'mic', role: 'outgoing', status: 'final', text: 'Later speech', createdAtMs: 2, seq: 2 });
+    await nextTick(); await nextTick(); await nextTick();
+    expect(scroll.scrollTop).toBe(500);
+    app.unmount(); host.remove();
+  });
+
   it('holds position during streaming even after the user reaches the end', async () => {
     const state = reactive({
       streaming: false,
@@ -94,6 +178,9 @@ describe('ConversationFeed assistant scrolling', () => {
     await nextTick();
     await nextTick();
     expect(scroll.scrollTop).toBe(500);
+    state.streaming = false; // Companion request finished, but streamed message remains active.
+    await nextTick();
+    expect(scroll.classList.contains('scroll-frozen')).toBe(true);
 
     scroll.dispatchEvent(new WheelEvent('wheel', { bubbles: true }));
     scroll.scrollTop = 1000;

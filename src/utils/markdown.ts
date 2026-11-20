@@ -104,9 +104,66 @@ function createMarked(enableCodeCollapse: boolean): Marked {
 const mdWithCodeCollapse = createMarked(true);
 const mdWithoutCodeCollapse = createMarked(false);
 
+/** Apply only to assistant prose; preserve inline markup, code blocks and lists. */
+function formatAnswerSentences(html: string): string {
+  const Segmenter = (Intl as unknown as {
+    Segmenter?: new (locale?: string, options?: { granularity: 'sentence' }) => {
+      segment(text: string): Iterable<{ segment: string; index: number }>;
+    };
+  }).Segmenter;
+  if (!Segmenter || typeof document === 'undefined') return html;
+
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  const segmenter = new Segmenter(undefined, { granularity: 'sentence' });
+  const blocks = template.content.querySelectorAll('p, li');
+  for (const block of blocks) {
+    // Keep explicit line breaks and non-text content intact. Nested lists and
+    // paragraphs are formatted independently instead of moving their children.
+    if (block.querySelector('br, img, video, audio') ||
+        (block.tagName === 'LI' && block.querySelector('p, ul, ol, pre'))) continue;
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    const nodes: Text[] = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+    const text = nodes.map((node) => node.data).join('');
+    if (!text.trim()) continue;
+
+    const locate = (offset: number): [Text, number] => {
+      let remaining = offset;
+      for (const node of nodes) {
+        if (remaining <= node.length) return [node, remaining];
+        remaining -= node.length;
+      }
+      const last = nodes[nodes.length - 1];
+      return [last, last.length];
+    };
+    const ends = Array.from(segmenter.segment(text), ({ segment, index }) => index + segment.length);
+    const fragment = document.createDocumentFragment();
+    let start = 0;
+    for (const end of ends) {
+      if (end < text.length) {
+        const [boundary] = locate(Math.max(start, end - 1));
+        if (boundary.parentElement?.closest('code, a')) continue;
+      }
+      const [startNode, startOffset] = locate(start);
+      const [endNode, endOffset] = locate(end);
+      const range = document.createRange();
+      range.setStart(startNode, startOffset);
+      range.setEnd(endNode, endOffset);
+      const sentence = document.createElement('span');
+      sentence.className = 'answer-sentence';
+      sentence.append(range.cloneContents());
+      fragment.append(sentence);
+      start = end;
+    }
+    block.replaceChildren(fragment);
+  }
+  return template.innerHTML;
+}
+
 export function renderMarkdownToSafeHtml(
   markdown: string,
-  options?: { codeCollapse?: boolean }
+  options?: { codeCollapse?: boolean; answerSentences?: boolean }
 ): string {
   const source = String(markdown ?? '');
   if (!source.trim()) return '';
@@ -115,7 +172,7 @@ export function renderMarkdownToSafeHtml(
   const rendered = (enableCollapse ? mdWithCodeCollapse : mdWithoutCodeCollapse).parse(source);
   if (typeof rendered !== 'string') return '';
 
-  return DOMPurify.sanitize(rendered, {
+  const safeHtml = DOMPurify.sanitize(rendered, {
     USE_PROFILES: { html: true },
     ADD_TAGS: ['button'],
     ADD_ATTR: [
@@ -128,5 +185,6 @@ export function renderMarkdownToSafeHtml(
       'data-max-lines',
     ],
   });
+  return options?.answerSentences ? formatAnswerSentences(safeHtml) : safeHtml;
 }
 

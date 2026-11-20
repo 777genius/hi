@@ -3,7 +3,9 @@ use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use screencapturekit::prelude::*;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::domain::{
     AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, AudioError, AudioResult,
@@ -20,6 +22,8 @@ const TARGET_FRAME_SAMPLES: usize = (TARGET_SAMPLE_RATE as usize * TARGET_FRAME_
 /// Output is emitted in fixed 30ms frames (480 samples) to match STT pipeline expectations.
 pub struct MacosOutputAudioCapture {
     stream: Option<SCStream>,
+    callback_enabled: Arc<AtomicBool>,
+    diagnostics: Option<Arc<CaptureDiagnostics>>,
     audio_config: AudioConfig,
     is_capturing: bool,
 }
@@ -28,13 +32,80 @@ impl MacosOutputAudioCapture {
     pub fn new() -> AudioResult<Self> {
         Ok(Self {
             stream: None,
+            callback_enabled: Arc::new(AtomicBool::new(false)),
+            diagnostics: None,
             audio_config: AudioConfig::default(),
             is_capturing: false,
         })
     }
 }
 
+struct CaptureDiagnostics {
+    started: Instant,
+    callbacks: AtomicU64,
+    frames: AtomicU64,
+    screen_callbacks: AtomicU64,
+    last_screen_ms: AtomicU64,
+    rejected: AtomicU64,
+    last_callback_ms: AtomicU64,
+    last_frame_ms: AtomicU64,
+    cadence_started_ms: AtomicU64,
+    recovery_armed: AtomicBool,
+}
+
+impl CaptureDiagnostics {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            callbacks: AtomicU64::new(0),
+            frames: AtomicU64::new(0),
+            screen_callbacks: AtomicU64::new(0),
+            last_screen_ms: AtomicU64::new(0),
+            rejected: AtomicU64::new(0),
+            last_callback_ms: AtomicU64::new(0),
+            last_frame_ms: AtomicU64::new(0),
+            cadence_started_ms: AtomicU64::new(0),
+            recovery_armed: AtomicBool::new(false),
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
+    fn note_callback(&self, now_ms: u64) -> (u64, u64) {
+        let count = self.callbacks.fetch_add(1, Ordering::Relaxed);
+        let previous_ms = self.last_callback_ms.swap(now_ms, Ordering::Relaxed);
+        let gap_ms = now_ms.saturating_sub(previous_ms);
+        if count == 0 || gap_ms > 250 {
+            self.cadence_started_ms.store(now_ms, Ordering::Relaxed);
+        } else if now_ms.saturating_sub(self.cadence_started_ms.load(Ordering::Relaxed)) >= 1_000 {
+            self.recovery_armed.store(true, Ordering::Release);
+        }
+        (count, gap_ms)
+    }
+
+    fn starvation_ms(&self, now_ms: u64) -> Option<u64> {
+        // A successful start is not evidence of buffer delivery. In particular,
+        // never restart-loop an idle source or a stream still warming up.
+        if !self.recovery_armed.load(Ordering::Acquire) || self.frames.load(Ordering::Relaxed) == 0
+        {
+            return None;
+        }
+        Some(now_ms.saturating_sub(self.last_callback_ms.load(Ordering::Relaxed)))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeAudioFormat {
+    sample_rate: u32,
+    is_float: bool,
+    is_big_endian: bool,
+    bits_per_channel: u32,
+}
+
 struct ResamplePipeline {
+    format: NativeAudioFormat,
     is_float: bool,
     is_big_endian: bool,
     bits_per_channel: u32,
@@ -48,12 +119,33 @@ struct ResamplePipeline {
 }
 
 impl ResamplePipeline {
+    fn ensure_format(slot: &mut Option<Self>, format: NativeAudioFormat) -> AudioResult<bool> {
+        if slot.as_ref().map(|pipe| pipe.format) == Some(format) {
+            return Ok(false);
+        }
+        let pipeline = Self::new(
+            format.sample_rate,
+            format.is_float,
+            format.is_big_endian,
+            format.bits_per_channel,
+        )?;
+        *slot = Some(pipeline);
+        Ok(true)
+    }
+
     fn new(
         from_sample_rate: u32,
         is_float: bool,
         is_big_endian: bool,
         bits_per_channel: u32,
     ) -> AudioResult<Self> {
+        if from_sample_rate == 0
+            || !((is_float && bits_per_channel == 32) || (!is_float && bits_per_channel == 16))
+        {
+            return Err(AudioError::Configuration(format!(
+                "Unsupported ScreenCaptureKit PCM format: rate={from_sample_rate}, float={is_float}, bits={bits_per_channel}"
+            )));
+        }
         let input_frame_samples = ((from_sample_rate as usize) * TARGET_FRAME_MS) / 1000;
         let input_frame_samples = input_frame_samples.max(1);
 
@@ -75,6 +167,12 @@ impl ResamplePipeline {
         .map_err(|e| AudioError::Internal(format!("Failed to create resampler: {e}")))?;
 
         Ok(Self {
+            format: NativeAudioFormat {
+                sample_rate: from_sample_rate,
+                is_float,
+                is_big_endian,
+                bits_per_channel,
+            },
             is_float,
             is_big_endian,
             bits_per_channel,
@@ -119,7 +217,7 @@ impl ResamplePipeline {
                 // Fast path: aligned cast
                 let ptr = data.as_ptr();
                 let aligned = (ptr as usize) % std::mem::align_of::<f32>() == 0;
-                if aligned {
+                if aligned && self.is_big_endian == cfg!(target_endian = "big") {
                     let samples_len = data.len() / 4;
                     // SAFETY: pointer alignment is checked; slice length is correct.
                     let samples =
@@ -297,6 +395,8 @@ impl AudioCapture for MacosOutputAudioCapture {
             // Минимальные размеры, чтобы не тратить ресурсы на видео.
             .with_width(2)
             .with_height(2)
+            .with_minimum_frame_interval(&screencapturekit::cm::CMTime::new(1, 1))
+            .with_shows_cursor(false)
             .with_captures_audio(true)
             // Важно: не захватывать звук самого приложения.
             .with_excludes_current_process_audio(true)
@@ -306,14 +406,35 @@ impl AudioCapture for MacosOutputAudioCapture {
         let pipeline: Arc<Mutex<Option<ResamplePipeline>>> = Arc::new(Mutex::new(None));
         let pipeline_for_cb = pipeline.clone();
         let on_chunk_cb = on_chunk.clone();
+        let callback_enabled = Arc::new(AtomicBool::new(true));
+        let callback_enabled_for_cb = callback_enabled.clone();
+        let diagnostics = Arc::new(CaptureDiagnostics::new());
+        let diagnostics_for_cb = diagnostics.clone();
 
         let mut stream = SCStream::new(&filter, &config);
         let added = stream.add_output_handler(
-            move |sample: CMSampleBuffer, _output: SCStreamOutputType| {
+            move |sample: CMSampleBuffer, output: SCStreamOutputType| {
+                if output != SCStreamOutputType::Audio
+                    || !callback_enabled_for_cb.load(Ordering::Acquire)
+                {
+                    return;
+                }
+                let now_ms = diagnostics_for_cb.elapsed_ms();
+                let (count, gap_ms) = diagnostics_for_cb.note_callback(now_ms);
+                if count > 0 && gap_ms >= 1_000 {
+                    log::warn!(
+                        "ScreenCaptureKit raw audio resumed after {}ms without callbacks (callbacks={}, frames={}, rejected={})",
+                        gap_ms, count + 1,
+                        diagnostics_for_cb.frames.load(Ordering::Relaxed),
+                        diagnostics_for_cb.rejected.load(Ordering::Relaxed),
+                    );
+                }
                 let Some(fmt) = sample.format_description() else {
+                    diagnostics_for_cb.rejected.fetch_add(1, Ordering::Relaxed);
                     return;
                 };
                 if !fmt.is_audio() {
+                    diagnostics_for_cb.rejected.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
 
@@ -324,6 +445,12 @@ impl AudioCapture for MacosOutputAudioCapture {
                 let bits = fmt.audio_bits_per_channel().unwrap_or(32);
                 let is_float = fmt.audio_is_float();
                 let is_be = fmt.audio_is_big_endian();
+                let format = NativeAudioFormat {
+                    sample_rate,
+                    is_float,
+                    is_big_endian: is_be,
+                    bits_per_channel: bits,
+                };
 
                 let mut guard = match pipeline_for_cb.lock() {
                     Ok(g) => g,
@@ -333,27 +460,39 @@ impl AudioCapture for MacosOutputAudioCapture {
                     }
                 };
 
-                let pipe = guard.get_or_insert_with(|| {
-                    match ResamplePipeline::new(sample_rate, is_float, is_be, bits) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            log::error!("Failed to init resample pipeline: {:?}", e);
-                            // Fallback: still keep None to avoid spamming errors per frame.
-                            return ResamplePipeline::new(48_000, true, false, 32)
-                                .expect("fallback pipeline must be constructible");
+                // Output routes may change while a stream is running. Reusing
+                // the old decoder can turn valid native buffers into no PCM.
+                match ResamplePipeline::ensure_format(&mut guard, format) {
+                    Ok(true) => log::info!("ScreenCaptureKit native audio format: {format:?}"),
+                    Ok(false) => {}
+                    Err(e) => {
+                        let rejected = diagnostics_for_cb.rejected.fetch_add(1, Ordering::Relaxed);
+                        if rejected == 0 || rejected % 100 == 0 {
+                            log::error!("Failed to init ScreenCaptureKit resample pipeline: {e}");
                         }
+                        return;
                     }
-                });
+                }
+                let Some(pipe) = guard.as_mut() else { return };
 
                 // Decode audio bytes to native mono f32, then resample into fixed 16k frames.
+                let previous_samples = pipe.native_mono.len();
                 pipe.decode_and_push_native_mono(&sample);
+                if pipe.native_mono.len() == previous_samples {
+                    let rejected = diagnostics_for_cb.rejected.fetch_add(1, Ordering::Relaxed);
+                    if rejected == 0 || rejected % 100 == 0 {
+                        log::warn!("ScreenCaptureKit native audio buffer produced no PCM (rejected={}, samples={})", rejected + 1, sample.num_samples());
+                    }
+                }
                 let frames = pipe.drain_frames();
                 drop(guard);
 
                 for frame in frames {
-                    if frame.is_empty() {
+                    if frame.is_empty() || !callback_enabled_for_cb.load(Ordering::Acquire) {
                         continue;
                     }
+                    diagnostics_for_cb.frames.fetch_add(1, Ordering::Relaxed);
+                    diagnostics_for_cb.last_frame_ms.store(now_ms, Ordering::Relaxed);
                     on_chunk_cb(AudioChunk::new(frame, TARGET_SAMPLE_RATE, TARGET_CHANNELS));
                 }
             },
@@ -366,12 +505,44 @@ impl AudioCapture for MacosOutputAudioCapture {
             ));
         }
 
+        // Keep the screen side of SCStream drained as in Apple's capture
+        // sample. The 2x2, 1fps frames are discarded immediately; no pixels are
+        // retained or sent to STT. An audio-only stream lost its AudioTap near
+        // 120s in the endurance run; whether this prevents that needs a soak.
+        let diagnostics_for_screen = diagnostics.clone();
+        let callback_enabled_for_screen = callback_enabled.clone();
+        if stream
+            .add_output_handler(
+                move |_sample: CMSampleBuffer, output: SCStreamOutputType| {
+                    if output == SCStreamOutputType::Screen
+                        && callback_enabled_for_screen.load(Ordering::Acquire)
+                    {
+                        diagnostics_for_screen
+                            .screen_callbacks
+                            .fetch_add(1, Ordering::Relaxed);
+                        diagnostics_for_screen
+                            .last_screen_ms
+                            .store(diagnostics_for_screen.elapsed_ms(), Ordering::Relaxed);
+                    }
+                },
+                SCStreamOutputType::Screen,
+            )
+            .is_none()
+        {
+            return Err(AudioError::Internal(
+                "Failed to register ScreenCaptureKit screen drain".to_string(),
+            ));
+        }
+
         stream.start_capture().map_err(|e| {
             AudioError::Capture(format!("Failed to start ScreenCaptureKit capture: {e}"))
         })?;
 
         self.stream = Some(stream);
+        self.callback_enabled = callback_enabled;
+        self.diagnostics = Some(diagnostics);
         self.is_capturing = true;
+        log::info!("ScreenCaptureKit system audio capture started");
 
         Ok(())
     }
@@ -381,11 +552,28 @@ impl AudioCapture for MacosOutputAudioCapture {
             return Ok(());
         }
 
-        if let Some(stream) = self.stream.take() {
-            let _ = stream.stop_capture();
-        }
-
+        // Invalidate this generation before stopping. A late queued callback
+        // from the old stream must never enter the next recording/recovery.
+        self.callback_enabled.store(false, Ordering::Release);
         self.is_capturing = false;
+        if let Some(diagnostics) = self.diagnostics.take() {
+            let now_ms = diagnostics.elapsed_ms();
+            log::info!(
+                "ScreenCaptureKit audio stopped: callbacks={}, frames={}, rejected={}, last_raw={}ms ago, last_pcm={}ms ago, screen_callbacks={}, last_screen={}ms ago",
+                diagnostics.callbacks.load(Ordering::Relaxed),
+                diagnostics.frames.load(Ordering::Relaxed),
+                diagnostics.rejected.load(Ordering::Relaxed),
+                now_ms.saturating_sub(diagnostics.last_callback_ms.load(Ordering::Relaxed)),
+                now_ms.saturating_sub(diagnostics.last_frame_ms.load(Ordering::Relaxed)),
+                diagnostics.screen_callbacks.load(Ordering::Relaxed),
+                now_ms.saturating_sub(diagnostics.last_screen_ms.load(Ordering::Relaxed)),
+            );
+        }
+        if let Some(stream) = self.stream.take() {
+            stream.stop_capture().map_err(|e| {
+                AudioError::Capture(format!("Failed to stop ScreenCaptureKit capture: {e}"))
+            })?;
+        }
         Ok(())
     }
 
@@ -398,5 +586,75 @@ impl AudioCapture for MacosOutputAudioCapture {
     }
     fn supports_quiet_refresh(&self) -> bool {
         true
+    }
+    fn capture_starvation_ms(&self) -> Option<u64> {
+        self.diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.starvation_ms(diagnostics.elapsed_ms()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_liveness_arms_on_cadence_and_new_capture_must_rearm() {
+        let diagnostics = CaptureDiagnostics::new();
+        assert_eq!(diagnostics.starvation_ms(120_000), None);
+        diagnostics.note_callback(0);
+        diagnostics.frames.store(1, Ordering::Relaxed);
+        // Widely spaced callbacks do not establish a healthy stream.
+        diagnostics.note_callback(500);
+        diagnostics.note_callback(1_000);
+        assert_eq!(diagnostics.starvation_ms(30_000), None);
+        for now_ms in (1_010..=2_000).step_by(10) {
+            diagnostics.note_callback(now_ms);
+        }
+        assert_eq!(diagnostics.starvation_ms(32_000), Some(30_000));
+        diagnostics.note_callback(32_001);
+        assert_eq!(diagnostics.starvation_ms(32_001), Some(0));
+        let restarted = CaptureDiagnostics::new();
+        assert_eq!(restarted.starvation_ms(120_000), None);
+    }
+
+    #[test]
+    fn changed_native_rate_resets_decoder_and_preserves_pcm_duration() {
+        let mut pipeline = None;
+        let mut format = NativeAudioFormat {
+            sample_rate: 48_000,
+            is_float: true,
+            is_big_endian: false,
+            bits_per_channel: 32,
+        };
+        for sample_rate in [48_000, 24_000] {
+            format.sample_rate = sample_rate;
+            assert!(ResamplePipeline::ensure_format(&mut pipeline, format).unwrap());
+            let pipe = pipeline.as_mut().unwrap();
+            pipe.native_mono
+                .extend(std::iter::repeat(0.25).take(sample_rate as usize));
+            let frames = pipe.drain_frames();
+            // One native second must remain approximately one 16kHz second,
+            // allowing the sinc resampler's startup delay and frame remainder.
+            assert!(
+                (30..=34).contains(&frames.len()),
+                "{}Hz yielded {} frames",
+                sample_rate,
+                frames.len()
+            );
+            assert!(frames.iter().all(|frame| frame.len() == 480));
+            assert!(frames
+                .last()
+                .unwrap()
+                .iter()
+                .all(|sample| (8_000..=8_400).contains(sample)));
+        }
+        pipeline.as_mut().unwrap().native_mono.push(0.125);
+        let pending = pipeline.as_ref().unwrap().native_mono.len();
+        assert!(!ResamplePipeline::ensure_format(&mut pipeline, format).unwrap());
+        assert_eq!(pipeline.as_ref().unwrap().native_mono.len(), pending);
+        format.bits_per_channel = 64;
+        assert!(ResamplePipeline::ensure_format(&mut pipeline, format).is_err());
+        assert_eq!(pipeline.as_ref().unwrap().native_mono.len(), pending);
     }
 }

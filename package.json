@@ -17,6 +17,7 @@
     "tauri:dev:memory-platform": "pnpm tauri:dev:memo-stack",
     "tauri:build": "tauri build",
     "test-interviewer": "tools/run-test-interviewer.sh",
+    "interviewer:flutter": "bash tools/run-test-interviewer.sh flutter",
     "tauri:build:local": "tauri build --no-bundle --ci --features local-access",
     "tauri:dev:whisper": "tauri dev --features whisper",
     "tauri:build:whisper": "tauri build --features whisper",

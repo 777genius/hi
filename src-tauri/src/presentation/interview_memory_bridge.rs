@@ -445,10 +445,14 @@ pub async fn assemble_stream_context_or_fallback(
     }
 
     let fallback_context = local_prompt_fallback_context(local_context);
-    match assemble_stream_context(state, local_context, memory_context_evidence).await {
-        Ok(Some(text)) => text,
-        Ok(None) => fallback_context,
-        Err(err) => {
+    match tokio::time::timeout(Duration::from_millis(400), assemble_stream_context(state, local_context, memory_context_evidence)).await {
+        Ok(Ok(Some(text))) => text,
+        Ok(Ok(None)) => fallback_context,
+        Err(_) => {
+            log::info!("Interview memory context exceeded 400ms; using local context");
+            local_context.to_string()
+        }
+        Ok(Err(err)) => {
             log::warn!("Interview memory active context fallback: {}", err);
             fallback_context
         }
@@ -469,9 +473,13 @@ pub async fn assemble_chat_context_or_fallback(
         return None;
     }
 
-    match assemble_chat_context(state, local_context, question, memory_context_evidence).await {
-        Ok(text) => text,
-        Err(err) => {
+    match tokio::time::timeout(Duration::from_millis(400), assemble_chat_context(state, local_context, question, memory_context_evidence)).await {
+        Ok(Ok(text)) => text,
+        Err(_) => {
+            log::info!("Interview memory chat context exceeded 400ms; using local context");
+            None
+        }
+        Ok(Err(err)) => {
             log::warn!("Interview memory chat context fallback: {}", err);
             None
         }

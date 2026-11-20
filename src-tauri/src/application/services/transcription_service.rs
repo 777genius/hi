@@ -40,10 +40,26 @@ pub struct TranscriptionService {
 /// Сколько раз повторять перезапуск ScreenCaptureKit после сбоя (паузы 1,5 с, 3 с, 4,5 с ... суммарно около 40 с).
 const CAPTURE_REFRESH_RETRIES: u32 = 6;
 
-/// Обновление ScreenCaptureKit делаем только в долгой тишине и не чаще этого интервала. В часовых прогонах
+/// Обновление ScreenCaptureKit делаем только при долгом отсутствии PCM и не чаще этого интервала. В часовых прогонах
 /// обновление каждые 26 с давало потерянные вопросы: новый поток иногда какое-то время не отдаёт звук.
 const CAPTURE_REFRESH_MIN_QUIET_MS: u64 = 30_000;
 const CAPTURE_REFRESH_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
+
+fn capture_refresh_reason(
+    native_gap_ms: Option<u64>,
+    pcm_gap_ms: u64,
+    since_refresh: std::time::Duration,
+) -> Option<&'static str> {
+    let native_gap_ms = native_gap_ms?;
+    if pcm_gap_ms < CAPTURE_REFRESH_MIN_QUIET_MS || since_refresh < CAPTURE_REFRESH_MIN_INTERVAL {
+        return None;
+    }
+    Some(if native_gap_ms >= CAPTURE_REFRESH_MIN_QUIET_MS {
+        "native buffer gap (source may be idle)"
+    } else {
+        "native buffers arrived without PCM"
+    })
+}
 
 impl TranscriptionService {
     /// Load local weights after the UI starts, so the first recording can reuse
@@ -706,25 +722,29 @@ impl TranscriptionService {
                     if *status.read().await != RecordingStatus::Recording {
                         break;
                     }
-                    // Refresh only well inside a quiet gap. A fixed timer can
-                    // interrupt the next spoken question, while macOS may stop
-                    // including output audio after a long silent interval.
+                    // Healthy silent PCM is not a stall. A native-buffer gap
+                    // can also be legitimate idle output, so retain the long
+                    // threshold/cooldown and require previously healthy native
+                    // delivery. Do not restart a stream that never armed.
                     let quiet_ms = epoch_millis()
                         .saturating_sub(last_loud_audio_ms.load(Ordering::Relaxed));
-                    if quiet_ms < CAPTURE_REFRESH_MIN_QUIET_MS
-                        || last_refresh.elapsed() < CAPTURE_REFRESH_MIN_INTERVAL
-                    {
-                        continue;
-                    }
                     let mut guard = capture.write().await;
                     if !guard.is_capturing() {
                         break;
                     }
+                    let pcm_gap_ms = epoch_millis()
+                        .saturating_sub(last_any_chunk_ms.load(Ordering::Relaxed));
+                    let native_gap_ms = guard.capture_starvation_ms();
+                    let Some(reason) =
+                        capture_refresh_reason(native_gap_ms, pcm_gap_ms, last_refresh.elapsed())
+                    else {
+                        continue;
+                    };
                     refresh_number += 1;
                     log::info!(
-                        "Refreshing ScreenCaptureKit #{refresh_number} after {quiet_ms}ms of silence ({}s since the previous refresh, last chunk of any level {}ms ago)",
+                        "Refreshing ScreenCaptureKit #{refresh_number}: {reason}; {quiet_ms}ms of silence ({}s since the previous refresh, last PCM {pcm_gap_ms}ms ago, last native buffer {}ms ago)",
                         last_refresh.elapsed().as_secs(),
-                        epoch_millis().saturating_sub(last_any_chunk_ms.load(Ordering::Relaxed))
+                        native_gap_ms.unwrap_or_default()
                     );
                     // Новый SCStream сразу после остановки старого иногда не стартует: даём системе вдохнуть.
                     let mut result = match guard.stop_capture().await {
@@ -1148,6 +1168,30 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::Duration;
+
+    #[test]
+    fn capture_refresh_preserves_healthy_silence_and_unarmed_sources() {
+        let elapsed = Duration::from_secs(300);
+        assert_eq!(capture_refresh_reason(Some(0), 0, elapsed), None);
+        assert_eq!(capture_refresh_reason(None, 300_000, elapsed), None);
+        assert_eq!(capture_refresh_reason(Some(29_999), 29_999, elapsed), None);
+    }
+
+    #[test]
+    fn capture_refresh_requires_long_pcm_gap_and_preserves_recovery_backoff() {
+        assert_eq!(
+            capture_refresh_reason(Some(30_000), 30_000, Duration::from_secs(119)),
+            None
+        );
+        assert_eq!(
+            capture_refresh_reason(Some(30_000), 30_000, Duration::from_secs(120)),
+            Some("native buffer gap (source may be idle)")
+        );
+        assert_eq!(
+            capture_refresh_reason(Some(0), 30_000, Duration::from_secs(120)),
+            Some("native buffers arrived without PCM")
+        );
+    }
 
     struct BurstAudioCapture {
         config: AudioConfig,

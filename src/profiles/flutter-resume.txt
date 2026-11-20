@@ -1,0 +1,163 @@
+Ilya Zelen - Senior Flutter Developer
+ILYA ZELEN
+SENIOR FLUTTER DEVELOPER
+Dart / Flutter · team lead · TypeScript / Node.js / Python / Go / RustProduction AI solutions · social networks · fintech · crypto
+location Worldwide
+languages Ukrainian (native) · English (B2)
+github github.com/777genius
+contact quantjumppro@gmail.com · t.me/ilya_zel777
+ilya.png · 48×48 · pixelated
+6.3K+
+total GitHub stars
+800+
+GitHub followers
+50 000+
+total GitHub contributions
+400+ repositories
+5+
+years shipping production Flutter
+#1
+digital wallet · Azerbaijan (m10)
+● Read(summary.md)
+Mobile Flutter developer, 5+ years shipping production apps - the #1 digital wallet in Azerbaijan (multi-team, 15 Flutter engineers) and a charity social network built from scratch. Owns modular, testable architecture (Clean Architecture, DDD, Melos) and has led engineering teams at 3 companies through architecture, code review and mentoring. Combines full-stack product engineering with production AI tooling; contributes to the Dart/Flutter ecosystem.
+● Fetch(key-projects - production, millions of users)
+m10 by PashaPay
+#1 digital wallet in Azerbaijan
+// large-scale: multiple teams, 15 Flutter developers, Scrum
+Led mobile development from scratch: architecture and a team of 11, product features, integrations and store releases. Modular architecture powered by Melos; unit/widget tests.
+flutterdartmelosscrumunit-tests
+Flutter Developer - ro:
+charity social network · closed startup
+// TikTok + Instagram hybrid, built from scratch, released on iOS & Android
+Designed the architecture and led a team of 6; integrated third-party services; real-time chat built entirely in-house (frontend + backend). Stripe payments, i18n, DDD + Clean Architecture, unit testing.
+flutterdartblocwebsocketstripeddd
+● Fetch(Flutter projects & selected open source)
+clean_disk
+Super fast disk scan for cleaning. Flutter + Rust. Cross-platform app ready.
+FlutterRustdesktop
+fast_build_runner
+Faster incremental rebuilds for Dart/Flutter projects built on top of build_runner.
+DartFlutterbuild_runner
+flutter_headless
+Headless UI component library for Flutter. Write behavior once: focus, keyboard, accessibility, state. Style it in every project. Capability-based theming with Material 3 & Cupertino parity renderers.
+Flutterheadless UIaccessibility
+synchronize_cache
+Offline-first data sync library for Flutter/Drift with push/pull, smart conflict resolution & auto-merge.
+FlutterDriftoffline-first
+flutter_network_debugger
+Universal proxy debugger with WebSockets support and Flutter integration. Also debugs all OS requests.
+Flutter integrationGodebugging
+dartdoc_modern
+Modern API documentation tool for Dart using VitePress.
+DartdocumentationVitePress
+● Skills & expertise
+flutter-stack/Flutter · Bloc · Riverpod · MobX · Provider · Dio · Freezed · Hive · Drift · GetIt · Injectable · AutoRoute · GoRouter · Retrofit · Melos · Syncfusion
+languages/Dart · TypeScript · Node.js · Python · Go · Rust · JavaScript · PHP · Ruby · SQL · HTML5 · CSS3
+mobile-desktop/Flutter · React Native · Electron · Capacitor · Tauri · Quasar · PWA
+architecture/Clean Architecture · Hexagonal · DDD · CQRS · microservices · pluggable · monorepo · event-driven
+quality/design patterns · high cohesion · SOLID · KISS · DRY · YAGNI · SoC · low coupling · fail fast · explicit dependencies · observability · OpenTelemetry
+testing/unit / widget tests · Vitest · Jest · Playwright · Cypress · Selenium · pytest · TDD
+leadership/team leadership · mentoring · code review · architecture decisions · delivery
+ci-cd/Codemagic · App Store / Google Play releases · GitHub Actions · GitLab · Jenkins · CircleCI
+integrations/Firebase (auth, Firestore, push, Crashlytics) · Stripe · Mixpanel · AdMob · Stream Chat · Sentry
+mobile-platform/i18n · WebView · OAuth · crypto / WEB3 wallets · WebRTC
+Experience on page 2 · more open source on page 3 · full skills map on page 4 →
+● Read(experience.log - 9 roles · 2016-2026)
+Flutter Developer - Quanta
+Sep 2025 - Aug 2026 · 11 mo · internal AI agent management platform
+Built a cross-platform Flutter app for desktop and mobile from a single codebase, enabling teams to manage and orchestrate AI agents.
+Built AI automation infrastructure for dozens of cloud agents, an autonomous multi-agent orchestrator and automated code review tooling.
+Fullstack Developer - Personal Projects
+Jan 2025 - Aug 2025 · AI · crypto · developer tools
+Built social-monitor, an AI social monitoring platform with 11 microservices.
+Flutter Network Debugger - DevTools network inspector alternative; offline_first_sync_drift - offline-first sync with conflict resolution.
+AI-powered OS automation; Telegram AI agent; DEX trading bot; VoiceTextAI (Rust); Qaspa, a Rust blockchain with quantum resistance and privacy.
+Flutter Developer - padelapp.club
+Apr 2025 - Aug 2025 · 5 mo · sports platform · built from scratch
+Cross-platform mobile app: court booking, match scheduling, player profiles, group chats, community features.
+Built a CRM system on React for internal management. Full lifecycle ownership: architecture design → release.
+Tech Lead, Senior Flutter Developer - KiberPay
+Aug 2023 - Jan 2025 · 1 yr 5 mo · fintech startup · payment system integrated by partner businesses
+Led a team of 10 developers, including 3 Flutter engineers, including code reviews and technical mentoring. Cross-platform admin panel, P2P commissions app, push/SMS notification interception app.
+Dynamic backend-driven table module with flexible filtering and editing; real-time chat end-to-end (frontend + backend).
+Modular architecture with reusable cross-project modules (Clean Architecture, DDD, monorepo). Bloc · GetIt · Injectable · Syncfusion.
+Tech Lead, Flutter Developer - m10 by PashaPay
+Feb 2022 - Aug 2023 · 1 yr 6 mo · #1 digital wallet in Azerbaijan · multiple teams · 15 Flutter developers
+Led mobile app development from scratch: architecture, a team of 11, cross-team coordination and App Store / Google Play releases; delivered features, UI redesign, integrations and unit/widget tests.
+Scrum with dedicated scrum masters; strict process governance, cross-team coordination. Modular architecture powered by Melos.
+Tech Lead, Flutter Developer - ro:
+Jan 2020 - Feb 2022 · 2 yrs 1 mo · closed startup · charity social network · TikTok + Instagram hybrid, built from scratch
+Designed the system architecture from scratch and led a team of 6 across web, mobile and backend; integrated third-party services; real-time chat end-to-end (frontend + backend).
+Performance optimization and caching strategies; released on iOS and Android; Stripe payments; i18n.
+High-intensity product iteration; mentored by a team lead from Ozon. DDD + Clean Architecture, unit testing.
+Frontend Developer - coinsbit.io
+May 2018 - Feb 2019 · 9 mo · #1 Ukrainian cryptocurrency exchange
+Rebuilt the legacy exchange platform from the ground up; real-time trading interface on WebSockets.
+Vue + Nuxt; major codebase refactoring; i18n; authentication proxy configuration.
+Frontend Developer - babyblog.ru
+Jan 2017 - May 2018 · 1 yr 4 mo · social network · 16M unique visitors/month
+Built from scratch and launched to 16M unique visitors/month after one year, alongside a layout developer (my mentee).
+SSR server proxy, file uploads, custom post/comment WYSIWYG editor, performance optimization; designed a completely new platform architecture.
+Frontend Developer - subbly.co
+Sep 2016 - Jan 2017 · 4 mo · US subscription management platform · outstaffing
+Admin panel business logic and new UI designs, all built with Vue.
+ilya zelen · senior flutter developer resume
+page 2/4 · esc to interrupt
+● Read(languages.yml)
+english: "B2" · ukrainian: "native" · russian: "native"
+● Fetch(selected-projects · open source)
+777genius/agent-teams-ai2.2K+
+Multi-agent desktop platform: autonomous tasks, team messaging, peer review and a kanban board. Supports 300+ models and 200+ providers.
+TypeScriptReactElectronMCP
+777genius/agent-notifications800+
+Cross-platform agent notifications: desktop alerts, sounds, click-to-focus and webhooks for macOS, Linux and Windows.
+Godesktopwebhooks
+777genius/infinity-context
+Python memory infrastructure for AI teams: source-backed knowledge, scoped retrieval and reviewable learning through MCP, SDK and UI.
+PythonPostgreSQLRAGMCP
+777genius/review-router-ai
+AI pull-request reviews in CI with multiple reviewers, inline findings, commit-bound feedback and a dashboard. Hosted or self-hosted.
+TypeScriptAI code reviewCI/CD
+777genius/universal-agent-plugins
+Go CLI and SDK to install, update, repair and remove agent plugins across Codex, Claude Code, Cursor, Gemini CLI and more.
+GoCLI / SDKagent plugins
+777genius/lintai
+Offline-first security linter for AI skills, MCP configs, hooks, permissions and plugins. Deterministic local and CI checks with evidence.
+RustsecurityAI tooling
+agent-teams-ai/engineering-foundation
+Engineering policy and conformance tooling: versioned contracts, architecture checks and reusable quality rules for AI-built software.
+TypeScriptarchitecturecode quality
+777genius/voice-to-text
+Super-fast, accurate, real-time voice-to-text using AI. Provider-agnostic.
+RustAIspeech-to-text
+● Fetch(Dart / Flutter ecosystem & more open source)
+social-monitorUnique posts from X, Reddit, Telegram and news; filters duplicate takes, reposts and filler. Feed based on Jev.TS
+modularity_dartpowerful modular architecture systemDart
+qaspa walletcross-platform crypto wallet for a custom blockchain · advanced modular architectureFlutter
+tiptap-vuetifyVuetify component for the Tiptap editor - WYSIWYG, Nuxt module included (not maintained for 8 years)813
+vue-cool-selectSelect with autocomplete, slots, Bootstrap and Material Design themes (not maintained for 8 years)240
+discord-meeting-assistantDiscord meeting transcription, live captions, AI summaries and voice Q&ATS
+terminal-platformEmbeddable terminal platform: native PTY, tmux and Zellij backends for ElectronRust
+flutter_network_debuggerUniversal proxy debugger with WebSockets support, Flutter integrationGo
+● Skills & expertise(full-stack, AI & domains)
+frontend/React · Next.js · TanStack · Vue.js · Nuxt.js · Vuetify · Quasar · TailwindCSS · Bootstrap · Sass · D3.js · Chart.js · Zustand · Redux
+backend/NestJS · Fastify · Express · FastAPI · Laravel · Symfony · Doctrine · Prisma · Drizzle · Zod
+api-rpc/REST · GraphQL · tRPC · oRPC · gRPC
+databases/PostgreSQL · MySQL · MongoDB · Redis · SQLite · Firebase · Supabase · S3 · SQL / NoSQL · migrations
+messaging/Kafka · RabbitMQ · NATS · BullMQ · WebSocket · Socket.IO · Centrifugo · Pub/Sub
+search-vector/Elasticsearch · Qdrant · ClickHouse · BigQuery · vector databases
+infra/Docker · Docker Compose · Kubernetes · NGINX · Terraform · Git · Linux · SSH · Vercel
+cloud/AWS (S3, EC2, Lambda, RDS, SQS, CloudWatch) · Google Cloud (Cloud Run, Storage, Pub/Sub, Cloud SQL)
+build-tools/Webpack · Babel · Yarn · pnpm · Bun · Vite
+dev-tools/VS Code · Xcode · Figma · Postman · Jira · Slack · Warp · Sentry
+ai-platforms/OpenAI · Claude · Gemini · OpenRouter · Ollama · Cursor · OpenCode
+ai-frameworks/LangChain · LangGraph · Temporal · Graphiti
+agents/orchestration · multi-agent systems · MCP · RAG pipelines · voice agents · writing agents · OS AI · agent memory
+ai-experience/computer vision · face recognition · voice-to-text · media recognition · fine-tuning · prompting · LLM evals
+industries/social networks · e-commerce · traffic arbitrage · gambling · AI products
+domains/fintech · crypto · P2P payments · real-time trading · payment systems
+> hire ilya --role senior-flutter --stack dart-flutter --remote
+✓ quantjumppro@gmail.com · t.me/ilya_zel777 · github.com/777genius
+Me on StackOverflow: EN, RU.
+ilya zelen · senior flutter developer resume
+page 3/4 · esc to interrupt
