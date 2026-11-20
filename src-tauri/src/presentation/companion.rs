@@ -409,7 +409,7 @@ struct FocusCopyIngestBody {
     character_count: Option<usize>,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "local-access"))]
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct E2eSystemTranscriptBody {
@@ -1003,11 +1003,11 @@ async fn route_request(
         (Method::POST, "/api/e2e/play-audio") => {
             handle_e2e_play_audio_post(app_handle.clone(), req).await
         }
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "local-access"))]
         (Method::POST, "/api/e2e/timeline/system") => {
             handle_e2e_system_transcript_post(app_handle.clone(), req).await
         }
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "local-access"))]
         (Method::POST, "/api/e2e/timeline/microphone") => {
             handle_e2e_microphone_transcript_post(app_handle.clone(), req).await
         }
@@ -1535,11 +1535,14 @@ async fn handle_e2e_play_audio_post(
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "local-access"))]
 async fn handle_e2e_system_transcript_post(
     app_handle: AppHandle,
     req: Request<Incoming>,
 ) -> Response<CompanionBody> {
+    if !crate::infrastructure::test_interviewer::is_enabled() {
+        return text_response(StatusCode::NOT_FOUND, "Test mode disabled");
+    }
     let Some(token) = parse_header_token(req.headers()) else {
         return text_response(StatusCode::UNAUTHORIZED, "Missing token");
     };
@@ -1597,11 +1600,14 @@ async fn handle_e2e_system_transcript_post(
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "local-access"))]
 async fn handle_e2e_microphone_transcript_post(
     app_handle: AppHandle,
     req: Request<Incoming>,
 ) -> Response<CompanionBody> {
+    if !crate::infrastructure::test_interviewer::is_enabled() {
+        return text_response(StatusCode::NOT_FOUND, "Test mode disabled");
+    }
     let Some(token) = parse_header_token(req.headers()) else {
         return text_response(StatusCode::UNAUTHORIZED, "Missing token");
     };
@@ -1622,26 +1628,10 @@ async fn handle_e2e_microphone_transcript_post(
     let Some(state) = app_handle.try_state::<AppState>() else {
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "AppState not available");
     };
-    let session_id = state.active_transcription_session_id.load(std::sync::atomic::Ordering::Relaxed);
-    if session_id == 0 || body.session_id.is_some_and(|value| value != session_id) {
-        return text_response(StatusCode::CONFLICT, "Recording session is not active");
-    }
-    let transcription = crate::domain::Transcription::final_result(text);
-    let payload = crate::presentation::events::FinalTranscriptionPayload::from_transcription(
-        transcription, session_id, "microphone",
-    );
-    // The endurance harness injects a controlled microphone transcript while
-    // the physical input is muted, so ambient noise cannot pollute LLM context.
-    // This route exists only in debug builds and restores the runtime flag.
-    let was_enabled = state.microphone_transcription_enabled.swap(
-        true,
-        std::sync::atomic::Ordering::Relaxed,
-    );
-    crate::presentation::companion_timeline::on_microphone_final(state.inner(), &payload).await;
-    state.microphone_transcription_enabled.store(
-        was_enabled,
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    let session_id = body.session_id.unwrap_or(1).max(1);
+    crate::presentation::companion_timeline::append_microphone_message(
+        state.inner(), session_id, &text, crate::presentation::companion_timeline::now_ms(),
+    ).await;
     match publish_snapshot(&app_handle).await {
         Ok(_) => json_response(StatusCode::OK, serde_json::json!({"ok": true, "sessionId": session_id}).to_string()),
         Err(error) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &error),

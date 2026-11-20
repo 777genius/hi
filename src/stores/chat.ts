@@ -1,3 +1,4 @@
+import { preferTextAnswers, withFlutterTechnicalNotes, initialPromptProfiles, PROMPT_PROFILES_KEY, ACTIVE_PROMPT_PROFILE_KEY, type PromptProfile } from '@/profiles/promptProfiles';
 import { defineStore } from 'pinia';
 import { computed, nextTick, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
@@ -111,7 +112,7 @@ const DEFAULT_SYSTEM_PROMPT = `Ты — ассистент на техничес
 
 Формат ответа:
 - По умолчанию отвечай коротким связным абзацем. Список нужен только для действительно нескольких пунктов или если его попросили.
-- Затем (если нужно) короткий пример кода.
+- Приоритет — краткий устный текстовый ответ на интервью, обычно 2–4 содержательных предложения. Код и развёрнутые примеры давай только по прямой просьбе. Сохраняй важные технические нюансы, не удлиняй ответ ради полноты.
 - Не пересказывай весь контекст и не цитируй теги "ОС:"/"МИКРОФОН:"/"ПОМОЩНИК:"/"ЗАПРОС:".
 
 Правила для кода:
@@ -153,7 +154,32 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  const systemPrompt = ref<string>(readStoredSystemPrompt() || DEFAULT_SYSTEM_PROMPT);
+  const systemPrompt = ref<string>(preferTextAnswers(readStoredSystemPrompt() || DEFAULT_SYSTEM_PROMPT));
+  const promptProfiles = ref<PromptProfile[]>(initialPromptProfiles(systemPrompt.value));
+  const activePromptProfileId = ref('original');
+  try {
+    const saved = JSON.parse(localStorage.getItem(PROMPT_PROFILES_KEY) || 'null');
+    if (Array.isArray(saved) && saved.length && saved.every(p => typeof p.id === 'string' && typeof p.name === 'string' && typeof p.prompt === 'string')) {
+      promptProfiles.value = saved.map(p => ({ ...p, prompt: preferTextAnswers(p.id === 'flutter-resume' ? withFlutterTechnicalNotes(p.prompt) : p.prompt) }));
+    }
+    const selected = localStorage.getItem(ACTIVE_PROMPT_PROFILE_KEY);
+    const profile = promptProfiles.value.find(p => p.id === selected);
+    if (profile) { activePromptProfileId.value = profile.id; systemPrompt.value = profile.prompt; }
+    persistPromptProfiles();
+  } catch { /* Storage may be unavailable. Keep the current prompt. */ }
+
+  function persistPromptProfiles(): void {
+    localStorage.setItem(PROMPT_PROFILES_KEY, JSON.stringify(promptProfiles.value));
+    localStorage.setItem(ACTIVE_PROMPT_PROFILE_KEY, activePromptProfileId.value);
+  }
+
+  function selectPromptProfile(id: string): void {
+    const profile = promptProfiles.value.find(p => p.id === id);
+    if (!profile) return;
+    activePromptProfileId.value = id;
+    saveSystemPrompt(profile.prompt);
+  }
+
 
   function readStoredBoolean(key: string, fallback = false): boolean {
     if (typeof localStorage === 'undefined') return fallback;
@@ -187,6 +213,7 @@ export const useChatStore = defineStore('chat', () => {
   const liveMicSinceMs = ref<number>(0);
 
   // Microphone transcription (best-effort, separate stream)
+  const microphoneMuteMode = ref<'app' | 'system'>('app');
   const microphoneEnabled = ref<boolean>(true);
   const micMessages = ref<ChatMessage[]>([]);
   const promptMessages = ref<ChatMessage[]>([]);
@@ -534,7 +561,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function isSelectableMessage(message: ChatMessage | undefined): boolean {
-    return !!message && !message.deleted && message.kind !== 'haiku' && message.status === 'final';
+    return !!message && !message.deleted && message.status === 'final';
   }
 
   function filterSelectableIds(ids: string[]): string[] {
@@ -675,7 +702,10 @@ export const useChatStore = defineStore('chat', () => {
   function saveSystemPrompt(next: string): void {
     const v = sanitizeSystemPrompt(next);
     systemPrompt.value = v;
+    const profile = promptProfiles.value.find(p => p.id === activePromptProfileId.value);
+    if (profile) profile.prompt = v;
     try {
+      persistPromptProfiles();
       localStorage.setItem(SYSTEM_PROMPT_STORAGE_KEY, v);
       // Best-effort: поддерживаем старый ключ, чтобы не ломать обратную совместимость.
       localStorage.setItem(LEGACY_SYSTEM_PROMPT_STORAGE_KEY, v);
@@ -709,6 +739,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       await invoke(CMD_SET_COMPANION_SYSTEM_PROMPT, {
         prompt: sanitizeSystemPrompt(systemPrompt.value),
+        profileId: activePromptProfileId.value,
       });
     } catch (err) {
       console.warn('Failed to sync companion system prompt:', err);
@@ -838,7 +869,7 @@ export const useChatStore = defineStore('chat', () => {
 
       const selectedParts = selectContextParts(parts);
       return {
-        text: selectedParts.map((part) => part.line).join('\n'),
+        text: ['Выбранные сообщения (отвечай именно на них):', ...selectedParts.map((part) => part.line)].join('\n'),
         parts: selectedParts,
       };
     }
@@ -1341,6 +1372,10 @@ export const useChatStore = defineStore('chat', () => {
       // Даём UI шанс отрисовать новый state до нативного IPC/AppleScript,
       // иначе кнопка визуально "запаздывает", хотя state уже сменили.
       await waitForUiPaint();
+      if (microphoneMuteMode.value === 'app') {
+        await invoke('set_microphone_transcription_enabled', { enabled: targetEnabled });
+        return;
+      }
       const payload = await invoke<MicrophoneMuteStatePayload>('set_microphone_muted', {
         muted: !targetEnabled,
       });
@@ -1823,6 +1858,7 @@ export const useChatStore = defineStore('chat', () => {
     signalMessages,
     haikuMessages,
     microphoneEnabled,
+    microphoneMuteMode,
     microphoneMuteSupported,
     microphoneMuteSource,
     companionModeEnabled,
@@ -1852,6 +1888,9 @@ export const useChatStore = defineStore('chat', () => {
     hasContextToClear,
     systemPrompt,
     saveSystemPrompt,
+    promptProfiles,
+    activePromptProfileId,
+    selectPromptProfile,
     openaiResponsesWebSearchEnabled,
     setOpenAiResponsesWebSearchEnabled,
     toggleOpenAiResponsesWebSearch,

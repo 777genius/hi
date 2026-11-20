@@ -38,6 +38,33 @@ const QUESTIONS: &[&str] = &[
     "Останнє питання. Уявіть, що product-команда просить швидку фічу, яка псує domain model. Як ви ведете переговори, шукаєте компроміс та фіксуєте технічний борг?",
 ];
 
+const FLUTTER_QUESTIONS: &[&str] = &[
+    "Розкажіть про ваш досвід Flutter і найскладніше архітектурне рішення у production.",
+    "Чим відрізняються Widget, Element і RenderObject? Як Flutter зберігає стан під час перебудови?",
+    "Як працює reconciliation і коли потрібні ValueKey, ObjectKey та GlobalKey?",
+    "Як ви знайдете причину jank у Flutter DevTools і відрізните проблеми UI та raster потоків?",
+    "Як оптимізувати довгий список із зображеннями, пагінацією та різною висотою елементів?",
+    "Поясніть constraints go down, sizes go up. Як діагностувати unbounded constraints?",
+    "Як працюють event loop, microtask queue, Future та Stream у Dart?",
+    "Коли потрібен isolate, і як передавати великі дані без зайвого копіювання?",
+    "Як спроєктувати модульний Flutter застосунок з Clean Architecture та Melos?",
+    "Як обрати між Bloc і Riverpod? Де має жити бізнес-логіка та як уникнути зайвих rebuild?",
+    "Як обробляти конкурентні події у Bloc: debounce, restartable, droppable та sequential?",
+    "Як побудувати offline-first синхронізацію з Drift, повторними спробами і конфліктами даних?",
+    "Як організувати кешування, дедуплікацію запитів і скасування застарілих відповідей?",
+    "Як безпечно реалізувати OAuth, оновлення токенів та одночасні запити після помилки авторизації?",
+    "Як побудувати навігацію з deep links, вкладеними маршрутами та відновленням стану?",
+    "Як тестувати Flutter застосунок: unit, widget, golden та integration тести? Що мокати?",
+    "Як реалізувати platform channel або FFI і правильно керувати нативними ресурсами?",
+    "Як забезпечити accessibility, локалізацію, масштабування тексту та адаптивність інтерфейсу?",
+    "Як організувати релізи iOS та Android, CI, crash monitoring і безпечний rollout?",
+    "Як ви проводите code review, розвиваєте команду та оцінюєте компроміси між швидкістю і технічним боргом?",
+];
+
+fn questions() -> &'static [&'static str] {
+    if std::env::var("INTERVIEW_TEST_PROFILE").ok().as_deref() == Some("flutter") { FLUTTER_QUESTIONS } else { QUESTIONS }
+}
+
 static NEXT_INDEX: AtomicUsize = AtomicUsize::new(0);
 static SPEAKING: Mutex<Option<Child>> = Mutex::new(None);
 
@@ -57,7 +84,7 @@ pub fn is_enabled() -> bool {
 }
 
 pub fn total_questions() -> usize {
-    QUESTIONS.len()
+    questions().len()
 }
 
 /// Озвучивает следующий вопрос и возвращает его. После последнего вопроса цикл начинается заново.
@@ -66,15 +93,16 @@ pub fn speak_next_question() -> Result<TestInterviewQuestion, String> {
         return Err(format!("Test interviewer is disabled: set {TEST_MODE_ENV}=1"));
     }
 
-    let index = NEXT_INDEX.fetch_add(1, Ordering::Relaxed) % QUESTIONS.len();
-    let text = QUESTIONS[index];
+    let questions = questions();
+    let index = NEXT_INDEX.fetch_add(1, Ordering::Relaxed) % questions.len();
+    let text = questions[index];
     speak(text)?;
 
     Ok(TestInterviewQuestion {
         number: index + 1,
-        total: QUESTIONS.len(),
+        total: questions.len(),
         text: text.to_string(),
-        is_last: index + 1 == QUESTIONS.len(),
+        is_last: index + 1 == questions.len(),
     })
 }
 

@@ -2302,8 +2302,44 @@ pub async fn companion_set_desktop_blackout(
 pub async fn set_companion_system_prompt(
     state: State<'_, AppState>,
     prompt: String,
+    profile_id: Option<String>,
 ) -> Result<(), String> {
+    if let Some(root) = dirs::config_dir() {
+        let dir = root.join("HackInterview");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let profile = if profile_id.as_deref() == Some("flutter-resume") { "flutter" } else { "original" };
+        std::fs::write(dir.join("stt_profile.txt"), profile).map_err(|e| e.to_string())?;
+    }
     *state.companion_system_prompt.write().await = prompt.trim().to_string();
+    // Warm the same stable system prefix without adding anything to the timeline.
+    if std::env::var("LLM_PROVIDER").ok().as_deref() == Some("openai_responses") {
+        static LAST_WARM: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+        let system = with_interview_answer_style_guard(prompt.trim().to_string());
+        let style = state.config.read().await.answer_style.clone();
+        let system = crate::presentation::answer_style_prompt::with_answer_style_policy(system, &style);
+        let system = crate::presentation::candidate_profile::with_candidate_profile(system);
+        let should_warm = {
+            let mut last = LAST_WARM.get_or_init(|| std::sync::Mutex::new(String::new())).lock().unwrap();
+            if *last == system { false } else { *last = system.clone(); true }
+        };
+        if should_warm {
+            tauri::async_runtime::spawn(async move {
+                let config = crate::domain::LlmRuntimeConfig {
+                    provider: crate::domain::LlmProviderType::OpenAiResponses,
+                    api_key: std::env::var("OPENAI_API_KEY").ok(),
+                    base_url: std::env::var("OPENAI_BASE_URL").ok(),
+                    backend_url: None, backend_auth_token: None,
+                };
+                let factory = crate::infrastructure::DefaultLlmProviderFactory::new();
+                if let Ok(provider) = factory.create(&config) {
+                    let mut request = crate::domain::LlmStreamRequest::new(openai_responses_model(), system, "Reply OK.", 16, 0.2);
+                    request.reasoning_effort = Some("minimal".to_string());
+                    let result = tokio::time::timeout(std::time::Duration::from_secs(20), provider.stream_text(&request, Box::new(|_| {}))).await;
+                    log::info!("LLM background warm-up completed: {}", matches!(result, Ok(Ok(()))));
+                }
+            });
+        }
+    }
     Ok(())
 }
 
@@ -3376,6 +3412,7 @@ pub async fn get_output_audio_devices() -> Result<Vec<String>, String> {
 }
 
 const INTERVIEW_ANSWER_STYLE_GUARD: &str = r#"Правила стиля ответа:
+- Отвечай содержательно и соразмерно вопросу. Для сложного вопроса раскрой решение и важные нюансы в нескольких связных абзацах, без фиксированного лимита предложений. Простой вопрос не растягивай. Код и развёрнутые примеры давай по просьбе или когда без примера трудно объяснить суть.
 - Начинай сразу с ответа. Не повторяй вопрос пользователя и не пиши заголовки "Вопрос:"/"Ответ:".
 - Запрещено начинать с "Вопрос", "Ответ", заголовка # Ответ, "**Вопрос:**" или краткого пересказа вопроса.
 - Первая строка должна быть содержательным тезисом ответа, без мета-комментариев.

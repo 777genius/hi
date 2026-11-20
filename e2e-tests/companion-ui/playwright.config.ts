@@ -42,6 +42,7 @@ export default defineConfig({
       name: 'phone-android',
       use: {
         ...devices['Pixel 7'],
+        ...(process.env.COMPANION_UI_CHROMIUM_PATH ? { launchOptions: { executablePath: process.env.COMPANION_UI_CHROMIUM_PATH } } : {}),
         viewport: { width: 390, height: 844 },
         screen: { width: 390, height: 844 },
       },

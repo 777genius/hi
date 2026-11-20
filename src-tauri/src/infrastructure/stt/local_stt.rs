@@ -641,7 +641,7 @@ impl SttProvider for LocalSttProvider {
                 if kind.is_hallucination(&text, duration_s) {
                     log::debug!("Dropped {} silence hallucination: {text:?}", kind.label());
                 } else if !text.is_empty() {
-                    let corrected = glossary.correct(&text);
+                    let corrected = LocalGlossary::load().correct(&text);
                     let mut transcription = if job.is_final {
                         Transcription::final_result(corrected)
                     } else {

@@ -65,5 +65,36 @@ void main() {
     const html = renderMarkdownToSafeHtml(md);
     expect(html).not.toContain('href="javascript:');
   });
+
+  it('separates assistant sentences while preserving markup, numbers and code', () => {
+    const html = renderMarkdownToSafeHtml(
+      'Первое **важное** предложение. Второе с `value.test` и 3.14. Третье!\n\n```dart\nprint("One. Two.");\n```',
+      { answerSentences: true },
+    );
+    const root = document.createElement('div');
+    root.innerHTML = html;
+    const sentences = Array.from(root.querySelectorAll('.answer-sentence'));
+    expect(sentences.map((node) => node.textContent?.trim())).toEqual([
+      'Первое важное предложение.', 'Второе с value.test и 3.14.', 'Третье!',
+    ]);
+    expect(sentences[0].querySelector('strong')?.textContent).toBe('важное');
+    expect(sentences[1].querySelector('code')?.textContent).toBe('value.test');
+    expect(root.querySelector('pre')?.textContent).toContain('One. Two.');
+    expect(root.querySelector('pre .answer-sentence')).toBeNull();
+  });
+
+  it('preserves links, nested lists, images and explicit line breaks', () => {
+    const html = renderMarkdownToSafeHtml(
+      '- First sentence. Second [link](https://example.com).\n- Parent\n  - Child one. Child two.\n\n![alt](https://example.com/image.png)\n\nLine one.  \nLine two.',
+      { answerSentences: true },
+    );
+    const root = document.createElement('div');
+    root.innerHTML = html;
+    expect(root.querySelectorAll('li')).toHaveLength(3);
+    expect(root.querySelector('a')?.getAttribute('href')).toBe('https://example.com/');
+    expect(root.querySelector('img')).not.toBeNull();
+    expect(root.querySelector('br')).not.toBeNull();
+    expect(root.textContent).toContain('Child one. Child two.');
+  });
 });
 

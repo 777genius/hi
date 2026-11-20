@@ -7,10 +7,10 @@
 //  - в конце проверяем, помнит ли LLM контекст всей беседы.
 // Тексты и ожидания лежат в fixtures/ua-interview-script.mjs, заранее.
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import process from 'node:process';
 import { CODE_IMAGES as DEFAULT_IMAGES, FINAL_RECALL_PROMPTS as DEFAULT_RECALL, TURNS as DEFAULT_TURNS } from './fixtures/ua-interview-script.mjs';
 
@@ -41,6 +41,9 @@ function parseArgs(argv) {
     keepInput: false,
     scenario: '',
     judge: true,
+    alternating: false,
+    preserveHistory: false,
+    strict: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -57,6 +60,9 @@ function parseArgs(argv) {
     else if (a === '--keep-input') o.keepInput = true;
     else if (a === '--scenario') o.scenario = next();
     else if (a === '--no-judge') o.judge = false;
+    else if (a === '--alternating') o.alternating = true;
+    else if (a === '--preserve-history') o.preserveHistory = true;
+    else if (a === '--strict') o.strict = true;
     else if (a === '--base-url') o.baseUrl = next();
     else throw new Error(`Unknown argument: ${a}`);
   }
@@ -152,8 +158,8 @@ async function prepareAudio(dir, turns, o) {
     // Явный --voice важнее голосов сценария; голос конкретной реплики важнее всего.
     const qVoice = t.qVoice || (o.voiceExplicit ? o.voice : (SCENARIO.interviewerVoice || o.voice));
     const aVoice = t.aVoice || (o.voiceExplicit ? o.voice : (SCENARIO.candidateVoice || o.voice));
-    await run('say', ['-v', qVoice, '-r', String(SCENARIO.interviewerRate || o.interviewerRate), '-o', qA, '--', t.q]);
-    await run('say', ['-v', aVoice, '-r', String(SCENARIO.candidateRate || o.candidateRate), '-o', aA, '--', t.a]);
+    await run('say', ['-v', qVoice, '-r', String(SCENARIO.interviewerRate || o.interviewerRate), '-o', qA, '--', t.qSpeech || t.q]);
+    await run('say', ['-v', aVoice, '-r', String(SCENARIO.candidateRate || o.candidateRate), '-o', aA, '--', t.aSpeech || t.a]);
     await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', qA, '-filter:a', `volume=${o.systemGain}`, '-ar', '48000', '-ac', '2', qW]);
     await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', aA, '-filter:a', `volume=${o.micGain}`, '-ar', '48000', '-ac', '2', aW]);
     await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', aA, '-filter:a', `volume=${o.micGain}`, '-f', 's16le', '-ar', '48000', '-ac', '2', aP]);
@@ -235,15 +241,17 @@ async function waitForSystemFinal(afterSeq, timeoutMs) {
 async function waitForAnswer(afterSeq, timeoutMs) {
   const start = Date.now();
   let last = null;
+  let firstTextMs = null;
   while (Date.now() - start < timeoutMs) {
     const s = await getState();
     const answers = (s.timeline || []).filter((m) => m.seq > afterSeq && m.kind === 'haiku');
     last = answers[answers.length - 1] || last;
+    if (firstTextMs === null && last?.text?.trim()) firstTextMs = Date.now() - start;
     const done = answers.find((m) => m.status === 'final' || m.status === 'error');
-    if (done) return { item: done, latencyMs: Date.now() - start };
+    if (done) return { item: done, latencyMs: Date.now() - start, firstTextMs };
     await sleep(700);
   }
-  return { item: last, latencyMs: Date.now() - start, timedOut: true };
+  return { item: last, latencyMs: Date.now() - start, firstTextMs, timedOut: true };
 }
 
 async function main() {
@@ -267,19 +275,37 @@ async function main() {
   if (!testMode && process.env.E2E_ALLOW_HISTORY_CLEAR !== '1') {
     throw new Error('Приложение запущено не в тест-режиме (INTERVIEW_TEST_MODE=1): e2e стёр бы реальную историю. Задай E2E_ALLOW_HISTORY_CLEAR=1, если это осознанно.');
   }
-  await api('/api/history/clear', {}).catch((e) => log('history clear skipped:', e.message));
-  await api('/api/context/clear', {}).catch((e) => log('context clear skipped:', e.message));
+  if (!o.preserveHistory) {
+    await api('/api/history/clear', {}).catch((e) => log('history clear skipped:', e.message));
+    await api('/api/context/clear', {}).catch((e) => log('context clear skipped:', e.message));
+  }
 
   const runId = new Date().toISOString().replace(/[:.]/g, '-');
   const outDir = join(o.artifactsDir, runId);
   await mkdir(outDir, { recursive: true });
-  const audioDir = join(tmpdir(), `ua-interview-${runId}`);
-
   const turns = TURNS.slice(0, o.turns);
+  // Reuse only identical speech and synthesis parameters between restarted runs.
+  const cacheKey = createHash('sha256').update(JSON.stringify({
+    turns: turns.map((t) => [t.id, t.qSpeech || t.q, t.aSpeech || t.a, t.qVoice, t.aVoice]),
+    voice: o.voice, voiceExplicit: o.voiceExplicit, interviewerVoice: SCENARIO.interviewerVoice,
+    candidateVoice: SCENARIO.candidateVoice, interviewerRate: SCENARIO.interviewerRate,
+    candidateRate: SCENARIO.candidateRate, systemGain: o.systemGain, micGain: o.micGain,
+  })).digest('hex').slice(0, 20);
+  const audioDir = join(tmpdir(), `hackinterview-soak-audio-${cacheKey}`);
+  const manifest = join(audioDir, 'prepared.json');
   log(`preparing audio for ${turns.length} turns...`);
-  const audio = await prepareAudio(audioDir, turns, o);
+  let audio;
+  try {
+    audio = JSON.parse(await readFile(manifest, 'utf8'));
+    if (!Array.isArray(audio) || audio.length !== turns.length) throw new Error('invalid cached audio');
+    await Promise.all(audio.flatMap((item) => [access(item.qWav), access(item.aWav), access(item.aPcm)]));
+    log('reusing previously generated speech');
+  } catch {
+    audio = await prepareAudio(audioDir, turns, o);
+    await writeFile(manifest, JSON.stringify(audio));
+  }
   const imagesDir = join(audioDir, 'images');
-  await renderCodeImages(imagesDir);
+  if (!o.skipImages && Object.keys(CODE_IMAGES).length) await renderCodeImages(imagesDir);
   const totalAudioSec = audio.reduce((s, f) => s + f.qSec + f.aSec, 0);
   const budgetSec = o.durationMin * 60;
   const perTurnFixed = 4.5; // think pause + STT settle
@@ -327,6 +353,8 @@ async function main() {
     }
     const started = await getState();
     log('recording', started.recording?.status, 'mic', JSON.stringify(started.microphone));
+    if (started.recording?.status !== 'Recording') throw new Error('Recording did not start');
+    const recordingStartedMs = Date.now();
     // прогрев STT: играем короткую реплику, пока не придёт первый финал в системном канале
     {
       const warmWav = join(audioDir, 'warmup.wav');
@@ -364,7 +392,7 @@ async function main() {
         await sleep(3000);
       }
       const baseSeq = maxSeq(before);
-      const rec = { id: t.id, baseSeq, q: t.q, a: t.a, aiRequested: false };
+      const rec = { id: t.id, baseSeq, q: t.q, qSpeech: t.qSpeech || t.q, a: t.a, aSpeech: t.aSpeech || t.a, aiRequested: false };
 
       // 1) интервьюер говорит в системный звук
       log(`turn ${t.id}/${turns.length}: interviewer (${f.qSec.toFixed(1)}s)`);
@@ -403,10 +431,12 @@ async function main() {
           status: answer.item?.status || 'none',
           timedOut: Boolean(answer.timedOut),
           latencyMs: answer.latencyMs,
+          firstTextMs: answer.firstTextMs,
           chars: text.length,
           expect,
           hits: sc.hits,
-          ok: answer.item?.status === 'final' && sc.hits.length >= need && text.length > 60,
+          ok: answer.item?.status === 'final' && text.length > 60,
+          qualityNeedsReview: sc.hits.length < need,
           meta: answerMeta(text),
           text,
         };
@@ -417,7 +447,7 @@ async function main() {
 
       // 3) кандидат отвечает в микрофон (BlackHole)
       log(`turn ${t.id}: candidate (${f.aSec.toFixed(1)}s)${rec.aiRequested || aiPromise ? ' + LLM' : ''}`);
-      await playMic(f.aPcm, o.blackhole);
+      if (!o.alternating || !t.llm) await playMic(f.aPcm, o.blackhole);
       await sleep(4500);
       if (aiPromise) {
         rec.ai = await aiPromise;
@@ -434,17 +464,39 @@ async function main() {
       rec.micA = { score: coverage(t.a, mic) }; // насколько распознан ответ кандидата в микрофонном канале
       rec.leakA_in_system = coverage(t.a, sys); // голос кандидата в системном канале (SCK ловит и вывод в BlackHole)
       rec.leakQ_in_mic = coverage(t.q, mic);
-      rec.systemOk = rec.systemQ.score >= o.sttMatchThreshold;
-      rec.micOk = rec.micA.score >= o.sttMatchThreshold;
+      const termChecks = (specs, text) => (specs || []).map((spec) => {
+        const normalized = ` ${norm(text)} `;
+        const found = [spec.term, ...(spec.aliases || [])].some((alias) => normalized.includes(` ${norm(alias)} `));
+        return { term: spec.term, found };
+      });
+      rec.systemTerms = termChecks(t.systemTerms, sys);
+      rec.micTerms = o.alternating && t.llm ? [] : termChecks(t.micTerms, mic);
+      // Coverage alone misses an unrelated hallucinated suffix after correct speech.
+      const hasRepetitionLoop = (text) => /(?:\.([a-z0-9]{1,8}))(?:\.\1){7,}/i.test(text) || /\b([\p{L}\p{N}]+)(?:[\s,]+\1){7,}\b/iu.test(text);
+      rec.systemRepetitionLoop = hasRepetitionLoop(sys);
+      rec.micRepetitionLoop = hasRepetitionLoop(mic);
+      rec.repetitionLoop = rec.systemRepetitionLoop || rec.micRepetitionLoop;
+      rec.systemOk = rec.systemQ.score >= o.sttMatchThreshold && !rec.systemRepetitionLoop && rec.systemTerms.every((term) => term.found);
+      rec.micOk = o.alternating && t.llm ? null : rec.micA.score >= o.sttMatchThreshold && !rec.micRepetitionLoop && rec.micTerms.every((term) => term.found);
       rec.elapsedSec = (Date.now() - turnStart) / 1000;
       report.turns.push(rec);
       await writeFile(join(outDir, 'report.partial.json'), JSON.stringify(report, null, 2));
       log(`turn ${t.id}: system ${rec.systemQ.score.toFixed(2)} mic ${rec.micA.score.toFixed(2)} leakA->sys ${rec.leakA_in_system.toFixed(2)}`);
+      if (o.strict && (!rec.systemOk || rec.micOk === false || rec.repetitionLoop || rec.systemTerms.some((term) => !term.found) || rec.micTerms.some((term) => !term.found) || (rec.aiRequested && (rec.ai?.status !== 'final' || !rec.ai?.text)))) throw new Error(`Strict turn failure ${t.id}: system=${rec.systemQ.score.toFixed(2)} mic=${rec.micOk} repetition=${rec.repetitionLoop} missing=${[...rec.systemTerms, ...rec.micTerms].filter((term) => !term.found).map((term) => term.term).join(',')} AI=${rec.ai?.status || 'not requested'}`);
 
       // 4) пауза до следующего вопроса, чтобы уложиться в бюджет времени
       const targetEnd = startedMs + ((idx + 1) / turns.length) * (budgetSec - 150) * 1000 + 8000;
       const wait = Math.max(gapSec * 1000 * 0.5, targetEnd - Date.now());
       if (idx < turns.length - 1) await sleep(Math.min(wait, gapSec * 1000 * 2.5));
+    }
+
+    if (o.strict) {
+      while (Date.now() - recordingStartedMs < budgetSec * 1000) {
+        const current = await getState();
+        if (current.recording?.status !== 'Recording') throw new Error('Recording stopped during the endurance interval');
+        await sleep(Math.min(5000, Math.max(1, recordingStartedMs + budgetSec * 1000 - Date.now())));
+      }
+      report.continuousRecordingMs = Date.now() - recordingStartedMs;
     }
 
     // финальные проверки памяти контекста
@@ -497,12 +549,18 @@ async function main() {
   report.memory = finalState?.memory;
   const ts = report.turns;
   const aiTurns = ts.filter((t) => t.aiRequested);
+  const micTurns = ts.filter((t) => t.micOk !== null);
   report.summary = {
     turnsRun: ts.length,
     systemOk: ts.filter((t) => t.systemOk).length,
     micOk: ts.filter((t) => t.micOk).length,
+    micTurns: micTurns.length,
+    sttFailures: ts.filter((t) => !t.systemOk || t.micOk === false).length,
+    missingTerms: ts.flatMap((t) => [...(t.systemTerms || []), ...(t.micTerms || [])]).filter((term) => !term.found).length,
+    continuousRecordingMs: report.continuousRecordingMs ?? null,
+    answerQualityReviewRequired: !o.judge,
     avgSystemScore: avg(ts.map((t) => t.systemQ?.score ?? 0)),
-    avgMicScore: avg(ts.map((t) => t.micA?.score ?? 0)),
+    avgMicScore: avg(micTurns.map((t) => t.micA?.score ?? 0)),
     avgLeakCandidateIntoSystem: avg(ts.map((t) => t.leakA_in_system ?? 0)),
     aiTurns: aiTurns.length,
     aiOk: aiTurns.filter((t) => t.ai?.ok).length,
@@ -521,7 +579,7 @@ async function main() {
   await writeFile(join(outDir, 'report.md'), renderMarkdown(report));
   log('SUMMARY', JSON.stringify(report.summary));
   log('report:', join(outDir, 'report.md'));
-  process.exit(report.errors.length || (report.incidents || []).length ? 1 : 0);
+  process.exit(report.errors.length || (report.incidents || []).length || report.summary.sttFailures || report.summary.aiErrors ? 1 : 0);
 }
 
 

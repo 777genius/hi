@@ -29,20 +29,25 @@ test.describe('Автоскролл ленты', () => {
     await expect(button).toBeHidden();
   });
 
-  test('стриминг ответа никогда не тянет ленту вниз, даже если пользователь стоит внизу', async ({ companion, page }) => {
+  test('новый ответ позиционируется для чтения и стриминг не двигает ленту', async ({ companion, page }) => {
     await companion.reset(snapshotData(questions(40)));
     await companion.open();
     await companion.userScrollTo('bottom');
-    const start = await companion.scrollMetrics();
-
     await companion.update((data) => {
       data.timeline.push(haiku(41, 'Начало ответа', { status: 'streaming', insertAfterId: 'stt:40' }));
     });
+    const row = page.locator('[data-msg-id="haiku:41"]');
+    await expect(row).toBeVisible();
+    await expect.poll(() => row.evaluate((el) => {
+      const scroll = el.closest('.chat-scroll')!;
+      return Math.abs((el.getBoundingClientRect().top - scroll.getBoundingClientRect().top) - scroll.clientHeight * 0.42);
+    })).toBeLessThanOrEqual(3);
+    const start = await companion.scrollMetrics();
     for (let chunk = 1; chunk <= 3; chunk += 1) {
       await companion.update((data) => { data.timeline.at(-1)!.text = paragraphs(chunk * 3); });
       await expect(page.locator('[data-msg-id="haiku:41"]')).toContainText(`Абзац ${chunk * 3 - 1}`);
     }
-    // Решение владельца: начало ответа остаётся на месте, лента не прыгает за текстом.
+    // После позиционирования начала ответа лента не прыгает за текстом.
     expect((await companion.scrollMetrics()).scrollTop).toBe(start.scrollTop);
     await expect(page.locator('.scroll-to-bottom-button')).toBeVisible();
 
@@ -66,13 +71,14 @@ test.describe('Автоскролл ленты', () => {
     expect((await companion.scrollMetrics()).scrollTop).toBe(reading);
   });
 
-  test('стриминг, пока пользователь читает старые сообщения, вообще не двигает ленту', async ({ companion, page }) => {
+  test('после ручного перехода к старым сообщениям стриминг не двигает ленту', async ({ companion, page }) => {
     await companion.reset(snapshotData(questions(40)));
     await companion.open();
-    await companion.userScrollTo(200);
     await companion.update((data) => {
       data.timeline.push(haiku(41, 'Начало', { status: 'streaming', insertAfterId: 'stt:40' }));
     });
+    await expect(page.locator('[data-msg-id="haiku:41"]')).toBeVisible();
+    await companion.userScrollTo(200);
     for (let chunk = 1; chunk <= 4; chunk += 1) {
       await companion.update((data) => { data.timeline.at(-1)!.text = paragraphs(chunk * 4); });
       await expect(page.locator('[data-msg-id="haiku:41"]')).toContainText(`Абзац ${chunk * 4 - 1}`);
@@ -82,6 +88,24 @@ test.describe('Автоскролл ленты', () => {
 });
 
 test.describe('Большая лента и длинный контент', () => {
+  test('предложения ответа идут отдельными строками с отступом, код и сообщения собеседника сохранены', async ({ companion, page }) => {
+    await companion.reset(snapshotData([
+      stt(1, 'Первый вопрос. Второй вопрос.'),
+      haiku(2, 'Первое **предложение**. Второе с `value.test` и 3.14. Третье!\n\n```dart\nprint("One. Two.");\n```', { insertAfterId: 'stt:1' }),
+    ]));
+    await companion.open();
+    const answer = page.locator('[data-msg-id="haiku:2"]');
+    const sentences = answer.locator('.answer-sentence');
+    await expect(sentences).toHaveCount(3);
+    await expect(sentences.nth(0)).toContainText('Первое предложение.');
+    await expect(sentences.nth(1)).toContainText('Второе с value.test и 3.14.');
+    expect(await sentences.nth(0).evaluate((el) => ({ display: getComputedStyle(el).display, indent: parseFloat(getComputedStyle(el).textIndent) }))).toMatchObject({ display: 'block', indent: expect.any(Number) });
+    expect(await sentences.nth(0).evaluate((el) => parseFloat(getComputedStyle(el).textIndent))).toBeGreaterThan(0);
+    expect((await sentences.nth(1).boundingBox())!.y).toBeGreaterThan((await sentences.nth(0).boundingBox())!.y);
+    await expect(answer.locator('pre')).toContainText('One. Two.');
+    await expect(page.locator('[data-msg-id="stt:1"] .answer-sentence')).toHaveCount(0);
+  });
+
   test('300+ сообщений: открывается в конце, обновляется без ошибок и тормозов', async ({ companion, page }) => {
     const timeline = Array.from({ length: 360 }, (_, index) => {
       const seq = index + 1;

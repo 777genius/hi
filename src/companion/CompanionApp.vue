@@ -167,7 +167,7 @@ const showTopConnectionStatus = computed(() => (
   actionStatusText.value.length > 0
   || connectionState.value !== 'connected'
 ));
-const topStackVisible = computed(() => showTopConnectionStatus.value || pwaNoticeVisible.value);
+const topStackVisible = computed(() => pwaNoticeVisible.value);
 const emptyFeedText = computed(() => {
   if (!companionAvailable) return 'Некорректная companion-ссылка. Открой QR из окна приложения заново.';
   if (authRequired.value) return 'Сначала авторизуйся в приложении на компьютере.';
@@ -320,31 +320,15 @@ function onFeedMessageClick(event: MouseEvent, message: ConversationFeedMessage)
   selectedMessageIds.value = normalizeCompanionSelectedIds([message.id], feedMessages.value);
 }
 
-function isNearBottom(): boolean {
-  const element = scrollEl.value;
-  if (!element) return true;
-  const remaining = element.scrollHeight - (element.scrollTop + element.clientHeight);
-  return remaining < 88;
-}
-
-async function stickToBottomIfNeeded(): Promise<void> {
-  await nextTick();
-  const element = scrollEl.value;
-  if (!element) return;
-  element.scrollTop = element.scrollHeight;
-}
-
 async function applySnapshot(next: TauriSnapshotEnvelope<CompanionSnapshotData>): Promise<void> {
   const nextRevision = statusRevision(next);
   if (!shouldApplyCompanionSnapshot(next, currentRevision.value, currentInstanceId.value)) {
     return;
   }
 
-  const shouldStickBottom = isNearBottom();
   const nextInstanceId = next.data?.controls?.instanceId ?? null;
   const epochChanged = !!currentInstanceId.value && !!nextInstanceId
     && currentInstanceId.value !== nextInstanceId;
-  const revisionAdvanced = epochChanged || nextRevision > currentRevision.value;
   snapshot.value = next;
   currentRevision.value = nextRevision;
   currentInstanceId.value = nextInstanceId;
@@ -354,13 +338,7 @@ async function applySnapshot(next: TauriSnapshotEnvelope<CompanionSnapshotData>)
     selectedMessageIds.value = [];
   }
 
-  // Пока идёт ответ LLM, ленту вниз не двигаем: она остаётся там, где её оставил пользователь.
-  const answerStreaming = (next.data?.timeline ?? []).some(
-    (message) => message.kind === 'haiku' && !message.deleted && message.status === 'streaming'
-  );
-  if (shouldStickBottom && revisionAdvanced && !answerStreaming) {
-    await stickToBottomIfNeeded();
-  }
+
 }
 
 function clearStatusTimer(): void {
@@ -889,7 +867,10 @@ async function onRecordClick(): Promise<void> {
   await sendAction('/api/record/start');
 }
 
+const aiReplyPending = ref(false);
 async function requestAiReply(): Promise<void> {
+  aiReplyPending.value = true;
+  try {
   const selectedIds = selectedMessageIdsPayload();
   const body: Record<string, unknown> = {
     text: '',
@@ -902,6 +883,7 @@ async function requestAiReply(): Promise<void> {
   if (applied && selectedIds) {
     clearSelectedMessages();
   }
+  } finally { aiReplyPending.value = false; }
 }
 
 async function sendPromptDraft(): Promise<void> {
@@ -1211,7 +1193,6 @@ onUnmounted(() => {
 <template>
   <main class="companion-page">
     <section class="companion-shell" :class="{ 'feed-scrolled': feedScrolledDown }">
-      <div v-if="topStackVisible" class="top-stack">
         <div
           v-if="showTopConnectionStatus"
           class="top-connection-status"
@@ -1219,6 +1200,8 @@ onUnmounted(() => {
         >
           {{ topConnectionText }}
         </div>
+      <div v-if="topStackVisible" class="top-stack">
+
 
         <section v-if="pwaNoticeVisible" class="pwa-notice" :class="[`tone-${pwaNoticeTone}`]">
           <div class="pwa-notice-main">
@@ -1274,6 +1257,7 @@ onUnmounted(() => {
 
       <section class="feed-card">
         <ConversationFeed
+          :assistant-streaming="aiReplyPending"
           ref="companionFeedRef"
           :messages="feedMessages"
           :empty-text="emptyFeedText"
@@ -1528,6 +1512,19 @@ onUnmounted(() => {
   min-width: 0;
 }
 
+.top-connection-status {
+  position: fixed;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  max-width: calc(100vw - 24px);
+  padding: 4px 8px !important;
+  border-radius: 8px;
+  background: rgba(17, 21, 29, 0.94);
+  pointer-events: none;
+}
+
 .top-connection-status,
 .ask-status {
   min-height: 16px;
@@ -1755,17 +1752,17 @@ onUnmounted(() => {
   --chat-empty-font-size: 14px;
   /* Размер текста сообщений на 20% меньше (было 21px), ширина пузырей на 20% уже. */
   --chat-message-font-size: 17px;
-  --chat-bubble-width-scale: 0.8;
+  --chat-bubble-width-scale: 0.933333;
   --chat-message-line-height: 1.44;
-  /* Код ровно того же размера, что и текст сообщения (решение владельца). */
-  --chat-code-font-size: var(--chat-message-font-size);
+  /* Размер блоков кода в компаньоне. */
+  --chat-code-font-size: 10px;
   --chat-code-line-height: var(--chat-message-line-height);
   --chat-inline-code-font-size: 0.9em;
   --chat-sticky-footer-bottom: calc(126px + env(safe-area-inset-bottom, 0px));
   --chat-scroll-padding: 12px 0 0 0;
   --chat-scroll-mobile-padding: 12px 0 0 0;
   --chat-scroll-narrow-padding: 12px 0 0 0;
-  --chat-scroll-end-space: calc(148px + env(safe-area-inset-bottom, 0px));
+  --chat-scroll-end-space: calc(298px + env(safe-area-inset-bottom, 0px));
 
   display: flex;
   min-width: 0;
@@ -1804,10 +1801,11 @@ onUnmounted(() => {
 }
 
 .feed-card :deep(.chat-row .chat-bubble:has(.code-block)) {
+  padding: 0 !important;
   /* Сообщение с кодом занимает всю ширину ленты (как на десктопе), без сужения 80%. */
   --chat-bubble-width-scale: 1;
-  width: calc(100% - 6px);
-  max-width: calc(100% - 6px);
+  width: calc(100% - 10px);
+  max-width: calc(100% - 10px);
 }
 
 .feed-card :deep(.chat-markdown .code-block pre),
@@ -2351,4 +2349,5 @@ onUnmounted(() => {
     height: 52px;
   }
 }
+.feed-card :deep(.chat-row.incoming .chat-bubble) { max-width: calc(100% - 10px); }
 </style>

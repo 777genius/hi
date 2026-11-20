@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { toDataURL as toQrDataUrl } from 'qrcode';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { LogicalSize } from '@tauri-apps/api/dpi';
 import { getVersion } from '@tauri-apps/api/app';
 import { useTranscriptionStore } from '../../stores/transcription';
 import { useChatStore } from '../../stores/chat';
@@ -84,13 +85,6 @@ const showUpdateDialog = ref(false);
 const appVersion = ref('');
 const glowColor = ref<'blue' | 'red' | null>(null);
 const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-const microphoneMuteHotkeyLabel = computed(() => (isMac ? 'Option+Z' : 'Alt+Z'));
-const webSearchToggleTooltip = computed(() =>
-  chatStore.openaiResponsesWebSearchEnabled
-    ? 'Web search для OpenAI включён'
-    : 'Web search для OpenAI выключен'
-);
-
 const audioPermissions = useAudioPermissions();
 const testInterviewer = useTestInterviewer();
 function onTestInterviewerClick(e: MouseEvent) {
@@ -1069,6 +1063,19 @@ onMounted(async () => {
     return;
   }
 
+  try {
+    const win = getCurrentWebviewWindow();
+    const saved = JSON.parse(localStorage.getItem('mainWindowSizeV1') || 'null');
+    if (saved && Number.isFinite(saved.width) && Number.isFinite(saved.height)) {
+      await win.setSize(new LogicalSize(Math.max(50, saved.width), Math.max(50, saved.height)));
+    }
+    const stop = await win.onResized(async ({ payload }) => {
+      const scale = await win.scaleFactor();
+      localStorage.setItem('mainWindowSizeV1', JSON.stringify({ width: payload.width / scale, height: payload.height / scale }));
+    });
+    window.addEventListener('beforeunload', stop, { once: true });
+  } catch (error) { console.warn('Window size restore failed', error); }
+
   // Загружаем версию приложения
   try {
     appVersion.value = await getVersion();
@@ -1502,7 +1509,7 @@ const onMessageClick = (
   message: { id: string; kind: 'stt' | 'mic' | 'signal' | 'haiku' | 'prompt'; status: 'final' | 'streaming' | 'error'; deleted?: boolean },
 ) => {
   if (editingMessageId.value) return;
-  if (message.kind === 'haiku' || message.deleted || message.status !== 'final') return;
+  if (message.deleted || message.status !== 'final') return;
   // Если пользователь выделяет текст внутри пузыря — не мешаем.
   const sel = typeof window !== 'undefined' ? window.getSelection?.() : null;
   if (sel && !sel.isCollapsed && sel.toString().trim()) return;
@@ -1716,7 +1723,7 @@ const onChatMouseDown = (e: MouseEvent) => {
           </v-tooltip>
           <v-tooltip v-if="authStore.isAuthenticated" :text="t('profile.title')" location="bottom">
             <template #activator="{ props: tp }">
-              <button v-bind="tp" class="profile-button no-drag" @click="openProfile">
+              <button v-bind="tp" v-show="false" class="profile-button no-drag" @click="openProfile">
                 <span class="mdi mdi-account-circle-outline"></span>
               </button>
             </template>
@@ -1833,9 +1840,17 @@ const onChatMouseDown = (e: MouseEvent) => {
             </template>
 
             <v-card class="system-prompt-card no-drag">
-              <v-card-title>Системный промпт</v-card-title>
+              <v-card-title>Профили промпта</v-card-title>
               <v-divider />
               <v-card-text>
+                <v-select
+                  :model-value="chatStore.activePromptProfileId"
+                  :items="chatStore.promptProfiles"
+                  item-title="name"
+                  item-value="id"
+                  label="Профиль собеседования"
+                  @update:model-value="(id: string) => { chatStore.selectPromptProfile(id); promptDraft = chatStore.systemPrompt; }"
+                />
                 <v-textarea
                   v-model="promptDraft"
                   label="Инструкция для модели"
@@ -1944,7 +1959,7 @@ const onChatMouseDown = (e: MouseEvent) => {
         <ConversationFeed
           ref="conversationFeedRef"
           :messages="chatStore.messages"
-          :assistant-streaming="chatStore.isHaikuStreaming"
+          :assistant-streaming="haikuRequestPending || chatStore.isHaikuStreaming"
           :empty-text="emptyFeedText"
           :selecting="lassoActive"
           :editing-message-id="editingMessageId"
@@ -2085,10 +2100,9 @@ const onChatMouseDown = (e: MouseEvent) => {
       <!-- Controls -->
       <div class="controls">
         <div class="controls-center">
-          <v-tooltip :text="webSearchToggleTooltip" location="top">
-            <template #activator="{ props: tp }">
+
               <button
-                v-bind="tp"
+
                 class="web-search-toggle-button no-drag"
                 :class="{ active: chatStore.openaiResponsesWebSearchEnabled }"
                 :aria-pressed="chatStore.openaiResponsesWebSearchEnabled"
@@ -2096,32 +2110,15 @@ const onChatMouseDown = (e: MouseEvent) => {
               >
                 <span class="mdi mdi-web"></span>
               </button>
-            </template>
-          </v-tooltip>
-          <v-tooltip
-            :text="chatStore.microphoneEnabled
-              ? `Замьютить микрофон (${microphoneMuteHotkeyLabel})`
-              : `Размьютить микрофон (${microphoneMuteHotkeyLabel})`"
-            location="top"
-          >
-            <template #activator="{ props: tp }">
+
+
+
+
+
+
+
               <button
-                v-bind="tp"
-                class="mic-toggle-button no-drag"
-                :class="{ disabled: !chatStore.microphoneEnabled }"
-                @click="onMicToggleClick"
-              >
-                <span
-                  class="mdi"
-                  :class="chatStore.microphoneEnabled ? 'mdi-microphone' : 'mdi-microphone-off'"
-                ></span>
-              </button>
-            </template>
-          </v-tooltip>
-          <v-tooltip :text="store.isRecording ? 'Остановить запись' : store.isProcessing ? 'Обработка...' : 'Начать запись'" location="top">
-            <template #activator="{ props: tp }">
-              <button
-                v-bind="tp"
+
                 v-ripple="{ class: store.isRecording ? 'text-red' : 'text-blue' }"
                 class="record-button no-drag"
                 :class="{
@@ -2138,8 +2135,8 @@ const onChatMouseDown = (e: MouseEvent) => {
                 <span v-else-if="store.isProcessing" class="mdi mdi-cached record-icon-spin"></span>
                 <span v-else class="mdi mdi-record-circle-outline"></span>
               </button>
-            </template>
-          </v-tooltip>
+
+
           <div class="haiku-control-group">
             <span v-if="haikuRequestPending || chatStore.isHaikuStreaming" class="haiku-wait-label">
               {{ haikuRequestPending ? 'Отправляю…' : `AI отвечает · ${haikuWaitSeconds} с` }}
@@ -2162,10 +2159,21 @@ const onChatMouseDown = (e: MouseEvent) => {
             </button>
           </div>
         </div>
-        <div class="controls-right no-drag">
-          <v-tooltip v-if="chatStore.selectedCount > 0" text="Снять выделение" location="top">
-            <template #activator="{ props: tp }">
-              <div v-bind="tp" class="selection-clear-wrapper">
+        <div class="controls-right no-drag">              <button
+
+                class="mic-toggle-button no-drag"
+
+                @click="onMicToggleClick"
+                @contextmenu.prevent="chatStore.microphoneMuteMode = chatStore.microphoneMuteMode === 'app' ? 'system' : 'app'"
+                :aria-label="chatStore.microphoneMuteMode === 'app' ? 'Микрофон приложения; правый клик: системный режим' : 'Системный микрофон; правый клик: режим приложения'"
+                :class="{ 'system-mute-mode': chatStore.microphoneMuteMode === 'system', disabled: !chatStore.microphoneEnabled }"
+              >
+                <span
+                  class="mdi"
+                  :class="chatStore.microphoneEnabled ? 'mdi-microphone' : 'mdi-microphone-off'"
+                ></span>
+              </button>
+              <div v-if="chatStore.selectedCount > 0" class="selection-clear-wrapper">
                 <button
                   class="selection-clear-button"
                   @click="clearMessageSelection"
@@ -2174,33 +2182,31 @@ const onChatMouseDown = (e: MouseEvent) => {
                 </button>
                 <span class="selection-badge">{{ chatStore.selectedCount }}</span>
               </div>
-            </template>
-          </v-tooltip>
 
-          <v-tooltip text="Очистить контекст AI" location="top">
-            <template #activator="{ props: tp }">
+
+
+
               <button
-                v-bind="tp"
+
                 class="context-clear-button"
                 :disabled="!chatStore.hasContextToClear"
                 @click="clearLlmContext"
               >
                 <span class="mdi mdi-broom"></span>
               </button>
-            </template>
-          </v-tooltip>
 
-          <v-tooltip text="Очистить историю" location="top">
-            <template #activator="{ props: tp }">
+
+
+
               <button
-                v-bind="tp"
+
                 class="history-clear-button"
                 @click="clearAllHistory"
               >
                 <span class="mdi mdi-trash-can-outline"></span>
               </button>
-            </template>
-          </v-tooltip>
+
+
 
         </div>
       </div>
@@ -3111,10 +3117,10 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 .ask-fab {
   position: fixed;
-  right: 16px;
-  bottom: 16px;
-  width: 52px;
-  height: 52px;
+  left: 12px;
+  top: 12px;
+  width: 40px;
+  height: 40px;
   border-radius: 16px;
   border: 1px solid rgba(59, 130, 246, 0.4);
   background: rgba(59, 130, 246, 0.92);
@@ -3725,10 +3731,10 @@ const onChatMouseDown = (e: MouseEvent) => {
   }
 
   .ask-fab {
-    right: 12px;
-    bottom: 12px;
-    width: 46px;
-    height: 46px;
+    left: 10px;
+    top: 10px;
+    width: 36px;
+    height: 36px;
     border-radius: 14px;
     font-size: 20px;
   }
@@ -3783,4 +3789,31 @@ const onChatMouseDown = (e: MouseEvent) => {
 .theme-light .context-clear-button:hover {
   background: rgba(0, 0, 0, 0.06);
 }
+@media (max-width: 249px), (max-height: 479px) {
+  .web-search-toggle-button { display: none; }
+}
+
+.controls-right { display: flex !important; flex-wrap: nowrap !important; flex-direction: column !important; gap: 6px; width: auto !important; min-height: 36px !important; }
+.controls-right .mic-toggle-button,
+.controls-right .context-clear-button,
+.controls-right .history-clear-button { position: static !important; width: 36px !important; height: 36px !important; min-width: 36px; min-height: 36px; font-size: 18px !important; flex: 0 0 36px; border-radius: 6px; }
+.mic-toggle-button.system-mute-mode { outline: 2px solid var(--color-warning); }
+.record-button:hover:not(:disabled) { animation: record-hover 1s ease-in-out infinite alternate; }
+@keyframes record-hover { from { transform: scale(1.03); } to { transform: scale(1.12); filter: brightness(1.15); } }
+@media (prefers-reduced-motion: reduce) { .record-button:hover:not(:disabled) { animation: none; } }
+.chat-area :deep(.chat-row.incoming .chat-bubble) { max-width: calc(100% - 10px); }
+
+.header { min-height: 42px; padding-top: 6px; padding-bottom: 6px; }
+.header .title-row { flex: 1; align-self: stretch; }
+.controls-right { top: auto !important; bottom: 4px !important; transform: none !important; gap: 3px !important; }
+.controls-right .mic-toggle-button, .controls-right .context-clear-button, .controls-right .history-clear-button { width: 30px !important; height: 30px !important; min-width: 30px; min-height: 30px; flex-basis: 30px; font-size: 16px !important; }
+.chat-area :deep(.chat-empty) { padding: 16px 20px; box-sizing: border-box; }
+
+.haiku-control-group { position: fixed; right: 12px; bottom: 12px; z-index: 28; }
+
+.chat-area :deep(.scroll-to-bottom-button) { position: fixed; top: auto !important; bottom: 68px; right: 16px; transform: none; }
+.chat-area :deep(.scroll-to-bottom-button:hover) { transform: translateY(-1px); }
+.chat-area :deep(.scroll-to-bottom-button:active) { transform: none; }
+@media (max-width: 560px) { .chat-area :deep(.scroll-to-bottom-button) { bottom: 62px; right: 15px; } }
+@media (max-width: 420px) { .chat-area :deep(.scroll-to-bottom-button) { bottom: 58px; right: 13px; } }
 </style>
