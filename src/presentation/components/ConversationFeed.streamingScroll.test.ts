@@ -44,6 +44,30 @@ describe('ConversationFeed assistant scrolling', () => {
     expect(scroll.scrollTop).toBe(950);
     app.unmount(); host.remove();
   });
+  it('labels only live speech previews and removes the label when finalized', async () => {
+    const state = reactive({ messages: [
+      { id: 'stt', kind: 'stt', role: 'incoming', status: 'streaming', text: 'Visible question fragment', createdAtMs: 1, seq: 1 },
+      { id: 'mic', kind: 'mic', role: 'outgoing', status: 'streaming', text: 'Visible microphone fragment', createdAtMs: 2, seq: 2 },
+      { id: 'answer', kind: 'haiku', role: 'incoming', status: 'streaming', text: 'Assistant response', createdAtMs: 3, seq: 3 },
+    ] as ConversationFeedMessage[] });
+    const host = document.createElement('div');
+    document.body.append(host);
+    const app = createApp({ render: () => h(ConversationFeed, { messages: state.messages, emptyText: '' }) });
+    app.mount(host);
+    await nextTick();
+    expect(host.querySelectorAll('.chat-preview-label')).toHaveLength(2);
+    expect(host.querySelector('[data-msg-id="stt"] .chat-text')?.textContent).toBe('Visible question fragment');
+    expect(host.querySelector('[data-msg-id="mic"] .chat-preview-label')?.textContent).toBe('предварительно');
+    expect(host.querySelector('[data-msg-id="answer"] .chat-preview-label')).toBeNull();
+    state.messages[0].status = 'final';
+    state.messages[1].status = 'final';
+    await nextTick();
+    expect(host.querySelectorAll('.chat-preview-label')).toHaveLength(0);
+    expect(host.querySelector('[data-msg-id="stt"] .chat-text')?.textContent).toBe('Visible question fragment');
+    app.unmount();
+    host.remove();
+  });
+
   it('shows a single assistant bullet as a plain sentence', async () => {
     const host = document.createElement('div');
     document.body.append(host);

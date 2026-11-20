@@ -603,6 +603,11 @@ onUnmounted(() => {
           <template v-else>
             <span v-if="msg.kind === 'mic'" class="chat-icon mdi mdi-microphone" />
             <span v-if="msg.kind === 'signal'" class="chat-icon mdi mdi-message-text-outline" />
+            <span
+              v-if="(msg.kind === 'stt' || msg.kind === 'mic') && msg.status === 'streaming'"
+              class="chat-preview-label"
+              title="Распознавание продолжается, текст может измениться"
+            >предварительно</span>
 
             <template v-if="editingMessageId === msg.id">
               <span
@@ -963,6 +968,15 @@ onUnmounted(() => {
   font-size: 16px;
   opacity: 0.9;
   margin-right: 6px;
+}
+
+.chat-preview-label {
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 0.72em;
+  line-height: 1.2;
+  opacity: 0.65;
+  vertical-align: baseline;
 }
 
 .chat-text {
