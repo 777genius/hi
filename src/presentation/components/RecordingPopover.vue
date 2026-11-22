@@ -1536,7 +1536,19 @@ const clearMessageSelection = () => {
   chatStore.clearSelection();
 };
 
+let suppressNextLassoClick = false;
+const onPopoverMouseDown = () => {
+  // A new gesture cannot be the terminating click of the previous drag.
+  suppressNextLassoClick = false;
+};
+
 const onOutsideMessageClick = (event: MouseEvent) => {
+  if (suppressNextLassoClick) {
+    suppressNextLassoClick = false;
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   const target = event.target as HTMLElement | null;
   // Keep selected context until an action button has consumed it.
   if (target?.closest('.chat-bubble, .code-selection-robot-button, button, [role="button"], a, input, textarea, select, [contenteditable="true"]')) return;
@@ -1559,6 +1571,7 @@ const lassoRect = ref<{ left: number; top: number; width: number; height: number
 let lassoStartClient: { x: number; y: number } | null = null;
 let lassoAdditive = false;
 let lassoBaseSelection: string[] = [];
+let lassoMoved = false;
 
 function rectIntersects(a: DOMRect, b: { left: number; top: number; right: number; bottom: number }): boolean {
   return !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
@@ -1582,6 +1595,7 @@ function computeIdsInViewportRect(viewport: { left: number; top: number; right: 
 function updateLasso(clientX: number, clientY: number): void {
   const container = chatScrollRef.value;
   if (!container || !lassoStartClient) return;
+  lassoMoved ||= clientX !== lassoStartClient.x || clientY !== lassoStartClient.y;
 
   const cr = container.getBoundingClientRect();
   const left = Math.min(lassoStartClient.x, clientX);
@@ -1619,6 +1633,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   lassoAdditive = isAdditiveSelection(e);
   lassoBaseSelection = lassoAdditive ? [...chatStore.selectedMessageIds] : [];
   lassoStartClient = { x: e.clientX, y: e.clientY };
+  lassoMoved = false;
   lassoActive.value = true;
   updateLasso(e.clientX, e.clientY);
 
@@ -1629,6 +1644,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   const onUp = (ev: MouseEvent) => {
     if (!lassoActive.value) return;
     updateLasso(ev.clientX, ev.clientY);
+    suppressNextLassoClick = lassoMoved;
     lassoActive.value = false;
     lassoStartClient = null;
     lassoRect.value = null;
@@ -1643,7 +1659,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 </script>
 
 <template>
-  <div class="popover-container" @click.capture="onOutsideMessageClick">
+  <div class="popover-container" @mousedown.capture="onPopoverMouseDown" @click.capture="onOutsideMessageClick">
     <div class="popover">
       <div
         v-if="shouldShowSystemAudioPermissionWarning || shouldShowMicrophonePermissionWarning"

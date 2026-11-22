@@ -49,7 +49,7 @@ const NUMBER_FORMS = [
   [700, 'сімсот семисот семьсот'], [800, 'вісімсот восьмисот восемьсот'],
   [900, 'девятсот девятьсот девятисот'],
 ];
-const NUMBERS = new Map(NUMBER_FORMS.flatMap(([value, forms]) => forms.split(' ').map((form) => [form, value])));
+const NUMBERS = new Map(NUMBER_FORMS.flatMap(([value, forms]) => forms.split(' ').map((form) => [form.replaceAll('ё', 'е'), value])));
 
 function unit(word) {
   if (/^(?:hz|гц|гцах|герц(?:а|ів|ев|ы|и|ах|ами|ові|ам)?)$/.test(word)) return 'hz';
@@ -58,9 +58,9 @@ function unit(word) {
 }
 
 export function words(text) {
-  const tokens = String(text || '').toLowerCase()
+  const tokens = String(text || '').toLowerCase().replaceAll('ё', 'е')
     .replace(/['’ʼ]/g, '')
-    .replace(/[^a-zа-яіїєґё0-9 ]+/g, ' | ')
+    .replace(/[^a-zа-яіїєґё0-9\s]+/g, ' | ')
     .split(/\s+/).filter(Boolean);
   const result = [];
   for (let i = 0; i < tokens.length; i += 1) {

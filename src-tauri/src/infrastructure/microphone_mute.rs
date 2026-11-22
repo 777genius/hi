@@ -8,6 +8,8 @@ struct MuteStatusCache {
     checked_at: Option<Instant>,
     refreshing: bool,
     generation: u64,
+    explicit_lock: Arc<Mutex<()>>,
+    explicit_in_flight: bool,
 }
 
 impl MuteStatusCache {
@@ -33,6 +35,7 @@ fn cached_status_with_probe(
     let mut entry = cache.lock().unwrap_or_else(|e| e.into_inner());
     let value = entry.value.clone();
     if entry.refreshing
+        || entry.explicit_in_flight
         || entry
             .checked_at
             .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
@@ -63,26 +66,58 @@ pub fn cached_microphone_mute_status() -> Option<MicrophoneMuteStatus> {
     cached_status_with_probe(status_cache(), read_microphone_mute_status)
 }
 
+fn update_status_from_os<T>(
+    cache: &Arc<Mutex<MuteStatusCache>>,
+    operation: impl FnOnce() -> Result<(T, MicrophoneMuteStatus)>,
+) -> Result<T> {
+    let explicit_lock = Arc::clone(
+        &cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .explicit_lock,
+    );
+    // Serialize explicit reads and writes across both OS access and cache
+    // publication. The cache mutex itself never spans blocking OS work.
+    let _operation_guard = explicit_lock.lock().unwrap_or_else(|e| e.into_inner());
+    {
+        let mut entry = cache.lock().unwrap_or_else(|e| e.into_inner());
+        entry.generation = entry.generation.wrapping_add(1);
+        entry.explicit_in_flight = true;
+    }
+    let result = operation();
+    let mut entry = cache.lock().unwrap_or_else(|e| e.into_inner());
+    entry.explicit_in_flight = false;
+    match result {
+        Ok((result, status)) => {
+            entry.store_fresh(status);
+            Ok(result)
+        }
+        Err(error) => {
+            // A failed write may still have changed the device. Keep the last
+            // known value but let the next snapshot request a new OS probe.
+            entry.checked_at = None;
+            Err(error)
+        }
+    }
+}
+
 /// Explicit user actions retain a fresh OS read and immediately seed snapshots.
 pub fn get_microphone_mute_status() -> Result<MicrophoneMuteStatus> {
-    let status = read_microphone_mute_status()?;
-    status_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .store_fresh(status.clone());
-    Ok(status)
+    update_status_from_os(status_cache(), || {
+        let status = read_microphone_mute_status()?;
+        Ok((status.clone(), status))
+    })
 }
 
 pub fn set_microphone_muted(
     muted: bool,
     restore_input_volume: Option<u32>,
 ) -> Result<SetMicrophoneMuteOutcome> {
-    let result = set_microphone_muted_native(muted, restore_input_volume)?;
-    status_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .store_fresh(result.status.clone());
-    Ok(result)
+    update_status_from_os(status_cache(), || {
+        let result = set_microphone_muted_native(muted, restore_input_volume)?;
+        let status = result.status.clone();
+        Ok((result, status))
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -739,5 +774,61 @@ mod cache_tests {
                 .unwrap()
                 .muted
         );
+    }
+
+    #[test]
+    fn older_explicit_read_cannot_overwrite_a_concurrent_mute() {
+        let cache = Arc::new(Mutex::new(MuteStatusCache {
+            value: Some(status(false)),
+            ..Default::default()
+        }));
+        let device_muted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (read_sampled_tx, read_sampled_rx) = mpsc::channel();
+        let (release_read_tx, release_read_rx) = mpsc::channel();
+        let reader_cache = Arc::clone(&cache);
+        let reader_device = Arc::clone(&device_muted);
+        let reader = std::thread::spawn(move || {
+            update_status_from_os(&reader_cache, || {
+                let sampled = reader_device.load(std::sync::atomic::Ordering::SeqCst);
+                read_sampled_tx.send(()).unwrap();
+                release_read_rx.recv().unwrap();
+                Ok(((), status(sampled)))
+            })
+        });
+        let sampled = read_sampled_rx.recv_timeout(Duration::from_secs(2));
+        let (set_attempt_tx, set_attempt_rx) = mpsc::channel();
+        let (set_entered_tx, set_entered_rx) = mpsc::channel();
+        let setter_cache = Arc::clone(&cache);
+        let setter_device = Arc::clone(&device_muted);
+        let setter = std::thread::spawn(move || {
+            set_attempt_tx.send(()).unwrap();
+            update_status_from_os(&setter_cache, || {
+                setter_device.store(true, std::sync::atomic::Ordering::SeqCst);
+                set_entered_tx.send(()).unwrap();
+                Ok(((), status(true)))
+            })
+        });
+        let attempted = set_attempt_rx.recv_timeout(Duration::from_secs(2));
+        let overtook_read = set_entered_rx.recv_timeout(Duration::from_millis(100));
+        // Snapshot readers keep the last known status without waiting on the
+        // explicit operation mutex or launching a probe during an OS write.
+        let cached = cached_status_with_probe(&cache, || Ok(status(false)));
+        let spawned_probe = cache.lock().unwrap().refreshing;
+        let _ = release_read_tx.send(());
+        reader.join().unwrap().unwrap();
+        setter.join().unwrap().unwrap();
+        sampled.unwrap();
+        attempted.unwrap();
+        assert!(
+            overtook_read.is_err(),
+            "mute overtook a sampled explicit read"
+        );
+        assert!(!cached.unwrap().muted);
+        assert!(
+            !spawned_probe,
+            "snapshot launched an OS probe during an explicit operation"
+        );
+        assert!(device_muted.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(cache.lock().unwrap().value.as_ref().unwrap().muted);
     }
 }

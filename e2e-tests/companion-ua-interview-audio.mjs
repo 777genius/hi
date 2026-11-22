@@ -176,7 +176,7 @@ function keyScore(text, keys) {
 export function transcriptJunk(text) {
   const raw = String(text || '');
   const words = norm(raw).split(' ').filter(Boolean);
-  const glossaryEcho = /\bglossary\s*:/i.test(raw) || /(?:^|[.!?\n]\s*)glossary\b/i.test(raw.trim());
+  const glossaryEcho = /\bglossary\s*:/i.test(raw) || /^glossary[.!?]?$/i.test(raw.trim());
   let repetitionLoop = /(?:\.([a-z0-9]{1,8}))(?:\.\1){3,}/i.test(raw);
   for (let width = 1; width <= 12 && !repetitionLoop; width += 1) {
     const repeats = width === 1 ? 5 : 3;
@@ -234,16 +234,33 @@ export function needsAnswerQualityReview(judgeEnabled, turns, recall, judgments 
 // Account for the attempt before any fallible preflight, and never submit twice.
 export function createAiAttempt(rec, send) {
   let pending = null;
-  return () => {
+  return (options) => {
     if (!pending) {
       rec.aiRequested = true;
       rec.aiAttemptedAtMs = Date.now();
-      pending = Promise.resolve().then(send).catch((error) => ({
+      pending = Promise.resolve().then(() => send(options)).then((result) => {
+        if (result?.skippedBeforeSubmit) {
+          pending = null;
+          rec.aiRequested = false;
+        }
+        return result;
+      }).catch((error) => ({
         status: 'exception', ok: false, error: String(error.message || error), text: '',
       }));
     }
     return pending;
   };
+}
+
+export function earlySubmissionAllowed(rec) {
+  if (rec.audio.questionFinishedAtMs == null) return true;
+  rec.earlySkippedReason = 'playback-ended-before-submit';
+  return false;
+}
+
+export function previousJudgeContext(turns, position) {
+  return turns.slice(Math.max(0, position - 3), position)
+    .map((turn) => `Интервьюер (распознано): ${turn.systemText || ''}\nКандидат (распознано): ${turn.micText || ''}`).join('\n');
 }
 
 // ---------- audio ----------
@@ -332,6 +349,7 @@ async function waitForSystemFinal(afterSeq, timeoutMs) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const s = await getState();
+    if (Date.now() - start >= timeoutMs) return null;
     const item = (s.timeline || []).find((m) => m.seq > afterSeq && m.kind === 'stt' && m.status === 'final' && String(m.text || '').trim());
     if (item) return item;
     await sleep(700);
@@ -339,11 +357,12 @@ async function waitForSystemFinal(afterSeq, timeoutMs) {
   return null;
 }
 
-async function waitForAnswer(afterSeq, timeoutMs, start = Date.now()) {
+export async function waitForAnswer(afterSeq, timeoutMs, start = Date.now(), readState = getState) {
   let last = null;
   let firstTextMs = null;
   while (Date.now() - start < timeoutMs) {
-    const s = await getState();
+    const s = await readState();
+    if (Date.now() - start >= timeoutMs) break;
     const answers = (s.timeline || []).filter((m) => m.seq > afterSeq && m.kind === 'haiku');
     last = answers[answers.length - 1] || last;
     if (firstTextMs === null && last?.text?.trim()) firstTextMs = Date.now() - start;
@@ -530,8 +549,11 @@ async function main() {
       // 2) LLM-ответ на вопрос (пока кандидат "думает/отвечает")
       let aiPromise = null;
       let aiBaseSeq = null;
-      const sendAi = async () => {
-        const s = await getState();
+      const sendAi = async ({ earlyState } = {}) => {
+        // Early mode reuses the preview snapshot, avoiding a second asynchronous
+        // preflight between the playback guard and the actual POST.
+        const s = earlyState || await getState();
+        if (earlyState && !earlySubmissionAllowed(rec)) return { skippedBeforeSubmit: true };
         aiBaseSeq = maxSeq(s);
         rec.aiRequestedAtMs = Date.now();
         rec.submittedBeforePlaybackEnd = rec.audio.questionFinishedAtMs == null;
@@ -573,8 +595,8 @@ async function main() {
       };
       // A memoized request promise prevents the early and normal paths sending twice.
       const attemptAi = createAiAttempt(rec, sendAi);
-      const startAiOnce = () => {
-        aiPromise = attemptAi();
+      const startAiOnce = (options) => {
+        aiPromise = attemptAi(options);
         return aiPromise;
       };
       const earlyScheduled = o.earlyReplyEvery > 0 && (idx + 1) % o.earlyReplyEvery === 0;
@@ -596,7 +618,7 @@ async function main() {
           rec.earlyPreviewObservedAtMs = Date.now();
           rec.earlyPreview = earlyReplyPreview(t.q, previewState.live?.partialText);
           rec.earlySkippedReason = rec.audio.questionFinishedAtMs != null ? 'playback-already-ended' : rec.earlyPreview.skippedReason;
-          if (rec.earlyPreview.eligible && rec.audio.questionFinishedAtMs == null) startAiOnce();
+          if (rec.earlyPreview.eligible && rec.audio.questionFinishedAtMs == null) startAiOnce({ earlyState: previewState });
         }
       } finally {
         // Both success and failure are joined even if preview inspection throws.
@@ -789,9 +811,9 @@ async function judgeAnswers(report, turns) {
   // Профиль кандидата (если есть) считается подтверждённым источником фактов об опыте; HTML-комментарии как в приложении вырезаем.
   const profile = await readFile(process.env.INTERVIEW_PROFILE_FILE || join(homedir(), 'Library/Application Support/HackInterview/candidate_profile.md'), 'utf8')
     .then((t) => t.replace(/<!--[\s\S]*?-->/g, '').slice(0, 30_000)).catch(() => '');
-  const items = report.turns.filter((t) => t.ai?.text).map((t) => ({ kind: 'turn', id: t.id, q: t.q, a: t.a, text: t.ai.text, hasImage: t.aiKind === 'image-prompt', imageCode: (() => { const img = turns.find((x) => x.id === t.id)?.image; const code = img ? CODE_IMAGES[img.id] : null; return code ? `${img.caption ? `Подпись: ${img.caption}\n` : ''}${code.title ? `${code.title}\n` : ''}${code.code}` : ''; })() }));
+  const items = report.turns.filter((t) => t.ai?.text).map((t) => ({ kind: 'turn', position: report.turns.indexOf(t), id: t.id, q: t.q, a: t.a, text: t.ai.text, hasImage: t.aiKind === 'image-prompt', imageCode: (() => { const img = turns.find((x) => x.id === t.id)?.image; const code = img ? CODE_IMAGES[img.id] : null; return code ? `${img.caption ? `Подпись: ${img.caption}\n` : ''}${code.title ? `${code.title}\n` : ''}${code.code}` : ''; })() }));
   for (const [index, item] of items.entries()) {
-    const prev = report.turns.filter((x) => x.id < item.id).slice(-3).map((x) => `Интервьюер (распознано): ${x.systemText || ''}\nКандидат (распознано): ${x.micText || ''}`).join('\n');
+    const prev = previousJudgeContext(report.turns, item.position);
     const prompt = `Ты строгий проверяющий ответов ассистента для технического собеседования. Ассистент отвечает кандидату вслух-готовым текстом. Требования: ответ по-русски (термины на английском), чётко и по делу без воды, НЕ задаёт вопросов и не просит уточнений, говорит от первого лица в мужском роде, длина соответствует сложности вопроса, понимает контекст предыдущих реплик.
 
 ${profile ? `Профиль кандидата (подтверждённые факты об его опыте; ответ может на них опираться, это не выдумка):\n${profile}\n\n` : ''}Контекст:

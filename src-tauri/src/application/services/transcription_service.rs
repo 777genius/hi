@@ -69,6 +69,10 @@ fn native_recovery_action(attempts: u32, since_recovery: std::time::Duration) ->
     }
 }
 
+fn recovery_delivery_expired(recovering: bool, native_gap: Option<u64>, elapsed: std::time::Duration) -> bool {
+    recovering && native_gap.is_none() && elapsed >= std::time::Duration::from_secs(30)
+}
+
 fn capture_refresh_reason(
     native_gap_ms: Option<u64>,
     pcm_gap_ms: u64,
@@ -186,7 +190,13 @@ impl TranscriptionService {
     /// Called from the refresh task itself: never abort/await that task here.
     /// Its own PCM sender must be dropped before draining the processor.
     async fn finish_failed_capture(&self) {
-        *self.status.write().await = RecordingStatus::Processing;
+        // Claim finalization before taking any resources. A user Stop that
+        // already owns Processing may cancel this refresh task safely.
+        {
+            let mut status = self.status.write().await;
+            if *status != RecordingStatus::Recording { return; }
+            *status = RecordingStatus::Processing;
+        }
         if let Err(error) = self.audio_capture.write().await.stop_capture().await {
             log::warn!("Failed to stop failed capture: {error}");
         }
@@ -789,7 +799,10 @@ impl TranscriptionService {
                     let pcm_gap_ms = epoch_millis()
                         .saturating_sub(last_any_chunk_ms.load(Ordering::Relaxed));
                     let native_gap_ms = guard.capture_starvation_ms();
-                    let native_error = guard.capture_error();
+                    let native_error = guard.capture_error().or_else(|| {
+                        recovery_delivery_expired(native_error_reported, native_gap_ms, last_refresh.elapsed())
+                            .then(|| crate::domain::AudioError::Capture("Replacement capture delivered no healthy PCM within 30s".to_string()))
+                    });
                     let reason = if let Some(error) = native_error {
                         native_healthy_since = None;
                         if !matches!(&error, crate::domain::AudioError::Capture(_)) {
@@ -1482,6 +1495,9 @@ mod tests {
 
     #[derive(Default)]
     struct CachedSttCounters {
+        block_stop: AtomicBool,
+        stop_entered: tokio::sync::Notify,
+        release_stop: tokio::sync::Notify,
         created: AtomicUsize,
         initialized: AtomicUsize,
         starts: AtomicUsize,
@@ -1534,6 +1550,10 @@ mod tests {
         }
 
         async fn stop_stream(&mut self) -> SttResult<()> {
+            if self.counters.block_stop.load(Ordering::SeqCst) {
+                self.counters.stop_entered.notify_one();
+                self.counters.release_stop.notified().await;
+            }
             self.active = false;
             self.counters.stops.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -1578,6 +1598,53 @@ mod tests {
             Arc::new(|_| {}),
             Arc::new(|_, _| {}),
         ).await.unwrap();
+    }
+
+    #[test]
+    fn replacement_delivery_deadline_does_not_restart_initial_idle_capture() {
+        assert!(!recovery_delivery_expired(false, None, Duration::from_secs(120)));
+        assert!(!recovery_delivery_expired(true, None, Duration::from_secs(29)));
+        assert!(recovery_delivery_expired(true, None, Duration::from_secs(30)));
+        assert!(!recovery_delivery_expired(true, Some(0), Duration::from_secs(30)));
+    }
+
+    #[tokio::test]
+    async fn user_stop_cannot_cancel_claimed_terminal_finalization() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = cached_stt_test_service(counters.clone());
+        service.update_config(SttConfig::new(SttProviderType::ParakeetUltra)).await.unwrap();
+        start_cached_test_recording(&service).await;
+        counters.block_stop.store(true, Ordering::SeqCst);
+        let cleanup = service.clone();
+        let task = tokio::spawn(async move { cleanup.finish_failed_capture().await; });
+        *service.capture_refresh_task.write().await = Some(task);
+        tokio::time::timeout(Duration::from_secs(3), counters.stop_entered.notified()).await.unwrap();
+        assert!(service.stop_recording().await.is_err());
+        assert!(service.stop_recording_hard().await.is_err());
+        assert!(service.abort_starting().await.is_err());
+        assert_eq!(service.get_status().await, RecordingStatus::Processing);
+        counters.release_stop.notify_one();
+        let task = service.capture_refresh_task.write().await.take().unwrap();
+        tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap();
+        assert_eq!(counters.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn terminal_cleanup_cannot_take_provider_owned_by_user_stop() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = cached_stt_test_service(counters.clone());
+        service.update_config(SttConfig::new(SttProviderType::ParakeetUltra)).await.unwrap();
+        start_cached_test_recording(&service).await;
+        *service.status.write().await = RecordingStatus::Processing;
+        service.finish_failed_capture().await;
+        assert!(service.stt_provider.read().await.is_some());
+        assert!(service.audio_processor_task.read().await.is_some());
+        assert_eq!(counters.stops.load(Ordering::SeqCst), 0);
+        // Return ownership to the ordinary Stop path for test cleanup.
+        *service.status.write().await = RecordingStatus::Recording;
+        service.stop_recording().await.unwrap();
+        assert_eq!(counters.stops.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

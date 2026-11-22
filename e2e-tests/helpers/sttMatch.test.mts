@@ -35,3 +35,15 @@ test('transliteration and extra hypothesis text retain their existing matching c
   assert.equal(coverage('Flutter', 'флаттер'), 1);
   assert.equal(coverage('два мілісекунди', '2 ms додатковий контекст 120 Hz'), 1);
 });
+
+
+test('numeric grammatical forms preserve e/yo equivalence and whitespace boundaries', () => {
+  assert.equal(coverage('На четырех ядрах процессора', 'На четырёх ядрах процессора'), 1);
+  assert.equal(coverage('На трёх ядрах процессора', 'На трех ядрах процессора'), 1);
+  assert.equal(coverage('На четырех ядрах процессора', 'На трёх ядрах процессора'), 0);
+  for (const separator of ['\n', '\t', '\r\n']) {
+    assert.deepEqual(words(`сто${separator}двадцять герц`), ['120', 'hz']);
+    assert.equal(coverage('сто двадцять герц', `сто${separator}двадцять герц`), 1);
+  }
+  assert.deepEqual(words('сто, двадцять герц'), ['100', '20', 'hz']);
+});

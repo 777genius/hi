@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createAiAttempt, assertRecordingContinuity, companionApiError, needsAnswerQualityReview, recordingIdentity, earlyReplyPreview, parseArgs, transcriptAcceptance, transcriptJunk } from './companion-ua-interview-audio.mjs';
+import { earlySubmissionAllowed, previousJudgeContext, waitForAnswer, createAiAttempt, assertRecordingContinuity, companionApiError, needsAnswerQualityReview, recordingIdentity, earlyReplyPreview, parseArgs, transcriptAcceptance, transcriptJunk } from './companion-ua-interview-audio.mjs';
 
 test('term tolerance is explicit and cannot admit empty, low coverage or junk text', () => {
   assert.equal(parseArgs([]).tolerateTermErrors, false);
@@ -27,6 +27,8 @@ test('known glossary echoes and short loops fail while meaningful repeated termi
     'Flutter builds widgets, and Flutter also supports desktop applications.',
     'widget tree, widget tree traversal uses depth first order.',
     'We maintain a glossary in the documentation.',
+    'Glossary files are loaded once at startup.',
+    'The project starts. Glossary files are loaded once at startup.',
   ]) assert.equal(transcriptJunk(text).junk, false, text);
 });
 
@@ -98,4 +100,46 @@ test('failed AI preflight is an attempted failure and cannot escape AI accountin
   assert.equal(aiTurns.length, 1);
   assert.equal(aiTurns.filter((turn) => !turn.ai.ok).length, 1);
   assert.equal(needsAnswerQualityReview(true, turns, [], []), true);
+});
+
+
+test('answer first observed after deadline is timed out, while timely final passes', async () => {
+  const now = Date.now;
+  let clock = 1000;
+  Date.now = () => clock;
+  try {
+    const snapshot = { timeline: [{ seq: 1, kind: 'haiku', status: 'final', text: 'Answer' }] };
+    const late = await waitForAnswer(0, 100, 1000, async () => { clock = 1101; return snapshot; });
+    assert.equal(late.timedOut, true);
+    clock = 1000;
+    const timely = await waitForAnswer(0, 100, 1000, async () => { clock = 1099; return snapshot; });
+    assert.equal(timely.item?.status, 'final');
+    assert.equal(Boolean(timely.timedOut), false);
+  } finally { Date.now = now; }
+});
+
+test('playback ending before early POST skips submission and releases normal attempt', async () => {
+  const rec = { aiRequested: false, audio: { questionFinishedAtMs: 123 } };
+  let posts = 0;
+  let early = true;
+  const attempt = createAiAttempt(rec, async () => {
+    if (early && !earlySubmissionAllowed(rec)) return { skippedBeforeSubmit: true };
+    posts += 1;
+    return { status: 'final', ok: true };
+  });
+  await attempt();
+  assert.equal(posts, 0);
+  assert.equal(rec.aiRequested, false);
+  early = false;
+  await attempt();
+  await attempt();
+  assert.equal(posts, 1);
+  assert.equal(rec.aiRequested, true);
+});
+
+test('judge context follows report position even with nonmonotonic IDs', () => {
+  const turns = [{ id: 10, systemText: 'first question', micText: 'first answer' }, { id: 2, systemText: 'second question', micText: 'second answer' }];
+  assert.equal(previousJudgeContext(turns, 0), '');
+  assert.match(previousJudgeContext(turns, 1), /first answer/);
+  assert.ok(!previousJudgeContext(turns, 1).includes('second answer'));
 });

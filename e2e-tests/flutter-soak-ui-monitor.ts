@@ -29,8 +29,9 @@ try {
      const rows=Array.from(document.querySelectorAll<HTMLElement>('[data-msg-id]'));
      return {present:(wanted as string[]).filter(id=>rows.some(e=>e.dataset.msgId===id)),rows:document.querySelectorAll('.chat-row').length,body:!!document.querySelector('.chat-scroll'),rendered:rows.filter(e=>(wanted as string[]).includes(e.dataset.msgId??'')).map(e=>{const style=getComputedStyle(e);return {id:e.dataset.msgId,text:e.textContent??'',partial:e.classList.contains('partial'),error:e.classList.contains('error'),displayed:style.display!=='none'&&style.visibility!=='hidden'&&e.getBoundingClientRect().height>0};})};
    };
-   const normalize=(value:string)=>value.replace(/[*_`#~]/g,'').replace(/\s+/g,' ').trim();
+   const normalize=(value:string)=>value.replace(/\[([^\]]*)\]\([^)]*\)/g,'$1').replace(/[*_`#~]/g,'').replace(/\s+/g,' ').trim();
    const mismatches=(probe:ReturnType<typeof probeRows>)=>messages.flatMap((m:any)=>{
+     if(!stableIds.has(m.id))return [];
      const row=probe.rendered.find(r=>r.id===m.id);
      if(!row)return [{id:m.id,reason:'missing'}];
      if(!row.displayed)return [{id:m.id,reason:'hidden'}];
@@ -45,14 +46,25 @@ try {
    const nativeStart = performance.now();
    const native=await desktop.execute(probeRows,ids);
    const desktopProbeMs = Math.round(performance.now() - nativeStart);
+   const latestRes=await fetch(`${base}/api/state?token=${encodeURIComponent(token)}`,{signal:AbortSignal.timeout(10000)});
+   if(!latestRes.ok)throw new Error(`state ${latestRes.status}`);
+   const latestRaw:any=await latestRes.json(),latestState=latestRaw.data??latestRaw;
+   const fingerprint=(m:any)=>JSON.stringify([m.text,m.status,m.deleted]);
+   const stableIds=new Set(messages.filter((m:any)=>{
+     const latest=(latestState.timeline??[]).find((item:any)=>item.id===m.id);
+     return latest&&fingerprint(latest)===fingerprint(m);
+   }).map((m:any)=>m.id));
+   const updates=new Map<string,string>();
    const changed = (state.timeline ?? []).filter((m:any) => {
-     const fingerprint = JSON.stringify([m.text, m.status, m.deleted]);
-     if (observed.get(m.id) === fingerprint) return false;
-     observed.set(m.id, fingerprint);
+     const value = fingerprint(m);
+     if (observed.get(m.id) === value) return false;
+     updates.set(m.id, value);
      return true;
-   }).map((m:any) => ({id:m.id,seq:m.seq,kind:m.kind,status:m.status,text:m.text,createdAtMs:m.createdAtMs}));
-   const record={at:new Date().toISOString(),recording:state.recording?.status,ids,companion,native,companionProbeMs,desktopProbeMs,companionMismatches:mismatches(companion),desktopMismatches:mismatches(native),changed,live:state.live,errors:errors.splice(0)};
+   }).map((m:any) => ({id:m.id,seq:m.seq,kind:m.kind,status:m.status,text:m.text,deleted:m.deleted,createdAtMs:m.createdAtMs}));
+   const record={at:new Date().toISOString(),recording:state.recording?.status,ids,companion,native,companionProbeMs,desktopProbeMs,companionMismatches:mismatches(companion),desktopMismatches:mismatches(native),changed,live:state.live,errors:errors.slice()};
    await appendFile(out,JSON.stringify(record)+'\n');
+   for(const [id,value] of updates)observed.set(id,value);
+   errors.splice(0,record.errors.length);
    console.log(JSON.stringify({at:record.at,recording:record.recording,tracked:ids.length,companionRows:companion.rows,desktopRows:native.rows,companionMissing:ids.filter((id:string)=>!companion.present.includes(id)),desktopMissing:ids.filter((id:string)=>!native.present.includes(id)),errors:record.errors}));
   } catch(e) { const error=String(e);await appendFile(out,JSON.stringify({at:new Date().toISOString(),error})+'\n');console.error(error); }
   await new Promise(r=>setTimeout(r,15000));

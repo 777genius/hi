@@ -137,6 +137,14 @@ fn native_capture_error(error: SCError) -> AudioError {
     }
 }
 
+fn preserve_terminal_stop_error(result: AudioResult<()>, native_error: Option<SCError>) -> AudioResult<()> {
+    if let Some(error) = native_error {
+        let error = native_capture_error(error);
+        if !matches!(error, AudioError::Capture(_)) { return Err(error); }
+    }
+    result
+}
+
 fn capture_start_error(error: SCError, native_error: Option<SCError>) -> AudioError {
     if let Some(native_error) = native_error {
         return native_capture_error(native_error);
@@ -589,12 +597,16 @@ impl AudioCapture for MacosOutputAudioCapture {
         // from the old stream must never enter the next recording/recovery.
         self.callback_enabled.store(false, Ordering::Release);
         self.is_capturing = false;
-        let native_stopped = self
-            .diagnostics
-            .as_ref()
-            .and_then(|diagnostics| diagnostics.native_error())
-            .is_some();
-        if let Some(diagnostics) = self.diagnostics.take() {
+        // Retain diagnostics through stop/drop: a delegate may report a user
+        // stop after recovery's earlier error check. Never discard that reason.
+        let diagnostics = self.diagnostics.take();
+        let native_stopped = diagnostics.as_ref().and_then(|d| d.native_error()).is_some();
+        let stop_result = if let Some(stream) = self.stream.take() {
+            if native_stopped { Ok(()) } else {
+                stream.stop_capture().map_err(|e| AudioError::Capture(format!("Failed to stop ScreenCaptureKit capture: {e}")))
+            }
+        } else { Ok(()) };
+        if let Some(diagnostics) = &diagnostics {
             let now_ms = diagnostics.elapsed_ms();
             log::info!(
                 "ScreenCaptureKit audio stopped: callbacks={}, frames={}, rejected={}, last_raw={}ms ago, last_pcm={}ms ago",
@@ -605,16 +617,7 @@ impl AudioCapture for MacosOutputAudioCapture {
                 now_ms.saturating_sub(diagnostics.last_frame_ms.load(Ordering::Relaxed)),
             );
         }
-        if let Some(stream) = self.stream.take() {
-            // didStopWithError already ended the native stream. A second stop
-            // fails with "already stopped" and must not block its replacement.
-            if !native_stopped {
-                stream.stop_capture().map_err(|e| {
-                    AudioError::Capture(format!("Failed to stop ScreenCaptureKit capture: {e}"))
-                })?;
-            }
-        }
-        Ok(())
+        preserve_terminal_stop_error(stop_result, diagnostics.as_ref().and_then(|d| d.native_error()))
     }
 
     fn is_capturing(&self) -> bool {
@@ -643,6 +646,14 @@ impl AudioCapture for MacosOutputAudioCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_preserves_late_user_intent_instead_of_restarting_capture() {
+        assert!(matches!(preserve_terminal_stop_error(Ok(()), Some(SCError::from(SCStreamErrorCode::UserStopped))), Err(AudioError::StoppedByUser(_))));
+        assert!(matches!(preserve_terminal_stop_error(Err(AudioError::Capture("already stopped".into())), Some(SCError::from(SCStreamErrorCode::UserDeclined))), Err(AudioError::AccessDenied(_))));
+        assert!(preserve_terminal_stop_error(Ok(()), Some(SCError::from(SCStreamErrorCode::SystemStoppedStream))).is_ok());
+        assert!(preserve_terminal_stop_error(Ok(()), None).is_ok());
+    }
 
     #[test]
     fn startup_preserves_typed_native_denial_but_retries_lossy_start_failures() {

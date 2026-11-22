@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createApp, h, nextTick, reactive } from 'vue';
+import { createApp, h, nextTick, reactive, ref } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
 
 import { i18n } from '@/i18n';
@@ -79,9 +79,21 @@ vi.mock('./AudioVisualizer.vue', () => ({
 vi.mock('./ConversationFeed.vue', () => ({
   default: {
     name: 'ConversationFeedStub',
-    setup(_: unknown, { expose }: { expose: (value: Record<string, unknown>) => void }) {
-      expose({ scrollEl: null });
-      return () => null;
+    props: ['messages'],
+    emits: ['scroll-mousedown'],
+    setup(props: { messages: Array<{ id: string; text: string }> }, { expose, emit }: {
+      expose: (value: Record<string, unknown>) => void;
+      emit: (event: string, mouseEvent: MouseEvent) => void;
+    }) {
+      const scrollEl = ref<HTMLElement | null>(null);
+      expose({ scrollEl });
+      return () => h('div', {
+        ref: scrollEl,
+        class: 'chat-scroll',
+        onMousedown: (event: MouseEvent) => emit('scroll-mousedown', event),
+      }, props.messages.map((message) => h('div', { class: 'chat-row', 'data-msg-id': message.id }, [
+        h('div', { class: 'chat-bubble' }, message.text),
+      ])));
     },
   },
 }));
@@ -473,4 +485,36 @@ describe('RecordingPopover Haiku stop hover e2e', () => {
     await flushUi();
     expect(chatStore.haikuMessages[0].text).toBe('Частичный ответ');
   });
+  it('keeps lasso selection through its terminating click, then clears on an ordinary outside click', async () => {
+    app?.mount(host);
+    await flushUi();
+    const chatStore = useChatStore();
+    const scroll = host.querySelector('.chat-scroll') as HTMLElement;
+    const bubble = host.querySelector('.chat-bubble') as HTMLElement;
+    vi.spyOn(bubble, 'getBoundingClientRect').mockReturnValue(new DOMRect(20, 20, 20, 20));
+    scroll.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+    window.dispatchEvent(new MouseEvent('mousemove', { clientX: 60, clientY: 60 }));
+    window.dispatchEvent(new MouseEvent('mouseup', { clientX: 60, clientY: 60 }));
+    expect(chatStore.selectedCount).toBe(1);
+    scroll.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: 60, clientY: 60 }));
+    expect(chatStore.selectedCount).toBe(1);
+
+    scroll.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 80, clientY: 80 }));
+    window.dispatchEvent(new MouseEvent('mouseup', { clientX: 80, clientY: 80 }));
+    scroll.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 80, clientY: 80 }));
+    expect(chatStore.selectedCount).toBe(0);
+
+    // A drag released outside the popover may produce no click here. Its stale
+    // suppression must not swallow the next real outside click elsewhere.
+    scroll.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+    window.dispatchEvent(new MouseEvent('mousemove', { clientX: 60, clientY: 60 }));
+    window.dispatchEvent(new MouseEvent('mouseup', { clientX: 60, clientY: 60 }));
+    expect(chatStore.selectedCount).toBe(1);
+    const outside = host.querySelector('.popover-container') as HTMLElement;
+    outside.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+    outside.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(chatStore.selectedCount).toBe(0);
+  });
+
+
 });

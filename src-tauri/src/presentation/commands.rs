@@ -2939,12 +2939,9 @@ pub async fn stop_system_audio_test(state: State<'_, AppState>) -> Result<Vec<i1
         return Err("System audio test not running".to_string());
     }
 
-    if let Some(mut capture) = test_state.capture.take() {
-        capture
-            .stop_capture()
-            .await
-            .map_err(|e| format!("Failed to stop audio capture: {}", e))?;
-    }
+    let stop_result = if let Some(mut capture) = test_state.capture.take() {
+        capture.stop_capture().await.map_err(|e| format!("Failed to stop audio capture: {}", e))
+    } else { Ok(()) };
 
     test_state.is_testing = false;
 
@@ -2957,6 +2954,7 @@ pub async fn stop_system_audio_test(state: State<'_, AppState>) -> Result<Vec<i1
         "System audio test stopped, buffer size: {} samples",
         buffer.len()
     );
+    stop_result?;
     Ok(buffer)
 }
 
