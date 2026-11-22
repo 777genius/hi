@@ -131,6 +131,102 @@ describe('chat store (selection + context)', () => {
     vi.useRealTimers();
   });
 
+  it('restores app transcription when system unmute is a no-op', async () => {
+    const paint = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+    let appEnabled = true;
+    let systemMuted = false;
+    invokeMock.mockImplementation(async (command: string, args?: { enabled?: boolean; muted?: boolean }) => {
+      if (command === 'set_microphone_transcription_enabled') {
+        appEnabled = !!args?.enabled;
+      } else if (command === 'set_microphone_muted') {
+        // The backend only synchronizes transcription on an actual OS transition.
+        if (systemMuted !== args?.muted) {
+          systemMuted = !!args?.muted;
+          appEnabled = !systemMuted;
+        }
+        return { muted: systemMuted, supported: true, source: 'system' };
+      } else if (command === 'get_companion_snapshot') {
+        const data = companionSnapshot();
+        data.microphone.systemMuted = systemMuted;
+        data.microphone.appEnabled = appEnabled;
+        return { revision: '1', data };
+      }
+    });
+
+    try {
+      const store = useChatStore();
+      await store.setMicrophoneEnabled(false);
+      expect(appEnabled).toBe(false);
+      expect(systemMuted).toBe(false);
+      store.microphoneMuteMode = 'system';
+      await store.setMicrophoneEnabled(true);
+
+      expect(store.microphoneEnabled).toBe(true);
+      expect(systemMuted).toBe(false);
+      expect(appEnabled).toBe(true);
+      expect(invokeMock).toHaveBeenCalledWith('set_microphone_muted', { muted: false });
+      expect(invokeMock).toHaveBeenCalledWith('set_microphone_transcription_enabled', { enabled: true });
+    } finally {
+      paint.mockRestore();
+    }
+  });
+
+  it('does not restart transcription twice when system unmute already enabled it', async () => {
+    const paint = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+    let appEnabled = false;
+    let systemMuted = true;
+    invokeMock.mockImplementation(async (command: string, args?: { enabled?: boolean; muted?: boolean }) => {
+      if (command === 'set_microphone_muted') {
+        systemMuted = !!args?.muted;
+        appEnabled = !systemMuted;
+        return { muted: systemMuted, supported: true, source: 'system' };
+      }
+      if (command === 'get_companion_snapshot') {
+        const data = companionSnapshot();
+        data.microphone.systemMuted = systemMuted;
+        data.microphone.appEnabled = appEnabled;
+        return { revision: '1', data };
+      }
+    });
+
+    try {
+      const store = useChatStore();
+      store.microphoneMuteMode = 'system';
+      await store.setMicrophoneEnabled(true);
+
+      expect(store.microphoneEnabled).toBe(true);
+      expect(appEnabled).toBe(true);
+      expect(invokeMock).toHaveBeenCalledTimes(2);
+      expect(invokeMock).not.toHaveBeenCalledWith('set_microphone_transcription_enabled', { enabled: true });
+    } finally {
+      paint.mockRestore();
+    }
+  });
+
+  it('does not enable app transcription when the system remains muted', async () => {
+    const paint = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+    invokeMock.mockResolvedValue({ muted: true, supported: true, source: 'system' });
+    try {
+      const store = useChatStore();
+      store.microphoneMuteMode = 'system';
+      await store.setMicrophoneEnabled(true);
+      expect(store.microphoneEnabled).toBe(false);
+      expect(invokeMock).toHaveBeenCalledTimes(1);
+      expect(invokeMock).not.toHaveBeenCalledWith('set_microphone_transcription_enabled', { enabled: true });
+    } finally {
+      paint.mockRestore();
+    }
+  });
+
   it('preserves the original prompt while switching and editing resume profiles', () => {
     localStorage.removeItem('llmPromptProfilesV1');
     localStorage.removeItem('llmActivePromptProfileV1');

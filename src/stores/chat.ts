@@ -4,8 +4,8 @@ import { computed, nextTick, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isTauriAvailable } from '../utils/tauri';
-import type { CompanionSnapshotData } from '@/windowing/stateSync';
-import { CMD_SET_COMPANION_SYSTEM_PROMPT } from '@/windowing/stateSync';
+import type { CompanionSnapshotData, TauriSnapshotEnvelope } from '@/windowing/stateSync';
+import { CMD_GET_COMPANION_SNAPSHOT, CMD_SET_COMPANION_SYSTEM_PROMPT } from '@/windowing/stateSync';
 import {
   EVENT_HAIKU_CANDIDATE_START,
   EVENT_HAIKU_DELTA,
@@ -1381,6 +1381,17 @@ export const useChatStore = defineStore('chat', () => {
         muted: !targetEnabled,
       });
       applyMicrophoneMuteState(payload);
+      if (targetEnabled && !payload.muted) {
+        // A system unmute can be a no-op even when app transcription was
+        // disabled separately. Read both states so a real OS transition that
+        // already started transcription does not start it a second time.
+        const snapshot = await invoke<TauriSnapshotEnvelope<CompanionSnapshotData>>(
+          CMD_GET_COMPANION_SNAPSHOT,
+        );
+        if (!snapshot.data.microphone.systemMuted && !snapshot.data.microphone.appEnabled) {
+          await invoke('set_microphone_transcription_enabled', { enabled: true });
+        }
+      }
     } catch (err) {
       microphoneEnabled.value = !targetEnabled;
       console.warn('Failed to toggle system microphone mute:', err);

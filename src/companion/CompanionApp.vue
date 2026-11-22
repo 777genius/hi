@@ -1204,7 +1204,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main class="companion-page" @click.capture="onOutsideFeedMessageClick">
+  <main class="companion-page" @click="onOutsideFeedMessageClick">
     <section class="companion-shell" :class="{ 'feed-scrolled': feedScrolledDown }">
         <div
           v-if="showTopConnectionStatus"

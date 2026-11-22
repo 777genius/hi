@@ -279,6 +279,10 @@ fn apply_app_config_mode_override(
 }
 
 pub async fn resolved_mode_for_state(state: &AppState) -> InterviewMemoryMode {
+    // Synthetic interview fixtures must never enter the user's persistent memory.
+    if std::env::var("INTERVIEW_TEST_MODE").ok().as_deref() == Some("1") {
+        return InterviewMemoryMode::Disabled;
+    }
     let interview_memory_enabled = state.config.read().await.interview_memory_enabled;
     apply_app_config_mode_override(resolved_mode(), interview_memory_enabled)
 }
@@ -450,7 +454,8 @@ pub async fn assemble_stream_context_or_fallback(
         Ok(Ok(None)) => fallback_context,
         Err(_) => {
             log::info!("Interview memory context exceeded 400ms; using local context");
-            local_context.to_string()
+            record_context_diagnostics(state, "fallback", Some("Memory context timed out".to_string()), Some(400)).await;
+            fallback_context
         }
         Ok(Err(err)) => {
             log::warn!("Interview memory active context fallback: {}", err);

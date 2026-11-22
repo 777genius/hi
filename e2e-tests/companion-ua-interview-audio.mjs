@@ -231,6 +231,21 @@ export function needsAnswerQualityReview(judgeEnabled, turns, recall, judgments 
   });
 }
 
+// Account for the attempt before any fallible preflight, and never submit twice.
+export function createAiAttempt(rec, send) {
+  let pending = null;
+  return () => {
+    if (!pending) {
+      rec.aiRequested = true;
+      rec.aiAttemptedAtMs = Date.now();
+      pending = Promise.resolve().then(send).catch((error) => ({
+        status: 'exception', ok: false, error: String(error.message || error), text: '',
+      }));
+    }
+    return pending;
+  };
+}
+
 // ---------- audio ----------
 async function prepareAudio(dir, turns, o) {
   await mkdir(dir, { recursive: true });
@@ -518,7 +533,6 @@ async function main() {
       const sendAi = async () => {
         const s = await getState();
         aiBaseSeq = maxSeq(s);
-        rec.aiRequested = true;
         rec.aiRequestedAtMs = Date.now();
         rec.submittedBeforePlaybackEnd = rec.audio.questionFinishedAtMs == null;
         if (rec.earlyAttempt && !rec.submittedBeforePlaybackEnd && !rec.earlySkippedReason) rec.earlySkippedReason = 'playback-ended-before-submit';
@@ -558,8 +572,9 @@ async function main() {
         };
       };
       // A memoized request promise prevents the early and normal paths sending twice.
+      const attemptAi = createAiAttempt(rec, sendAi);
       const startAiOnce = () => {
-        if (!aiPromise) aiPromise = sendAi().catch((e) => ({ status: 'exception', ok: false, error: String(e.message || e), text: '' }));
+        aiPromise = attemptAi();
         return aiPromise;
       };
       const earlyScheduled = o.earlyReplyEvery > 0 && (idx + 1) % o.earlyReplyEvery === 0;
@@ -656,7 +671,12 @@ async function main() {
         if (current.recording?.status !== 'Recording') throw new Error('Recording stopped during the endurance interval');
         await sleep(Math.min(5000, Math.max(1, recordingStartedMs + budgetSec * 1000 - Date.now())));
       }
-      report.continuousRecordingMs = Date.now() - recordingStartedMs;
+      // The final sleep may cross the requested boundary. Prove continuity again
+      // after that boundary instead of crediting time since the prior snapshot.
+      const boundaryState = await getState();
+      assertRecordingContinuity(report.recordingIdentity, boundaryState);
+      report.recordingBoundaryVerifiedAtMs = Date.now();
+      report.continuousRecordingMs = report.recordingBoundaryVerifiedAtMs - recordingStartedMs;
     }
 
     phase = 'recall';
@@ -771,7 +791,7 @@ async function judgeAnswers(report, turns) {
     .then((t) => t.replace(/<!--[\s\S]*?-->/g, '').slice(0, 30_000)).catch(() => '');
   const items = report.turns.filter((t) => t.ai?.text).map((t) => ({ kind: 'turn', id: t.id, q: t.q, a: t.a, text: t.ai.text, hasImage: t.aiKind === 'image-prompt', imageCode: (() => { const img = turns.find((x) => x.id === t.id)?.image; const code = img ? CODE_IMAGES[img.id] : null; return code ? `${img.caption ? `Подпись: ${img.caption}\n` : ''}${code.title ? `${code.title}\n` : ''}${code.code}` : ''; })() }));
   for (const [index, item] of items.entries()) {
-    const prev = turns.filter((x) => x.id < item.id).slice(-3).map((x) => `Интервьюер: ${x.q}\nКандидат: ${x.a}`).join('\n');
+    const prev = report.turns.filter((x) => x.id < item.id).slice(-3).map((x) => `Интервьюер (распознано): ${x.systemText || ''}\nКандидат (распознано): ${x.micText || ''}`).join('\n');
     const prompt = `Ты строгий проверяющий ответов ассистента для технического собеседования. Ассистент отвечает кандидату вслух-готовым текстом. Требования: ответ по-русски (термины на английском), чётко и по делу без воды, НЕ задаёт вопросов и не просит уточнений, говорит от первого лица в мужском роде, длина соответствует сложности вопроса, понимает контекст предыдущих реплик.
 
 ${profile ? `Профиль кандидата (подтверждённые факты об его опыте; ответ может на них опираться, это не выдумка):\n${profile}\n\n` : ''}Контекст:

@@ -515,6 +515,20 @@ impl Speculation {
     }
 }
 
+fn refresh_decode_glossary(
+    kind: LocalModel,
+    current: &mut LocalGlossary,
+    options: &mut transcribe_cpp::RunOptions,
+    speculation: &mut Option<Speculation>,
+    latest: LocalGlossary,
+) {
+    if *current != latest {
+        *options = kind.run_options(&latest);
+        *current = latest;
+        *speculation = None;
+    }
+}
+
 /// Providers of the same model file share one loaded handle (see `load_shared`);
 /// transcribe.cpp v0.4.x runs one decode at a time per loaded model.
 pub struct LocalSttProvider {
@@ -600,13 +614,19 @@ impl SttProvider for LocalSttProvider {
                     return Err(failure);
                 }
             };
-            let glossary = LocalGlossary::load();
-            let opts = kind.run_options(&glossary);
+            let mut glossary = LocalGlossary::load();
+            let mut opts = kind.run_options(&glossary);
             let mut speculation: Option<Speculation> = None;
             while let Some(job) = rx.blocking_recv() {
                 if cancelled.load(Ordering::Acquire) {
                     break;
                 }
+                // Check once per queued utterance/preview, never per audio frame.
+                // Native vocabulary and post-correction must use the same profile;
+                // a cached speculative result belongs to its original vocabulary.
+                refresh_decode_glossary(
+                    kind, &mut glossary, &mut opts, &mut speculation, LocalGlossary::load(),
+                );
                 let duration_s = job.pcm.len() as f64 / 16_000.0;
                 let fingerprint = (job.is_final || job.speculative).then(|| pcm_fingerprint(&job.pcm));
                 // A final carrying the audio of the latest speculative decode needs no second pass.
@@ -667,7 +687,7 @@ impl SttProvider for LocalSttProvider {
                 if kind.is_hallucination(&text, duration_s) {
                     log::debug!("Dropped {} silence hallucination: {text:?}", kind.label());
                 } else if !text.is_empty() {
-                    let corrected = LocalGlossary::load().correct(&text);
+                    let corrected = glossary.correct(&text);
                     let mut transcription = if job.is_final {
                         Transcription::final_result(corrected)
                     } else {
@@ -887,6 +907,28 @@ mod tests {
         assert!(spec.matches(&job(a.clone(), 7), pcm_fingerprint(&a)));
         assert!(!spec.matches(&job(a.clone(), 8), pcm_fingerprint(&a)), "different phrase start");
         assert!(!spec.matches(&job(b.clone(), 7), pcm_fingerprint(&b)), "speech resumed: audio differs");
+    }
+
+    #[test]
+    fn glossary_changes_refresh_native_vocabulary_and_invalidate_speculation() {
+        for kind in [LocalModel::WhisperLargeV3, LocalModel::WhisperLargeV3Turbo] {
+            let general = LocalGlossary::parse("Kafka = кафка");
+            let flutter = LocalGlossary::parse("AppLifecycleState = апп лайф сайкл стейт");
+            let mut current = general.clone();
+            let mut options = kind.run_options(&current);
+            let mut speculation = Some(Speculation {
+                start_sample: 0, len: 1600, fingerprint: 7,
+                text: "cached under general profile".into(), language: None,
+            });
+            refresh_decode_glossary(kind, &mut current, &mut options, &mut speculation, general.clone());
+            assert!(speculation.is_some(), "unchanged profile keeps reusable decode");
+            refresh_decode_glossary(kind, &mut current, &mut options, &mut speculation, flutter);
+            assert_eq!(options.vocabulary, vec!["AppLifecycleState"]);
+            assert_eq!(current.correct("апп лайф сайкл стейт"), "AppLifecycleState");
+            assert!(speculation.is_none(), "same audio must decode again after a profile switch");
+            refresh_decode_glossary(kind, &mut current, &mut options, &mut speculation, general);
+            assert_eq!(options.vocabulary, vec!["Kafka"], "switching back removes Flutter vocabulary");
+        }
     }
 
     #[test]

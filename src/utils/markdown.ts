@@ -152,7 +152,19 @@ function formatAnswerSentences(html: string): string {
       range.setEnd(endNode, endOffset);
       const sentence = document.createElement('span');
       sentence.className = 'answer-sentence';
-      sentence.append(range.cloneContents());
+      let contents: Node = range.cloneContents();
+      // cloneContents includes descendants of the common ancestor, but omits
+      // that ancestor and its parents. Restore only the missing sanitized
+      // inline chain when the entire range sits inside formatted content.
+      let ancestor = range.commonAncestorContainer;
+      if (ancestor.nodeType !== Node.ELEMENT_NODE) ancestor = ancestor.parentNode!;
+      while (ancestor !== block) {
+        const wrapper = ancestor.cloneNode(false);
+        wrapper.appendChild(contents);
+        contents = wrapper;
+        ancestor = ancestor.parentNode!;
+      }
+      sentence.append(contents);
       fragment.append(sentence);
       start = end;
     }

@@ -11,7 +11,7 @@ struct Rule {
     alias: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LocalGlossary {
     rules: Vec<Rule>,
     /// Canonical terms in file order, used as the Whisper decoding vocabulary.
@@ -46,7 +46,7 @@ impl LocalGlossary {
         dirs::config_dir().map(|root| root.join("HackInterview/parakeet_glossary.txt"))
     }
 
-    fn parse(source: &str) -> Self {
+    pub(super) fn parse(source: &str) -> Self {
         let mut rules = Vec::new();
         let mut terms: Vec<String> = Vec::new();
         let rule_lines = source

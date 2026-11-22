@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertRecordingContinuity, companionApiError, needsAnswerQualityReview, recordingIdentity, earlyReplyPreview, parseArgs, transcriptAcceptance, transcriptJunk } from './companion-ua-interview-audio.mjs';
+import { createAiAttempt, assertRecordingContinuity, companionApiError, needsAnswerQualityReview, recordingIdentity, earlyReplyPreview, parseArgs, transcriptAcceptance, transcriptJunk } from './companion-ua-interview-audio.mjs';
 
 test('term tolerance is explicit and cannot admit empty, low coverage or junk text', () => {
   assert.equal(parseArgs([]).tolerateTermErrors, false);
@@ -76,4 +76,26 @@ test('manual review remains required for missing, failed or flagged judgments', 
   assert.equal(needsAnswerQualityReview(true, turns, [], [{ ...good, issue: 'lost context' }]), true);
   assert.equal(needsAnswerQualityReview(true, turns, [], [{ ...good, context: 1 }]), true);
   assert.equal(needsAnswerQualityReview(true, [{ ...turns[0], ai: { ok: true, qualityNeedsReview: true } }], [], [good]), true);
+});
+
+
+test('failed AI preflight is an attempted failure and cannot escape AI accounting', async () => {
+  const rec = { id: 1, aiRequested: false };
+  let preflights = 0;
+  const attempt = createAiAttempt(rec, async () => {
+    preflights += 1;
+    throw new Error('state preflight failed');
+  });
+  const first = attempt();
+  assert.equal(rec.aiRequested, true, 'attempt must be counted before the first await');
+  assert.equal(attempt(), first, 'normal fallback must join the failed early attempt');
+  const ai = await first;
+  assert.equal(preflights, 1);
+  assert.equal(ai.status, 'exception');
+  assert.equal(ai.ok, false);
+  const turns = [{ ...rec, ai }];
+  const aiTurns = turns.filter((turn) => turn.aiRequested);
+  assert.equal(aiTurns.length, 1);
+  assert.equal(aiTurns.filter((turn) => !turn.ai.ok).length, 1);
+  assert.equal(needsAnswerQualityReview(true, turns, [], []), true);
 });
