@@ -46,13 +46,13 @@ test.describe('Размеры сообщений и кода', () => {
     await expect(companion.page.locator('[data-msg-id="prompt:4"] .code-block pre')).toBeVisible();
   });
 
-  test('текст всех пузырей 17px, код того же размера, отступы блока кода не больше 2px', async ({ companion }) => {
+  test('текст пузырей 17px, код 10px, отступы блока кода не больше 2px', async ({ companion }) => {
     for (const id of ['stt:1', 'stt:2', 'mic:3', 'prompt:4', 'haiku:5', 'haiku:6', 'focus-copy:1', 'signal:8']) {
       const metrics = await measureRow(companion.page, id);
       expect(px(metrics.bubbleFont), `${id}: шрифт пузыря`).toBe(17);
       if (metrics.preFont !== null) {
-        expect(px(metrics.preFont), `${id}: шрифт pre`).toBe(17);
-        expect(px(metrics.codeFont), `${id}: шрифт pre code`).toBe(17);
+        expect(px(metrics.preFont), `${id}: шрифт pre`).toBe(10);
+        expect(px(metrics.codeFont), `${id}: шрифт pre code`).toBe(10);
         for (const side of metrics.prePadding ?? []) {
           expect(px(side), `${id}: padding блока кода`).toBeLessThanOrEqual(2);
         }

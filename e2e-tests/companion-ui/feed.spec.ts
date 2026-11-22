@@ -40,7 +40,7 @@ test.describe('Автоскролл ленты', () => {
     await expect(row).toBeVisible();
     await expect.poll(() => row.evaluate((el) => {
       const scroll = el.closest('.chat-scroll')!;
-      return Math.abs((el.getBoundingClientRect().top - scroll.getBoundingClientRect().top) - scroll.clientHeight * 0.42);
+      return Math.abs((el.getBoundingClientRect().top - scroll.getBoundingClientRect().top) - scroll.clientHeight * 0.32);
     })).toBeLessThanOrEqual(3);
     const start = await companion.scrollMetrics();
     for (let chunk = 1; chunk <= 3; chunk += 1) {

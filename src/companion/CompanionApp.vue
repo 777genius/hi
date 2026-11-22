@@ -1730,6 +1730,10 @@ onUnmounted(() => {
   color: var(--color-text-secondary);
 }
 
+.theme-light .top-connection-status {
+  background: rgba(255, 255, 255, 0.96);
+}
+
 .theme-light .top-connection-status.reconnecting,
 .theme-light .top-connection-status.tone-warn,
 .theme-light .ask-status.reconnecting,
@@ -1817,8 +1821,8 @@ onUnmounted(() => {
   padding: 0 !important;
   /* Сообщение с кодом занимает всю ширину ленты (как на десктопе), без сужения 80%. */
   --chat-bubble-width-scale: 1;
-  width: calc(100% - 10px);
-  max-width: calc(100% - 10px);
+  width: calc(100% - 8px);
+  max-width: calc(100% - 8px);
 }
 
 .feed-card :deep(.chat-markdown .code-block pre),
@@ -2362,5 +2366,9 @@ onUnmounted(() => {
     height: 52px;
   }
 }
-.feed-card :deep(.chat-row.incoming .chat-bubble) { max-width: calc(100% - 10px); }
+.feed-card :deep(.chat-row.incoming .chat-bubble) { max-width: calc(100% - 8px); }
+.feed-card :deep(.chat-row .chat-bubble:not(:has(.code-block))) {
+  width: 80%;
+  max-width: 80%;
+}
 </style>
