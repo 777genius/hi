@@ -3561,6 +3561,11 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 /* Connection Warning Banner */
 .connection-warning {
+  position: absolute;
+  top: 64px;
+  left: var(--popover-pad);
+  right: var(--popover-pad);
+  z-index: 20;
   display: flex;
   align-items: center;
   gap: var(--spacing-xs);
@@ -3568,8 +3573,9 @@ const onChatMouseDown = (e: MouseEvent) => {
   background: rgba(255, 193, 7, 0.15);
   border: 1px solid rgba(255, 193, 7, 0.3);
   border-radius: var(--radius-sm);
-  width: 100%;
+  width: auto;
   box-sizing: border-box;
+  pointer-events: none;
 }
 
 .connection-warning .warning-icon {

@@ -1,4 +1,89 @@
 use anyhow::{Context, Result};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+#[derive(Default)]
+struct MuteStatusCache {
+    value: Option<MicrophoneMuteStatus>,
+    checked_at: Option<Instant>,
+    refreshing: bool,
+    generation: u64,
+}
+
+impl MuteStatusCache {
+    fn store_fresh(&mut self, value: MicrophoneMuteStatus) {
+        self.generation = self.generation.wrapping_add(1);
+        self.value = Some(value);
+        self.checked_at = Some(Instant::now());
+    }
+}
+
+fn status_cache() -> &'static Arc<Mutex<MuteStatusCache>> {
+    static CACHE: OnceLock<Arc<Mutex<MuteStatusCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Arc::new(Mutex::new(MuteStatusCache::default())))
+}
+
+// Snapshot publication must never wait for CoreAudio or an AppleScript child.
+// A stuck probe keeps its single-flight slot until it really finishes, rather
+// than spawning an unbounded number of timed-out blocking tasks.
+fn cached_status_with_probe(
+    cache: &Arc<Mutex<MuteStatusCache>>,
+    probe: impl FnOnce() -> Result<MicrophoneMuteStatus> + Send + 'static,
+) -> Option<MicrophoneMuteStatus> {
+    let mut entry = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let value = entry.value.clone();
+    if entry.refreshing
+        || entry
+            .checked_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+    {
+        return value;
+    }
+    entry.refreshing = true;
+    let generation = entry.generation;
+    drop(entry);
+    let cache = Arc::clone(cache);
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = probe();
+        let mut entry = cache.lock().unwrap_or_else(|e| e.into_inner());
+        entry.refreshing = false;
+        // An explicit mute/read completed while this older probe was running.
+        if entry.generation != generation {
+            return;
+        }
+        entry.checked_at = Some(Instant::now());
+        if let Ok(status) = result {
+            entry.value = Some(status);
+        }
+    });
+    value
+}
+
+pub fn cached_microphone_mute_status() -> Option<MicrophoneMuteStatus> {
+    cached_status_with_probe(status_cache(), read_microphone_mute_status)
+}
+
+/// Explicit user actions retain a fresh OS read and immediately seed snapshots.
+pub fn get_microphone_mute_status() -> Result<MicrophoneMuteStatus> {
+    let status = read_microphone_mute_status()?;
+    status_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .store_fresh(status.clone());
+    Ok(status)
+}
+
+pub fn set_microphone_muted(
+    muted: bool,
+    restore_input_volume: Option<u32>,
+) -> Result<SetMicrophoneMuteOutcome> {
+    let result = set_microphone_muted_native(muted, restore_input_volume)?;
+    status_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .store_fresh(result.status.clone());
+    Ok(result)
+}
 
 #[derive(Debug, Clone)]
 pub struct MicrophoneMuteStatus {
@@ -367,7 +452,13 @@ mod macos {
         let device_id = default_input_device_id()?;
         let core_mute = read_coreaudio_mute_state(device_id);
         let core_volume = read_coreaudio_volume_state(device_id);
-        let apple_input_volume = get_osascript_input_volume().ok();
+        // CoreAudio already defines the effective mute state below. Avoid an
+        // AppleScript process when it cannot change that result.
+        let apple_input_volume = if core_mute.is_none() && core_volume.is_none() {
+            get_osascript_input_volume().ok()
+        } else {
+            None
+        };
 
         let muted = if let Some(core_muted) = core_mute {
             core_muted || core_volume.map(|(muted, _)| muted).unwrap_or(false)
@@ -519,12 +610,12 @@ mod macos {
 }
 
 #[cfg(target_os = "macos")]
-pub fn get_microphone_mute_status() -> Result<MicrophoneMuteStatus> {
+fn read_microphone_mute_status() -> Result<MicrophoneMuteStatus> {
     macos::get_microphone_mute_status()
 }
 
 #[cfg(target_os = "macos")]
-pub fn set_microphone_muted(
+fn set_microphone_muted_native(
     muted: bool,
     restore_input_volume: Option<u32>,
 ) -> Result<SetMicrophoneMuteOutcome> {
@@ -532,7 +623,7 @@ pub fn set_microphone_muted(
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn get_microphone_mute_status() -> Result<MicrophoneMuteStatus> {
+fn read_microphone_mute_status() -> Result<MicrophoneMuteStatus> {
     Ok(MicrophoneMuteStatus {
         muted: false,
         supported: false,
@@ -541,7 +632,7 @@ pub fn get_microphone_mute_status() -> Result<MicrophoneMuteStatus> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn set_microphone_muted(
+fn set_microphone_muted_native(
     muted: bool,
     restore_input_volume: Option<u32>,
 ) -> Result<SetMicrophoneMuteOutcome> {
@@ -554,4 +645,99 @@ pub fn set_microphone_muted(
         restore_input_volume,
         applied_methods: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn status(muted: bool) -> MicrophoneMuteStatus {
+        MicrophoneMuteStatus {
+            muted,
+            supported: true,
+            source: "test".into(),
+        }
+    }
+
+    fn wait_for_refresh(cache: &Arc<Mutex<MuteStatusCache>>) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while cache.lock().unwrap().refreshing {
+            assert!(Instant::now() < deadline, "background probe did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn slow_probe_keeps_cached_mute_and_does_not_block_or_duplicate_refresh() {
+        let cache = Arc::new(Mutex::new(MuteStatusCache {
+            value: Some(status(true)),
+            ..Default::default()
+        }));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (values_tx, values_rx) = mpsc::channel();
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader_probes = Arc::clone(&probes);
+        let reader_cache = Arc::clone(&cache);
+        let reader = std::thread::spawn(move || {
+            let first_probes = Arc::clone(&reader_probes);
+            let first = cached_status_with_probe(&reader_cache, move || {
+                first_probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(status(false))
+            });
+            let second = cached_status_with_probe(&reader_cache, move || {
+                reader_probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(status(false))
+            });
+            values_tx.send((first, second)).unwrap();
+        });
+        let entered = entered_rx.recv_timeout(Duration::from_secs(2));
+        let values = values_rx.recv_timeout(Duration::from_millis(250));
+        // Release even on assertion failure so a blocking task cannot outlive
+        // this test and prevent shutdown.
+        let _ = release_tx.send(());
+        reader.join().unwrap();
+        entered.unwrap();
+        let (first, second) = values.expect("snapshots waited for the OS probe");
+        assert!(first.unwrap().muted);
+        assert!(second.unwrap().muted);
+        wait_for_refresh(&cache);
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let fresh_probes = Arc::clone(&probes);
+        let refreshed = cached_status_with_probe(&cache, move || {
+            fresh_probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(status(false))
+        });
+        assert!(!refreshed.unwrap().muted);
+        assert!(
+            !cache.lock().unwrap().refreshing,
+            "fresh cache scheduled another OS probe"
+        );
+    }
+
+    #[test]
+    fn explicit_mute_wins_over_an_older_background_probe() {
+        let cache = Arc::new(Mutex::new(MuteStatusCache::default()));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        assert!(cached_status_with_probe(&cache, move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(status(false))
+        })
+        .is_none());
+        let entered = entered_rx.recv_timeout(Duration::from_secs(2));
+        cache.lock().unwrap().store_fresh(status(true));
+        let _ = release_tx.send(());
+        entered.unwrap();
+        wait_for_refresh(&cache);
+        assert!(
+            cached_status_with_probe(&cache, || panic!("fresh value re-probed"))
+                .unwrap()
+                .muted
+        );
+    }
 }

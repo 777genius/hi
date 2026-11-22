@@ -720,15 +720,27 @@ async fn build_snapshot_data(state: &AppState) -> Result<CompanionSnapshot, Stri
     let companion_mode_enabled = *runtime.enabled.read().await;
     let instance_id = runtime.instance_id.read().await.clone();
 
-    let system_microphone_payload =
-        crate::presentation::commands::get_system_microphone_mute_state().unwrap_or(
+    let system_microphone_payload = match
+        crate::infrastructure::microphone_mute::cached_microphone_mute_status()
+    {
+        Some(status) => MicrophoneMuteStatePayload {
+            muted: status.muted,
+            supported: status.supported,
+            source: status.source,
+            detail: None,
+        },
+        None => {
+            // Keep the last published value while the first background OS probe
+            // runs. A refresh must not transiently display an unmuted device.
+            let previous = runtime.snapshot.read().await;
             MicrophoneMuteStatePayload {
-                muted: false,
-                supported: false,
-                source: "unknown".to_string(),
+                muted: previous.data.microphone.system_muted,
+                supported: previous.data.microphone.system_supported,
+                source: previous.data.microphone.system_source.clone(),
                 detail: None,
-            },
-        );
+            }
+        }
+    };
     let app_microphone_payload =
         crate::presentation::commands::get_app_microphone_mute_state(state);
     let microphone_muted = system_microphone_payload.muted || app_microphone_payload.muted;
