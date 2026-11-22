@@ -69,8 +69,8 @@ fn native_recovery_action(attempts: u32, since_recovery: std::time::Duration) ->
     }
 }
 
-fn recovery_delivery_expired(recovering: bool, native_gap: Option<u64>, elapsed: std::time::Duration) -> bool {
-    recovering && native_gap.is_none() && elapsed >= std::time::Duration::from_secs(30)
+fn recovery_delivery_expired(recovering: bool, delivered_pcm: bool, elapsed: std::time::Duration) -> bool {
+    recovering && !delivered_pcm && elapsed >= std::time::Duration::from_secs(30)
 }
 
 fn capture_refresh_reason(
@@ -800,8 +800,8 @@ impl TranscriptionService {
                         .saturating_sub(last_any_chunk_ms.load(Ordering::Relaxed));
                     let native_gap_ms = guard.capture_starvation_ms();
                     let native_error = guard.capture_error().or_else(|| {
-                        recovery_delivery_expired(native_error_reported, native_gap_ms, last_refresh.elapsed())
-                            .then(|| crate::domain::AudioError::Capture("Replacement capture delivered no healthy PCM within 30s".to_string()))
+                        recovery_delivery_expired(native_error_reported, guard.has_delivered_pcm(), last_refresh.elapsed())
+                            .then(|| crate::domain::AudioError::Capture("Replacement capture delivered no PCM within 30s".to_string()))
                     });
                     let reason = if let Some(error) = native_error {
                         native_healthy_since = None;
@@ -1602,10 +1602,13 @@ mod tests {
 
     #[test]
     fn replacement_delivery_deadline_does_not_restart_initial_idle_capture() {
-        assert!(!recovery_delivery_expired(false, None, Duration::from_secs(120)));
-        assert!(!recovery_delivery_expired(true, None, Duration::from_secs(29)));
-        assert!(recovery_delivery_expired(true, None, Duration::from_secs(30)));
-        assert!(!recovery_delivery_expired(true, Some(0), Duration::from_secs(30)));
+        assert!(!recovery_delivery_expired(false, false, Duration::from_secs(120)));
+        assert!(!recovery_delivery_expired(true, false, Duration::from_secs(29)));
+        assert!(recovery_delivery_expired(true, false, Duration::from_secs(30)));
+        // A first frame at 28s and another at 28.999s prove delivery even
+        // though neither burst establishes the native one-second cadence.
+        assert!(!recovery_delivery_expired(true, true, Duration::from_secs(30)));
+        assert!(!recovery_delivery_expired(true, true, Duration::from_secs(120)));
     }
 
     #[tokio::test]

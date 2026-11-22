@@ -138,8 +138,10 @@ test('playback ending before early POST skips submission and releases normal att
 });
 
 test('judge context follows report position even with nonmonotonic IDs', () => {
-  const turns = [{ id: 10, systemText: 'first question', micText: 'first answer' }, { id: 2, systemText: 'second question', micText: 'second answer' }];
+  const turns = [{ id: 10, systemText: 'first question', micText: 'first answer', ai: { text: 'previous assistant answer' } }, { id: 2, systemText: 'second question', micText: 'second answer' }];
   assert.equal(previousJudgeContext(turns, 0), '');
   assert.match(previousJudgeContext(turns, 1), /first answer/);
+  assert.match(previousJudgeContext(turns, 1), /Ассистент: previous assistant answer/);
+  assert.match(previousJudgeContext([{ ...turns[0], micText: '' }, turns[1]], 1), /Ассистент: previous assistant answer/);
   assert.ok(!previousJudgeContext(turns, 1).includes('second answer'));
 });

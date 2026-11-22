@@ -260,7 +260,7 @@ export function earlySubmissionAllowed(rec) {
 
 export function previousJudgeContext(turns, position) {
   return turns.slice(Math.max(0, position - 3), position)
-    .map((turn) => `Интервьюер (распознано): ${turn.systemText || ''}\nКандидат (распознано): ${turn.micText || ''}`).join('\n');
+    .map((turn) => `Интервьюер (распознано): ${turn.systemText || ''}\nКандидат (распознано): ${turn.micText || ''}${turn.ai?.text ? `\nАссистент: ${turn.ai.text}` : ''}`).join('\n');
 }
 
 // ---------- audio ----------

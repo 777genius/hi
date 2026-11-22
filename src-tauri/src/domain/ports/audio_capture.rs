@@ -66,6 +66,12 @@ pub trait AudioCapture: Send + Sync {
         None
     }
 
+    /// Whether this capture generation emitted at least one decoded PCM frame.
+    /// Independent of cadence: intermittent valid audio still proves delivery.
+    fn has_delivered_pcm(&self) -> bool {
+        false
+    }
+
     /// A confirmed native capture failure, retained until stop/restart.
     fn capture_error(&self) -> Option<AudioError> {
         None

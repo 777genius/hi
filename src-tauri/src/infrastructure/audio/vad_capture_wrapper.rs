@@ -211,6 +211,9 @@ impl AudioCapture for VadCaptureWrapper {
     fn capture_starvation_ms(&self) -> Option<u64> {
         self.inner.capture_starvation_ms()
     }
+    fn has_delivered_pcm(&self) -> bool {
+        self.inner.has_delivered_pcm()
+    }
     fn capture_error(&self) -> Option<crate::domain::AudioError> {
         self.inner.capture_error()
     }

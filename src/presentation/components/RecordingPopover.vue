@@ -1545,9 +1545,12 @@ const onPopoverMouseDown = () => {
 const onOutsideMessageClick = (event: MouseEvent) => {
   if (suppressNextLassoClick) {
     suppressNextLassoClick = false;
-    event.preventDefault();
-    event.stopPropagation();
-    return;
+    // Keyboard activation has detail=0 and cannot terminate a mouse drag.
+    if (event.detail > 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
   }
   const target = event.target as HTMLElement | null;
   // Keep selected context until an action button has consumed it.

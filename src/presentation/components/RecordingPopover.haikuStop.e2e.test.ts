@@ -496,12 +496,12 @@ describe('RecordingPopover Haiku stop hover e2e', () => {
     window.dispatchEvent(new MouseEvent('mousemove', { clientX: 60, clientY: 60 }));
     window.dispatchEvent(new MouseEvent('mouseup', { clientX: 60, clientY: 60 }));
     expect(chatStore.selectedCount).toBe(1);
-    scroll.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: 60, clientY: 60 }));
+    scroll.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, clientX: 60, clientY: 60 }));
     expect(chatStore.selectedCount).toBe(1);
 
     scroll.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 80, clientY: 80 }));
     window.dispatchEvent(new MouseEvent('mouseup', { clientX: 80, clientY: 80 }));
-    scroll.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 80, clientY: 80 }));
+    scroll.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 80, clientY: 80 }));
     expect(chatStore.selectedCount).toBe(0);
 
     // A drag released outside the popover may produce no click here. Its stale
@@ -511,8 +511,20 @@ describe('RecordingPopover Haiku stop hover e2e', () => {
     window.dispatchEvent(new MouseEvent('mouseup', { clientX: 60, clientY: 60 }));
     expect(chatStore.selectedCount).toBe(1);
     const outside = host.querySelector('.popover-container') as HTMLElement;
+    const keyboardButton = document.createElement('button');
+    outside.appendChild(keyboardButton);
+    const activate = vi.fn();
+    keyboardButton.addEventListener('click', activate);
+    keyboardButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 0 }));
+    expect(activate).toHaveBeenCalledOnce();
+    expect(chatStore.selectedCount).toBe(1);
+    // Keyboard activation also consumes the stale flag, so a subsequent click
+    // without another mousedown is handled normally.
+    outside.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+    expect(chatStore.selectedCount).toBe(0);
+    chatStore.selectOnly(chatStore.messages[0].id);
     outside.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
-    outside.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    outside.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
     expect(chatStore.selectedCount).toBe(0);
   });
 

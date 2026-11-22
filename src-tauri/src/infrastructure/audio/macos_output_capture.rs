@@ -635,6 +635,9 @@ impl AudioCapture for MacosOutputAudioCapture {
             .as_ref()
             .and_then(|diagnostics| diagnostics.starvation_ms(diagnostics.elapsed_ms()))
     }
+    fn has_delivered_pcm(&self) -> bool {
+        self.diagnostics.as_ref().is_some_and(|diagnostics| diagnostics.frames.load(Ordering::Relaxed) > 0)
+    }
     fn capture_error(&self) -> Option<AudioError> {
         self.diagnostics
             .as_ref()
@@ -709,6 +712,22 @@ mod tests {
             native_capture_error(SCError::StreamError("unknown native failure".to_string())),
             AudioError::Configuration(_)
         ));
+    }
+
+    #[test]
+    fn intermittent_pcm_proves_generation_delivery_without_arming_cadence() {
+        let mut capture = MacosOutputAudioCapture::new().unwrap();
+        let diagnostics = Arc::new(CaptureDiagnostics::new());
+        capture.diagnostics = Some(diagnostics.clone());
+        assert!(!capture.has_delivered_pcm());
+        for now_ms in [28_000, 28_999] {
+            diagnostics.note_callback(now_ms);
+            diagnostics.frames.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(diagnostics.starvation_ms(30_000), None);
+        assert!(capture.has_delivered_pcm());
+        capture.diagnostics = Some(Arc::new(CaptureDiagnostics::new()));
+        assert!(!capture.has_delivered_pcm(), "replacement generation must prove its own delivery");
     }
 
     #[test]
