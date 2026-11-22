@@ -1,0 +1,397 @@
+# Flutter/Dart first: early terms get priority in the decoder vocabulary.
+Flutter = флаттер | флатер
+Dart = дарт
+Riverpod = риверпод | ривер под
+Bloc
+Cubit = кубит
+Provider = провайдер
+MobX = моб икс
+Freezed = фризед
+Dio = дио
+Drift = дрифт
+GetIt = гет ит
+Injectable = инжектабл
+GoRouter = го роутер
+AutoRoute = авто роут
+Melos = мелос
+Clean Architecture = клин архитектура | клин архитектуре
+SOLID = солид
+DRY
+DDD
+Widget = виджет
+StatefulWidget = стейтфул виджет
+StatelessWidget = стейтлес виджет
+BuildContext = билд контекст
+setState = сет стейт
+initState = инит стейт
+didChangeDependencies
+didUpdateWidget
+deactivate
+activate
+dispose
+mounted
+context.mounted
+InheritedWidget
+InheritedModel
+InheritedNotifier
+Element
+RenderObject
+RenderBox
+RenderSliver
+RenderObjectWidget
+BuildOwner
+PipelineOwner
+SchedulerBinding
+WidgetsBinding
+WidgetsBindingObserver
+AppLifecycleListener
+AppLifecycleState
+reassemble
+hot reload
+hot restart
+ValueKey
+ObjectKey
+UniqueKey
+GlobalKey
+PageStorageKey
+RestorationMixin
+RestorationManager
+RepaintBoundary = репейнт баундари
+CustomPainter = кастом пейнтер
+shouldRepaint
+shouldRelayout
+CustomClipper
+CustomScrollView
+SliverList
+SliverGrid
+SliverAppBar
+SliverToBoxAdapter
+SliverFillRemaining
+NestedScrollView
+ListView.builder
+GridView.builder
+itemExtent
+prototypeItem
+findChildIndexCallback
+ScrollController
+ScrollPhysics
+ScrollNotification
+PageController
+PageView
+KeepAlive
+AutomaticKeepAliveClientMixin
+LayoutBuilder
+BoxConstraints
+Expanded
+Flexible
+Flex
+Stack
+Positioned
+SafeArea
+MediaQuery
+View.of
+TextScaler
+FittedBox
+IntrinsicHeight
+IntrinsicWidth
+OverflowBox
+FractionallySizedBox
+SizedBox
+ConstrainedBox
+GestureDetector
+Listener
+PointerEvent
+GestureArena
+HitTestBehavior
+FocusNode
+FocusScope
+Shortcuts
+Actions
+Intent
+Semantics
+MergeSemantics
+ExcludeSemantics
+TickerProvider
+SingleTickerProviderStateMixin
+TickerMode
+AnimationController
+CurvedAnimation
+Tween
+TweenSequence
+AnimatedBuilder
+AnimatedWidget
+AnimatedSwitcher
+AnimatedContainer
+AnimatedOpacity
+Hero
+CustomPaint
+Canvas
+Path
+saveLayer
+ClipPath
+BackdropFilter
+ImageFilter
+ShaderMask
+FragmentShader
+Impeller
+Skia
+raster thread
+UI isolate
+vsync
+jank
+DevTools
+Timeline
+FrameTiming
+addPostFrameCallback
+scheduleFrame
+ValueNotifier
+ChangeNotifier
+ValueListenableBuilder
+ListenableBuilder
+BlocBuilder
+BlocListener
+BlocConsumer
+BlocSelector
+BlocObserver
+RepositoryProvider
+MultiBlocProvider
+buildWhen
+listenWhen
+emit.forEach
+emit.onEach
+emit.isDone
+Equatable
+bloc_concurrency
+restartable
+droppable
+sequential
+concurrent
+AsyncNotifier
+NotifierProvider
+AsyncNotifierProvider
+FutureProvider
+StreamProvider
+ConsumerWidget
+ConsumerStatefulWidget
+ProviderScope
+ProviderContainer
+AsyncValue
+ref.watch
+ref.read
+ref.listen
+ref.invalidate
+ref.refresh
+ref.onDispose
+ref.keepAlive
+ref.mounted
+autoDispose
+StateNotifier
+Observable
+Observer
+autorun
+reaction
+ReactionDisposer
+computed
+action
+Stream
+StreamController
+StreamSubscription
+broadcast
+async*
+yield
+yield*
+Future
+Completer
+Future.wait
+Future.any
+Future.timeout
+Future.microtask
+Future.sync
+scheduleMicrotask
+unawaited
+runZonedGuarded
+Zone
+Isolate = изолейт
+Isolate.run
+Isolate.spawn
+ReceivePort
+SendPort
+TransferableTypedData
+compute
+microtask queue
+event loop
+null safety
+late
+LateInitializationError
+factory
+sealed class
+base class
+interface class
+final class
+mixin
+extension
+extension type
+records
+patterns
+exhaustive switch
+covariant
+contravariance
+sound null safety
+Iterable
+Iterator
+sync*
+characters
+Uint8List
+ByteData
+ByteBuffer
+json_serializable
+build_runner
+retrofit
+hive
+shared_preferences
+sqflite
+sqlite3
+cached_network_image
+flutter_cache_manager
+image_picker
+file_picker
+permission_handler
+flutter_secure_storage
+local_auth
+url_launcher
+webview_flutter
+in_app_purchase
+flutter_local_notifications
+firebase_core
+firebase_auth
+cloud_firestore
+firebase_messaging
+firebase_crashlytics
+Firebase
+Crashlytics
+Sentry
+Codemagic
+Fastlane
+flavor
+pubspec.yaml
+pubspec.lock
+pub.dev
+Dart FFI
+ffi.Pointer
+NativeFinalizer
+Finalizer
+MethodChannel
+EventChannel
+BasicMessageChannel
+StandardMessageCodec
+Pigeon = пиджен
+ffigen
+jnigen
+PlatformView
+AndroidView
+UiKitView
+Swift = свифт
+Kotlin = котлин
+SwiftUI
+UIKit
+UIViewController
+UIView
+AppDelegate
+SceneDelegate
+MainActor
+Sendable
+actor
+TaskGroup
+async let
+AsyncSequence
+Combine
+AnyCancellable
+ARC
+retain cycle
+weak self
+unowned
+Keychain
+Secure Enclave
+URLSession
+WKWebView
+CoreAnimation
+CoreData
+Objective-C
+CocoaPods
+Swift Package Manager
+Xcode
+Instruments
+TestFlight
+provisioning profile
+entitlements
+APNs
+Activity
+Fragment
+ViewModel
+AndroidViewModel
+SavedStateHandle
+Jetpack Compose
+Composable
+remember
+rememberSaveable
+LaunchedEffect
+DisposableEffect
+StateFlow
+SharedFlow
+Flow
+CoroutineScope
+viewModelScope
+lifecycleScope
+repeatOnLifecycle
+Dispatchers.Main
+Dispatchers.IO
+Dispatchers.Default
+withContext
+SupervisorJob
+Job
+Deferred
+suspend
+coroutine
+CancellationException
+WorkManager
+Room
+DataStore
+Android Keystore
+BiometricPrompt
+Play Integrity
+App Attest
+Gradle
+Kotlin DSL
+R8
+ProGuard
+AndroidManifest.xml
+ANR
+ADB
+Logcat
+LeakCanary
+Android Studio
+App Bundle
+APK
+AAB
+IPA
+deep link
+universal link
+app link
+OAuth
+OIDC
+PKCE
+refresh token
+idempotency key
+WebSocket
+WebRTC
+GraphQL
+gRPC
+Protobuf
+offline-first
+pagination
+backpressure
+debounce
+throttle
+retry
+exponential backoff
+jitter

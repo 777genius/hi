@@ -108,12 +108,13 @@ cocoa = "0.25"  # macOS API для работы с окнами и Accessibility
 objc = "0.2"  # Objective-C runtime bindings
 block = "0.1"  # Objective-C blocks (completion handler запроса микрофона)
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }  # NSPanel для появления поверх fullscreen приложений
-screencapturekit = "1"
+screencapturekit = "=1.5.4"
 
 # Parakeet Ultra on Apple Silicon: native GGUF inference with Metal.
 # Other platforms keep existing STT providers and do not compile the C++ runtime.
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-transcribe-cpp = { version = "=0.4.1", default-features = false, features = ["metal"] }
+# 0.4.2 removes the synthetic "Glossary:" prefix from Whisper vocabulary prompts.
+transcribe-cpp = { version = "=0.4.2", default-features = false, features = ["metal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = "0.9"

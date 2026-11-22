@@ -21,6 +21,9 @@ pub enum AudioError {
     #[error("Capture error: {0}")]
     Capture(String),
 
+    #[error("Capture stopped by user: {0}")]
+    StoppedByUser(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -54,5 +57,23 @@ pub trait AudioCapture: Send + Sync {
 
     fn supports_quiet_refresh(&self) -> bool {
         false
+    }
+
+    /// Age of the last native buffer after this capture established healthy
+    /// delivery. None means the source is unarmed or cannot report liveness.
+    /// A gap is a recovery hint, not proof of a fault: sources may become idle.
+    fn capture_starvation_ms(&self) -> Option<u64> {
+        None
+    }
+
+    /// Whether this capture generation emitted at least one decoded PCM frame.
+    /// Independent of cadence: intermittent valid audio still proves delivery.
+    fn has_delivered_pcm(&self) -> bool {
+        false
+    }
+
+    /// A confirmed native capture failure, retained until stop/restart.
+    fn capture_error(&self) -> Option<AudioError> {
+        None
     }
 }

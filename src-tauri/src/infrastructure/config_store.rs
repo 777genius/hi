@@ -23,7 +23,7 @@ impl ConfigStore {
     /// Получить директорию конфигурации приложения
     fn config_dir() -> Result<PathBuf> {
         let config_dir =
-            dirs::config_dir().ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
+            crate::infrastructure::storage_paths::config_dir().ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
 
         let app_config_dir = config_dir.join("HackInterview");
 
@@ -161,7 +161,7 @@ impl ConfigStore {
 
     fn companion_bridge_token_paths() -> Result<Vec<PathBuf>> {
         let config_dir =
-            dirs::config_dir().ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
+            crate::infrastructure::storage_paths::config_dir().ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
         Ok(vec![
             config_dir.join("ClipboardTools").join("bridge.json"),
             Self::config_dir()?.join("companion_bridge.json"),
@@ -372,6 +372,8 @@ mod tests {
         let stt_path = ConfigStore::config_path().unwrap();
         let app_path = ConfigStore::app_config_path().unwrap();
 
+        assert!(stt_path.starts_with(crate::infrastructure::storage_paths::test_root()));
+        assert!(app_path.starts_with(crate::infrastructure::storage_paths::test_root()));
         assert!(stt_path.to_str().unwrap().contains("stt_config.json"));
         assert!(app_path.to_str().unwrap().contains("app_config.json"));
     }

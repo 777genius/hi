@@ -70,7 +70,7 @@ pub const AVAILABLE_MODELS: &[(&str, &str, u64, f32, f32)] = &[
 /// Получает путь к директории хранения моделей
 pub fn get_models_dir() -> anyhow::Result<PathBuf> {
     let app_data_dir =
-        dirs::data_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine app data directory"))?;
+        crate::infrastructure::storage_paths::data_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine app data directory"))?;
 
     let models_dir = app_data_dir.join("HackInterview").join("models");
 

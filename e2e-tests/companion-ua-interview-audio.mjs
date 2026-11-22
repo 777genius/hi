@@ -7,10 +7,11 @@
 //  - в конце проверяем, помнит ли LLM контекст всей беседы.
 // Тексты и ожидания лежат в fixtures/ua-interview-script.mjs, заранее.
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createHash, randomUUID } from 'node:crypto';
 import process from 'node:process';
 import { CODE_IMAGES as DEFAULT_IMAGES, FINAL_RECALL_PROMPTS as DEFAULT_RECALL, TURNS as DEFAULT_TURNS } from './fixtures/ua-interview-script.mjs';
 
@@ -23,7 +24,7 @@ import { coverage } from './helpers/sttMatch.mjs';
 
 const BRIDGE_FILE = join(homedir(), 'Library/Application Support/HackInterview/companion_bridge.json');
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const o = {
     baseUrl: process.env.COMPANION_BASE_URL || 'http://127.0.0.1:43821',
     durationMin: 40,
@@ -41,6 +42,11 @@ function parseArgs(argv) {
     keepInput: false,
     scenario: '',
     judge: true,
+    alternating: false,
+    preserveHistory: false,
+    strict: false,
+    tolerateTermErrors: false,
+    earlyReplyEvery: 0,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -57,6 +63,14 @@ function parseArgs(argv) {
     else if (a === '--keep-input') o.keepInput = true;
     else if (a === '--scenario') o.scenario = next();
     else if (a === '--no-judge') o.judge = false;
+    else if (a === '--alternating') o.alternating = true;
+    else if (a === '--preserve-history') o.preserveHistory = true;
+    else if (a === '--strict') o.strict = true;
+    else if (a === '--tolerate-term-errors') o.tolerateTermErrors = true;
+    else if (a === '--early-reply-every') {
+      o.earlyReplyEvery = Number(next());
+      if (!Number.isInteger(o.earlyReplyEvery) || o.earlyReplyEvery < 1) throw new Error('--early-reply-every requires a positive integer');
+    }
     else if (a === '--base-url') o.baseUrl = next();
     else throw new Error(`Unknown argument: ${a}`);
   }
@@ -88,6 +102,12 @@ function runSync(cmd, args) {
 // ---------- companion api ----------
 let TOKEN = '';
 let BASE = '';
+export function companionApiError(path, status = null) {
+  // Never persist query credentials, response bodies or underlying fetch errors.
+  const pathname = new URL(path, 'http://companion.local').pathname;
+  return new Error(`${pathname}: ${Number.isInteger(status) ? `HTTP ${status}` : 'transport failure'}`);
+}
+
 async function api(path, body) {
   const init = body === undefined
     ? {}
@@ -100,14 +120,26 @@ async function api(path, body) {
         },
         body: JSON.stringify(body),
       };
-  const res = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(60_000) });
-  const raw = await res.text();
+  let res;
+  let raw;
+  try {
+    res = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(60_000) });
+    // Failed response bodies can echo authentication credentials.
+    if (!res.ok) throw companionApiError(path, res.status);
+    raw = await res.text();
+  } catch {
+    throw companionApiError(path, res && !res.ok ? res.status : null);
+  }
   let payload = {};
   try { payload = raw ? JSON.parse(raw) : {}; } catch { payload = { text: raw }; }
-  if (!res.ok) throw new Error(`${path}: ${res.status} ${raw.slice(0, 300)}`);
   return payload.data ?? payload;
 }
-const getState = () => api(`/api/state?token=${encodeURIComponent(TOKEN)}`);
+let observeState = null;
+const getState = async () => {
+  const state = await api(`/api/state?token=${encodeURIComponent(TOKEN)}`);
+  observeState?.(state);
+  return state;
+};
 const maxSeq = (s) => Math.max(0, ...(s.timeline || []).map((m) => m.seq || 0));
 
 // ---------- text matching (устойчиво к ru/uk различиям STT) ----------
@@ -139,6 +171,98 @@ function keyScore(text, keys) {
   return { score: keys.length ? hits.length / keys.length : 1, hits, missed: keys.filter((k) => !hits.includes(k)) };
 }
 
+// A term mismatch is diagnostic under the explicit tolerance flag. Empty text,
+// lost coverage and invented suffixes remain failures in either mode.
+export function transcriptJunk(text) {
+  const raw = String(text || '');
+  const words = norm(raw).split(' ').filter(Boolean);
+  const glossaryEcho = /\bglossary\s*:/i.test(raw) || /^glossary[.!?]?$/i.test(raw.trim());
+  let repetitionLoop = /(?:\.([a-z0-9]{1,8}))(?:\.\1){3,}/i.test(raw);
+  for (let width = 1; width <= 12 && !repetitionLoop; width += 1) {
+    const repeats = width === 1 ? 5 : 3;
+    for (let start = 0; start + width * repeats <= words.length; start += 1) {
+      const phrase = words.slice(start, start + width).join(' ');
+      if (Array.from({ length: repeats - 1 }, (_, i) =>
+        words.slice(start + width * (i + 1), start + width * (i + 2)).join(' ') === phrase).every(Boolean)) {
+        repetitionLoop = true;
+        break;
+      }
+    }
+  }
+  return { glossaryEcho, repetitionLoop, junk: glossaryEcho || repetitionLoop };
+}
+
+export function transcriptAcceptance(text, score, terms, threshold, tolerateTermErrors) {
+  const junk = transcriptJunk(text);
+  const contentOk = Boolean(String(text || '').trim()) && score >= threshold && !junk.junk;
+  const termsOk = terms.every((term) => term.found);
+  return { ...junk, contentOk, termsOk, ok: contentOk && (tolerateTermErrors || termsOk) };
+}
+
+export function earlyReplyPreview(expectedQuestion, preview) {
+  const text = String(preview || '').trim();
+  const score = text ? coverage(expectedQuestion, text) : 0;
+  return { text, coverage: score, eligible: Boolean(text) && score >= 0.6,
+    skippedReason: !text ? 'empty-live-preview' : score < 0.6 ? 'insufficient-preview-coverage' : null };
+}
+
+// Actual snapshot identity fields: recording.activeSessionId and controls.instanceId/conversationGeneration.
+// Timeline message generation belongs to STT and is deliberately not session identity.
+export function recordingIdentity(state) {
+  return { activeSessionId: state.recording?.activeSessionId ?? null, instanceId: state.controls?.instanceId ?? null, conversationGeneration: state.controls?.conversationGeneration ?? null };
+}
+
+export function assertRecordingContinuity(expected, state) {
+  if (state.recording?.status !== 'Recording') throw new Error('Recording stopped');
+  const actual = recordingIdentity(state);
+  for (const key of ['activeSessionId', 'instanceId', 'conversationGeneration']) {
+    if (expected[key] !== null && actual[key] !== expected[key]) throw new Error(`Recording identity changed: ${key}`);
+  }
+}
+
+export function needsAnswerQualityReview(judgeEnabled, turns, recall, judgments = []) {
+  if (!judgeEnabled || judgments.some((item) => item.error) || recall.some((item) => !item.ok)) return true;
+  const answers = turns.filter((turn) => turn.aiRequested);
+  return answers.some((turn) => {
+    const judgment = judgments.find((item) => item.id === turn.id && !item.error);
+    return !turn.ai?.ok || turn.ai?.qualityNeedsReview || !judgment || Boolean(judgment.issue)
+      || ['correct', 'context', 'concise'].some((key) => judgment[key] !== 2)
+      || ['noQuestions', 'russian', 'firstPerson'].some((key) => judgment[key] !== true);
+  });
+}
+
+// Account for the attempt before any fallible preflight, and never submit twice.
+export function createAiAttempt(rec, send) {
+  let pending = null;
+  return (options) => {
+    if (!pending) {
+      rec.aiRequested = true;
+      rec.aiAttemptedAtMs = Date.now();
+      pending = Promise.resolve().then(() => send(options)).then((result) => {
+        if (result?.skippedBeforeSubmit) {
+          pending = null;
+          rec.aiRequested = false;
+        }
+        return result;
+      }).catch((error) => ({
+        status: 'exception', ok: false, error: String(error.message || error), text: '',
+      }));
+    }
+    return pending;
+  };
+}
+
+export function earlySubmissionAllowed(rec) {
+  if (rec.audio.questionFinishedAtMs == null) return true;
+  rec.earlySkippedReason = 'playback-ended-before-submit';
+  return false;
+}
+
+export function previousJudgeContext(turns, position) {
+  return turns.slice(Math.max(0, position - 3), position)
+    .map((turn) => `Интервьюер (распознано): ${turn.systemText || ''}\nКандидат (распознано): ${turn.micText || ''}${turn.ai?.text ? `\nАссистент: ${turn.ai.text}` : ''}`).join('\n');
+}
+
 // ---------- audio ----------
 async function prepareAudio(dir, turns, o) {
   await mkdir(dir, { recursive: true });
@@ -152,8 +276,8 @@ async function prepareAudio(dir, turns, o) {
     // Явный --voice важнее голосов сценария; голос конкретной реплики важнее всего.
     const qVoice = t.qVoice || (o.voiceExplicit ? o.voice : (SCENARIO.interviewerVoice || o.voice));
     const aVoice = t.aVoice || (o.voiceExplicit ? o.voice : (SCENARIO.candidateVoice || o.voice));
-    await run('say', ['-v', qVoice, '-r', String(SCENARIO.interviewerRate || o.interviewerRate), '-o', qA, '--', t.q]);
-    await run('say', ['-v', aVoice, '-r', String(SCENARIO.candidateRate || o.candidateRate), '-o', aA, '--', t.a]);
+    await run('say', ['-v', qVoice, '-r', String(SCENARIO.interviewerRate || o.interviewerRate), '-o', qA, '--', t.qSpeech || t.q]);
+    await run('say', ['-v', aVoice, '-r', String(SCENARIO.candidateRate || o.candidateRate), '-o', aA, '--', t.aSpeech || t.a]);
     await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', qA, '-filter:a', `volume=${o.systemGain}`, '-ar', '48000', '-ac', '2', qW]);
     await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', aA, '-filter:a', `volume=${o.micGain}`, '-ar', '48000', '-ac', '2', aW]);
     await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', aA, '-filter:a', `volume=${o.micGain}`, '-f', 's16le', '-ar', '48000', '-ac', '2', aP]);
@@ -225,6 +349,7 @@ async function waitForSystemFinal(afterSeq, timeoutMs) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const s = await getState();
+    if (Date.now() - start >= timeoutMs) return null;
     const item = (s.timeline || []).find((m) => m.seq > afterSeq && m.kind === 'stt' && m.status === 'final' && String(m.text || '').trim());
     if (item) return item;
     await sleep(700);
@@ -232,18 +357,20 @@ async function waitForSystemFinal(afterSeq, timeoutMs) {
   return null;
 }
 
-async function waitForAnswer(afterSeq, timeoutMs) {
-  const start = Date.now();
+export async function waitForAnswer(afterSeq, timeoutMs, start = Date.now(), readState = getState) {
   let last = null;
+  let firstTextMs = null;
   while (Date.now() - start < timeoutMs) {
-    const s = await getState();
+    const s = await readState();
+    if (Date.now() - start >= timeoutMs) break;
     const answers = (s.timeline || []).filter((m) => m.seq > afterSeq && m.kind === 'haiku');
     last = answers[answers.length - 1] || last;
+    if (firstTextMs === null && last?.text?.trim()) firstTextMs = Date.now() - start;
     const done = answers.find((m) => m.status === 'final' || m.status === 'error');
-    if (done) return { item: done, latencyMs: Date.now() - start };
+    if (done) return { item: done, latencyMs: Date.now() - start, firstTextMs };
     await sleep(700);
   }
-  return { item: last, latencyMs: Date.now() - start, timedOut: true };
+  return { item: last, latencyMs: Date.now() - start, firstTextMs, timedOut: true };
 }
 
 async function main() {
@@ -267,19 +394,37 @@ async function main() {
   if (!testMode && process.env.E2E_ALLOW_HISTORY_CLEAR !== '1') {
     throw new Error('Приложение запущено не в тест-режиме (INTERVIEW_TEST_MODE=1): e2e стёр бы реальную историю. Задай E2E_ALLOW_HISTORY_CLEAR=1, если это осознанно.');
   }
-  await api('/api/history/clear', {}).catch((e) => log('history clear skipped:', e.message));
-  await api('/api/context/clear', {}).catch((e) => log('context clear skipped:', e.message));
+  if (!o.preserveHistory) {
+    await api('/api/history/clear', {}).catch((e) => log('history clear skipped:', e.message));
+    await api('/api/context/clear', {}).catch((e) => log('context clear skipped:', e.message));
+  }
 
   const runId = new Date().toISOString().replace(/[:.]/g, '-');
   const outDir = join(o.artifactsDir, runId);
   await mkdir(outDir, { recursive: true });
-  const audioDir = join(tmpdir(), `ua-interview-${runId}`);
-
   const turns = TURNS.slice(0, o.turns);
+  // Reuse only identical speech and synthesis parameters between restarted runs.
+  const cacheKey = createHash('sha256').update(JSON.stringify({
+    turns: turns.map((t) => [t.id, t.qSpeech || t.q, t.aSpeech || t.a, t.qVoice, t.aVoice]),
+    voice: o.voice, voiceExplicit: o.voiceExplicit, interviewerVoice: SCENARIO.interviewerVoice,
+    candidateVoice: SCENARIO.candidateVoice, interviewerRate: SCENARIO.interviewerRate,
+    candidateRate: SCENARIO.candidateRate, systemGain: o.systemGain, micGain: o.micGain,
+  })).digest('hex').slice(0, 20);
+  const audioDir = join(tmpdir(), `hackinterview-soak-audio-${cacheKey}`);
+  const manifest = join(audioDir, 'prepared.json');
   log(`preparing audio for ${turns.length} turns...`);
-  const audio = await prepareAudio(audioDir, turns, o);
+  let audio;
+  try {
+    audio = JSON.parse(await readFile(manifest, 'utf8'));
+    if (!Array.isArray(audio) || audio.length !== turns.length) throw new Error('invalid cached audio');
+    await Promise.all(audio.flatMap((item) => [access(item.qWav), access(item.aWav), access(item.aPcm)]));
+    log('reusing previously generated speech');
+  } catch {
+    audio = await prepareAudio(audioDir, turns, o);
+    await writeFile(manifest, JSON.stringify(audio));
+  }
   const imagesDir = join(audioDir, 'images');
-  await renderCodeImages(imagesDir);
+  if (!o.skipImages && Object.keys(CODE_IMAGES).length) await renderCodeImages(imagesDir);
   const totalAudioSec = audio.reduce((s, f) => s + f.qSec + f.aSec, 0);
   const budgetSec = o.durationMin * 60;
   const perTurnFixed = 4.5; // think pause + STT settle
@@ -312,6 +457,9 @@ async function main() {
     turns: [],
     finalRecall: [],
     errors: [],
+    timingNote: 'observedAtMs and firstTextMs are polling observations; createdAtMs is the native segment timestamp, not a measured audio-end timestamp',
+    finalSegments: [],
+    idleFinals: [],
   };
 
   const startedMs = Date.now();
@@ -327,6 +475,36 @@ async function main() {
     }
     const started = await getState();
     log('recording', started.recording?.status, 'mic', JSON.stringify(started.microphone));
+    if (started.recording?.status !== 'Recording') throw new Error('Recording did not start');
+    const recordingStartedMs = Date.now();
+    report.recordingStartedAtMs = recordingStartedMs;
+    report.recordingIdentity = recordingIdentity(started);
+    let phase = 'warmup';
+    let activeTurnId = null;
+    const seenFinals = new Set();
+    const recordingBaseSeq = maxSeq(started);
+    observeState = (state) => {
+      if (o.strict) assertRecordingContinuity(report.recordingIdentity, state);
+      for (const item of state.timeline || []) {
+        if (item.seq <= recordingBaseSeq || item.status !== 'final' || !['stt', 'mic'].includes(item.kind)) continue;
+        // Revisions to a finalized segment must also be inspected.
+        const key = `${item.seq}:${item.text}`;
+        if (seenFinals.has(key)) continue;
+        seenFinals.add(key);
+        const segment = { ...item, observedAtMs: Date.now(), phase, turnId: activeTurnId, ...transcriptJunk(item.text) };
+        report.finalSegments.push(segment);
+        if (phase === 'idle' || phase === 'endurance' || phase === 'recall') report.idleFinals.push(segment);
+        if (o.strict && segment.junk) throw new Error(`Invented STT text in ${phase}: ${item.kind} seq=${item.seq}: ${String(item.text).slice(0, 160)}`);
+      }
+    };
+    // Poll during gaps so final text emitted between turns is retained and checked.
+    const monitoredSleep = async (ms) => {
+      const until = Date.now() + ms;
+      while (Date.now() < until) {
+        await sleep(Math.min(1000, until - Date.now()));
+        await getState();
+      }
+    };
     // прогрев STT: играем короткую реплику, пока не придёт первый финал в системном канале
     {
       const warmWav = join(audioDir, 'warmup.wav');
@@ -346,6 +524,8 @@ async function main() {
     for (let idx = 0; idx < turns.length; idx += 1) {
       const t = turns[idx];
       const f = audio[idx];
+      activeTurnId = t.id;
+      phase = 'turn';
       const turnStart = Date.now();
       const before = await getState();
       if (before.recording?.status !== 'Recording') {
@@ -364,21 +544,20 @@ async function main() {
         await sleep(3000);
       }
       const baseSeq = maxSeq(before);
-      const rec = { id: t.id, baseSeq, q: t.q, a: t.a, aiRequested: false };
-
-      // 1) интервьюер говорит в системный звук
-      log(`turn ${t.id}/${turns.length}: interviewer (${f.qSec.toFixed(1)}s)`);
-      await playSystem(f.qWav);
-      const heardQ = await waitForSystemFinal(baseSeq, 20_000);
-      rec.questionHeardAfterMs = heardQ ? Date.now() - turnStart : null;
+      const rec = { id: t.id, baseSeq, q: t.q, qSpeech: t.qSpeech || t.q, a: t.a, aSpeech: t.aSpeech || t.a, aiRequested: false, startedAtMs: turnStart, audio: { questionDurationMs: f.qSec * 1000, answerDurationMs: f.aSec * 1000 } };
 
       // 2) LLM-ответ на вопрос (пока кандидат "думает/отвечает")
       let aiPromise = null;
       let aiBaseSeq = null;
-      const sendAi = async () => {
-        const s = await getState();
+      const sendAi = async ({ earlyState } = {}) => {
+        // Early mode reuses the preview snapshot, avoiding a second asynchronous
+        // preflight between the playback guard and the actual POST.
+        const s = earlyState || await getState();
+        if (earlyState && !earlySubmissionAllowed(rec)) return { skippedBeforeSubmit: true };
         aiBaseSeq = maxSeq(s);
-        rec.aiRequested = true;
+        rec.aiRequestedAtMs = Date.now();
+        rec.submittedBeforePlaybackEnd = rec.audio.questionFinishedAtMs == null;
+        if (rec.earlyAttempt && !rec.submittedBeforePlaybackEnd && !rec.earlySkippedReason) rec.earlySkippedReason = 'playback-ended-before-submit';
         if (t.image && !o.skipImages) {
           const png = await readFile(join(imagesDir, `${t.image.id}.png`));
           await api('/api/prompt/send', {
@@ -394,7 +573,7 @@ async function main() {
           return null;
         }
         const expect = t.image && !o.skipImages ? t.image.expect : t.llm.expect;
-        const answer = await waitForAnswer(aiBaseSeq, o.aiTimeoutMs);
+        const answer = await waitForAnswer(aiBaseSeq, o.aiTimeoutMs, rec.aiRequestedAtMs);
         const text = answer.item?.text || '';
         const sc = keyScore(text, expect);
         // Ключи на латинице, а ответ русский с вкраплениями терминов: достаточно одного совпадения, смысл оценивается по транскриптам.
@@ -403,21 +582,64 @@ async function main() {
           status: answer.item?.status || 'none',
           timedOut: Boolean(answer.timedOut),
           latencyMs: answer.latencyMs,
+          firstTextMs: answer.firstTextMs,
+          finalMs: Date.now() - rec.aiRequestedAtMs,
           chars: text.length,
           expect,
           hits: sc.hits,
-          ok: answer.item?.status === 'final' && sc.hits.length >= need && text.length > 60,
+          ok: answer.item?.status === 'final' && text.length > 60,
+          qualityNeedsReview: sc.hits.length < need,
           meta: answerMeta(text),
           text,
         };
       };
-      if (t.llm || (t.image && !o.skipImages)) aiPromise = sendAi().catch((e) => ({ status: 'exception', ok: false, error: String(e.message || e), text: '' }));
+      // A memoized request promise prevents the early and normal paths sending twice.
+      const attemptAi = createAiAttempt(rec, sendAi);
+      const startAiOnce = (options) => {
+        aiPromise = attemptAi(options);
+        return aiPromise;
+      };
+      const earlyScheduled = o.earlyReplyEvery > 0 && (idx + 1) % o.earlyReplyEvery === 0;
+      const earlyEligible = earlyScheduled && Boolean(t.llm) && !(t.image && !o.skipImages);
+      rec.earlyAttempt = earlyEligible;
+      rec.earlySkippedReason = !o.earlyReplyEvery ? 'disabled' : !earlyScheduled ? 'not-scheduled' : !t.llm ? 'not-llm-turn' : t.image && !o.skipImages ? 'image-prompt' : null;
+
+      // Keep actual question audio running while inspecting its live system preview.
+      log(`turn ${t.id}/${turns.length}: interviewer (${f.qSec.toFixed(1)}s)`);
+      rec.audio.questionStartedAtMs = Date.now();
+      const playback = playSystem(f.qWav).then(
+        () => { rec.audio.questionFinishedAtMs = Date.now(); return { error: null }; },
+        (error) => { rec.audio.questionFinishedAtMs = Date.now(); return { error }; },
+      );
+      try {
+        if (earlyEligible) {
+          await sleep(f.qSec * 1000 * 0.8);
+          const previewState = await getState();
+          rec.earlyPreviewObservedAtMs = Date.now();
+          rec.earlyPreview = earlyReplyPreview(t.q, previewState.live?.partialText);
+          rec.earlySkippedReason = rec.audio.questionFinishedAtMs != null ? 'playback-already-ended' : rec.earlyPreview.skippedReason;
+          if (rec.earlyPreview.eligible && rec.audio.questionFinishedAtMs == null) startAiOnce({ earlyState: previewState });
+        }
+      } finally {
+        // Both success and failure are joined even if preview inspection throws.
+        const result = await playback;
+        if (result.error) throw result.error;
+      }
+      const heardQ = await waitForSystemFinal(baseSeq, 20_000);
+      rec.questionHeardAfterMs = heardQ ? Date.now() - turnStart : null;
+      rec.questionFinalObservedAtMs = heardQ ? Date.now() : null;
+      rec.questionFinalAfterPlaybackMs = heardQ ? Date.now() - rec.audio.questionFinishedAtMs : null;
+      if (t.llm || (t.image && !o.skipImages)) startAiOnce();
 
       await sleep(1800);
 
       // 3) кандидат отвечает в микрофон (BlackHole)
       log(`turn ${t.id}: candidate (${f.aSec.toFixed(1)}s)${rec.aiRequested || aiPromise ? ' + LLM' : ''}`);
-      await playMic(f.aPcm, o.blackhole);
+      if (!o.alternating || !t.llm) {
+        rec.audio.answerStartedAtMs = Date.now();
+        await playMic(f.aPcm, o.blackhole);
+        rec.audio.answerFinishedAtMs = Date.now();
+      }
       await sleep(4500);
       if (aiPromise) {
         rec.ai = await aiPromise;
@@ -434,26 +656,60 @@ async function main() {
       rec.micA = { score: coverage(t.a, mic) }; // насколько распознан ответ кандидата в микрофонном канале
       rec.leakA_in_system = coverage(t.a, sys); // голос кандидата в системном канале (SCK ловит и вывод в BlackHole)
       rec.leakQ_in_mic = coverage(t.q, mic);
-      rec.systemOk = rec.systemQ.score >= o.sttMatchThreshold;
-      rec.micOk = rec.micA.score >= o.sttMatchThreshold;
+      const termChecks = (specs, text) => (specs || []).map((spec) => {
+        const normalized = ` ${norm(text)} `;
+        const found = [spec.term, ...(spec.aliases || [])].some((alias) => normalized.includes(` ${norm(alias)} `));
+        return { term: spec.term, found };
+      });
+      rec.systemTerms = termChecks(t.systemTerms, sys);
+      rec.micTerms = o.alternating && t.llm ? [] : termChecks(t.micTerms, mic);
+      rec.systemAcceptance = transcriptAcceptance(sys, rec.systemQ.score, rec.systemTerms, o.sttMatchThreshold, o.tolerateTermErrors);
+      rec.micAcceptance = transcriptAcceptance(mic, rec.micA.score, rec.micTerms, o.sttMatchThreshold, o.tolerateTermErrors);
+      rec.systemRepetitionLoop = rec.systemAcceptance.repetitionLoop;
+      rec.micRepetitionLoop = rec.micAcceptance.repetitionLoop;
+      rec.repetitionLoop = rec.systemRepetitionLoop || rec.micRepetitionLoop;
+      rec.systemOk = rec.systemAcceptance.ok;
+      rec.micOk = o.alternating && t.llm ? null : rec.micAcceptance.ok;
+      rec.finalSegments = report.finalSegments.filter((segment) => segment.seq > baseSeq);
+      rec.finishedAtMs = Date.now();
       rec.elapsedSec = (Date.now() - turnStart) / 1000;
       report.turns.push(rec);
       await writeFile(join(outDir, 'report.partial.json'), JSON.stringify(report, null, 2));
       log(`turn ${t.id}: system ${rec.systemQ.score.toFixed(2)} mic ${rec.micA.score.toFixed(2)} leakA->sys ${rec.leakA_in_system.toFixed(2)}`);
+      if (o.strict && (!rec.systemOk || rec.micOk === false || rec.repetitionLoop || (rec.aiRequested && (!rec.ai?.ok || rec.ai?.timedOut)))) throw new Error(`Strict turn failure ${t.id}: system=${rec.systemQ.score.toFixed(2)} mic=${rec.micOk} repetition=${rec.repetitionLoop} missing=${[...rec.systemTerms, ...rec.micTerms].filter((term) => !term.found).map((term) => term.term).join(',')} AI=${rec.ai?.status || 'not requested'}`);
 
       // 4) пауза до следующего вопроса, чтобы уложиться в бюджет времени
       const targetEnd = startedMs + ((idx + 1) / turns.length) * (budgetSec - 150) * 1000 + 8000;
       const wait = Math.max(gapSec * 1000 * 0.5, targetEnd - Date.now());
-      if (idx < turns.length - 1) await sleep(Math.min(wait, gapSec * 1000 * 2.5));
+      phase = 'idle';
+      activeTurnId = null;
+      if (idx < turns.length - 1) await monitoredSleep(Math.min(wait, gapSec * 1000 * 2.5));
     }
 
+    phase = 'endurance';
+    if (o.strict) {
+      while (Date.now() - recordingStartedMs < budgetSec * 1000) {
+        const current = await getState();
+        if (current.recording?.status !== 'Recording') throw new Error('Recording stopped during the endurance interval');
+        await sleep(Math.min(5000, Math.max(1, recordingStartedMs + budgetSec * 1000 - Date.now())));
+      }
+      // The final sleep may cross the requested boundary. Prove continuity again
+      // after that boundary instead of crediting time since the prior snapshot.
+      const boundaryState = await getState();
+      assertRecordingContinuity(report.recordingIdentity, boundaryState);
+      report.recordingBoundaryVerifiedAtMs = Date.now();
+      report.continuousRecordingMs = report.recordingBoundaryVerifiedAtMs - recordingStartedMs;
+    }
+
+    phase = 'recall';
     // финальные проверки памяти контекста
     for (const p of FINAL_RECALL_PROMPTS) {
       log(`final recall: ${p.id}`);
       const s = await getState();
       const base = maxSeq(s);
+      const requestedAtMs = Date.now();
       await api('/api/prompt/send', { text: p.text });
-      const answer = await waitForAnswer(base, o.aiTimeoutMs);
+      const answer = await waitForAnswer(base, o.aiTimeoutMs, requestedAtMs);
       const text = answer.item?.text || '';
       const sc = keyScore(text, p.expect);
       report.finalRecall.push({
@@ -461,6 +717,9 @@ async function main() {
         prompt: p.text,
         status: answer.item?.status || 'none',
         latencyMs: answer.latencyMs,
+        firstTextMs: answer.firstTextMs,
+        finalMs: answer.latencyMs,
+        timedOut: Boolean(answer.timedOut),
         hits: sc.hits,
         missed: sc.missed,
         ok: answer.item?.status === 'final' && sc.hits.length >= p.minHits,
@@ -472,6 +731,7 @@ async function main() {
     report.errors.push(String(error.stack || error));
     log('ERROR', error.message || error);
   } finally {
+    observeState = null;
     await api('/api/record/stop', {}).catch((e) => report.errors.push(`stop: ${e.message}`));
     await restore();
   }
@@ -497,16 +757,30 @@ async function main() {
   report.memory = finalState?.memory;
   const ts = report.turns;
   const aiTurns = ts.filter((t) => t.aiRequested);
+  const micTurns = ts.filter((t) => t.micOk !== null);
   report.summary = {
     turnsRun: ts.length,
     systemOk: ts.filter((t) => t.systemOk).length,
     micOk: ts.filter((t) => t.micOk).length,
+    micTurns: micTurns.length,
+    acceptanceCriterion: o.tolerateTermErrors ? 'content-and-transport-with-term-mismatches-reported' : 'content-transport-and-keyterms',
+    verbatimFidelityVerified: false,
+    contentFailures: ts.filter((t) => !t.systemAcceptance?.contentOk || (t.micOk !== null && !t.micAcceptance?.contentOk)).length,
+    junkSegments: report.finalSegments.filter((segment) => segment.junk).length,
+    idleFinals: report.idleFinals.length,
+    sttFailures: ts.filter((t) => !t.systemOk || t.micOk === false).length,
+    termFidelityFailures: ts.filter((t) => !t.systemAcceptance?.termsOk || (t.micOk !== null && !t.micAcceptance?.termsOk)).length,
+    missingTerms: ts.flatMap((t) => [...(t.systemTerms || []), ...(t.micTerms || [])]).filter((term) => !term.found).length,
+    continuousRecordingMs: report.continuousRecordingMs ?? null,
+    answerQualityReviewRequired: needsAnswerQualityReview(o.judge, ts, report.finalRecall, report.judge),
     avgSystemScore: avg(ts.map((t) => t.systemQ?.score ?? 0)),
-    avgMicScore: avg(ts.map((t) => t.micA?.score ?? 0)),
+    avgMicScore: avg(micTurns.map((t) => t.micA?.score ?? 0)),
     avgLeakCandidateIntoSystem: avg(ts.map((t) => t.leakA_in_system ?? 0)),
+    earlyReplyAttempts: ts.filter((t) => t.earlyAttempt).length,
+    earlyRepliesSubmitted: ts.filter((t) => t.submittedBeforePlaybackEnd).length,
     aiTurns: aiTurns.length,
     aiOk: aiTurns.filter((t) => t.ai?.ok).length,
-    aiErrors: aiTurns.filter((t) => t.ai?.status !== 'final').length,
+    aiErrors: aiTurns.filter((t) => !t.ai?.ok || t.ai?.timedOut).length,
     avgAiLatencySec: avg(aiTurns.map((t) => (t.ai?.latencyMs || 0) / 1000)),
     answersUk: [...aiTurns.map((t) => t.ai?.meta), ...report.finalRecall.map((r) => r.meta)].filter((m) => m?.lang === 'uk').length,
     answersRu: [...aiTurns.map((t) => t.ai?.meta), ...report.finalRecall.map((r) => r.meta)].filter((m) => m?.lang === 'ru').length,
@@ -521,7 +795,7 @@ async function main() {
   await writeFile(join(outDir, 'report.md'), renderMarkdown(report));
   log('SUMMARY', JSON.stringify(report.summary));
   log('report:', join(outDir, 'report.md'));
-  process.exit(report.errors.length || (report.incidents || []).length ? 1 : 0);
+  process.exit(report.errors.length || (report.incidents || []).length || report.summary.sttFailures || report.summary.junkSegments || report.summary.aiErrors || report.finalRecall.some((r) => !r.ok) ? 1 : 0);
 }
 
 
@@ -537,9 +811,9 @@ async function judgeAnswers(report, turns) {
   // Профиль кандидата (если есть) считается подтверждённым источником фактов об опыте; HTML-комментарии как в приложении вырезаем.
   const profile = await readFile(process.env.INTERVIEW_PROFILE_FILE || join(homedir(), 'Library/Application Support/HackInterview/candidate_profile.md'), 'utf8')
     .then((t) => t.replace(/<!--[\s\S]*?-->/g, '').slice(0, 30_000)).catch(() => '');
-  const items = report.turns.filter((t) => t.ai?.text).map((t) => ({ kind: 'turn', id: t.id, q: t.q, a: t.a, text: t.ai.text, hasImage: t.aiKind === 'image-prompt', imageCode: (() => { const img = turns.find((x) => x.id === t.id)?.image; const code = img ? CODE_IMAGES[img.id] : null; return code ? `${img.caption ? `Подпись: ${img.caption}\n` : ''}${code.title ? `${code.title}\n` : ''}${code.code}` : ''; })() }));
+  const items = report.turns.filter((t) => t.ai?.text).map((t) => ({ kind: 'turn', position: report.turns.indexOf(t), id: t.id, q: t.q, a: t.a, text: t.ai.text, hasImage: t.aiKind === 'image-prompt', imageCode: (() => { const img = turns.find((x) => x.id === t.id)?.image; const code = img ? CODE_IMAGES[img.id] : null; return code ? `${img.caption ? `Подпись: ${img.caption}\n` : ''}${code.title ? `${code.title}\n` : ''}${code.code}` : ''; })() }));
   for (const [index, item] of items.entries()) {
-    const prev = turns.filter((x) => x.id < item.id).slice(-3).map((x) => `Интервьюер: ${x.q}\nКандидат: ${x.a}`).join('\n');
+    const prev = previousJudgeContext(report.turns, item.position);
     const prompt = `Ты строгий проверяющий ответов ассистента для технического собеседования. Ассистент отвечает кандидату вслух-готовым текстом. Требования: ответ по-русски (термины на английском), чётко и по делу без воды, НЕ задаёт вопросов и не просит уточнений, говорит от первого лица в мужском роде, длина соответствует сложности вопроса, понимает контекст предыдущих реплик.
 
 ${profile ? `Профиль кандидата (подтверждённые факты об его опыте; ответ может на них опираться, это не выдумка):\n${profile}\n\n` : ''}Контекст:
@@ -624,7 +898,9 @@ function renderMarkdown(r) {
   return L.join('\n');
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

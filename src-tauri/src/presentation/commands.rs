@@ -2302,8 +2302,44 @@ pub async fn companion_set_desktop_blackout(
 pub async fn set_companion_system_prompt(
     state: State<'_, AppState>,
     prompt: String,
+    profile_id: Option<String>,
 ) -> Result<(), String> {
+    if let Some(root) = crate::infrastructure::storage_paths::config_dir() {
+        let dir = root.join("HackInterview");
+        if let Err(error) = std::fs::create_dir_all(&dir) { log::warn!("Cannot create STT profile directory: {error}"); }
+        let profile = if profile_id.as_deref() == Some("flutter-resume") { "flutter" } else { "original" };
+        if let Err(error) = std::fs::write(dir.join("stt_profile.txt"), profile) { log::warn!("Cannot persist STT profile: {error}"); }
+    }
     *state.companion_system_prompt.write().await = prompt.trim().to_string();
+    // Warm the same stable system prefix without adding anything to the timeline.
+    if std::env::var("LLM_PROVIDER").ok().as_deref() == Some("openai_responses") {
+        static LAST_WARM: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+        let system = with_interview_answer_style_guard(prompt.trim().to_string());
+        let style = state.config.read().await.answer_style.clone();
+        let system = crate::presentation::answer_style_prompt::with_answer_style_policy(system, &style);
+        let system = crate::presentation::candidate_profile::with_candidate_profile(system);
+        let should_warm = {
+            let mut last = LAST_WARM.get_or_init(|| std::sync::Mutex::new(String::new())).lock().unwrap();
+            if *last == system { false } else { *last = system.clone(); true }
+        };
+        if should_warm {
+            tauri::async_runtime::spawn(async move {
+                let config = crate::domain::LlmRuntimeConfig {
+                    provider: crate::domain::LlmProviderType::OpenAiResponses,
+                    api_key: std::env::var("OPENAI_API_KEY").ok(),
+                    base_url: std::env::var("OPENAI_BASE_URL").ok(),
+                    backend_url: None, backend_auth_token: None,
+                };
+                let factory = crate::infrastructure::DefaultLlmProviderFactory::new();
+                if let Ok(provider) = factory.create(&config) {
+                    let mut request = crate::domain::LlmStreamRequest::new(openai_responses_model(), system, "Reply OK.", 16, 0.2);
+                    request.reasoning_effort = Some("minimal".to_string());
+                    let result = tokio::time::timeout(std::time::Duration::from_secs(20), provider.stream_text(&request, Box::new(|_| {}))).await;
+                    log::info!("LLM background warm-up completed: {}", matches!(result, Ok(Ok(()))));
+                }
+            });
+        }
+    }
     Ok(())
 }
 
@@ -2903,12 +2939,9 @@ pub async fn stop_system_audio_test(state: State<'_, AppState>) -> Result<Vec<i1
         return Err("System audio test not running".to_string());
     }
 
-    if let Some(mut capture) = test_state.capture.take() {
-        capture
-            .stop_capture()
-            .await
-            .map_err(|e| format!("Failed to stop audio capture: {}", e))?;
-    }
+    let stop_result = if let Some(mut capture) = test_state.capture.take() {
+        capture.stop_capture().await.map_err(|e| format!("Failed to stop audio capture: {}", e))
+    } else { Ok(()) };
 
     test_state.is_testing = false;
 
@@ -2921,6 +2954,7 @@ pub async fn stop_system_audio_test(state: State<'_, AppState>) -> Result<Vec<i1
         "System audio test stopped, buffer size: {} samples",
         buffer.len()
     );
+    stop_result?;
     Ok(buffer)
 }
 
@@ -3376,6 +3410,7 @@ pub async fn get_output_audio_devices() -> Result<Vec<String>, String> {
 }
 
 const INTERVIEW_ANSWER_STYLE_GUARD: &str = r#"Правила стиля ответа:
+- Отвечай содержательно и соразмерно вопросу. Для сложного вопроса раскрой решение и важные нюансы в нескольких связных абзацах, без фиксированного лимита предложений. Простой вопрос не растягивай. Код и развёрнутые примеры давай по просьбе или когда без примера трудно объяснить суть.
 - Начинай сразу с ответа. Не повторяй вопрос пользователя и не пиши заголовки "Вопрос:"/"Ответ:".
 - Запрещено начинать с "Вопрос", "Ответ", заголовка # Ответ, "**Вопрос:**" или краткого пересказа вопроса.
 - Первая строка должна быть содержательным тезисом ответа, без мета-комментариев.
@@ -3392,7 +3427,7 @@ const INTERVIEW_ANSWER_STYLE_GUARD: &str = r#"Правила стиля отве
 - Если личный опыт или детали реализации не подтверждены контекстом, не выдумывай их и не сообщай, что контекста недостаточно. Дай полезный технический ответ как подход: "Я бы...".
 - Если распознавание неточно или вопрос неполный, выбери наиболее вероятный смысл и ответь без уточняющих вопросов.
 - Никогда не задавай вопросов, в том числе риторических, и не проси уточнений или подтверждений. Не заканчивай ответ вопросом.
-- Длина ответа зависит от сложности вопроса, но всегда без воды, только по делу: простой фактологический вопрос - 1-2 предложения; обычный теоретический - 3-4 предложения; сложный, многосоставной или длинный вопрос (сравнение подходов, проектирование, несколько условий) - до 6-8 предложений или короткий список по пунктам вопроса. Каждое предложение несёт новый факт, без вступлений, повторов вопроса и итогов.
+- Начни с краткой ясной сути ответа и выдели её **жирным**. Затем объясни важные детали и ограничения простым разговорным языком. Глубину выбирай по сложности вопроса, без фиксированного лимита предложений, воды, повторов и ненужных подробностей.
 - Говори о себе в мужском роде: "я бы настроил", "я сделал", "я использовал".
 - Вопрос по коду или картинке с кодом: сначала 1-2 предложения с главной проблемой и причиной, затем исправленный фрагмент кода с короткими комментариями на русском, затем 1-2 предложения о компромиссах. Объём вне кода растёт со сложностью кода (обычно 60-150 слов), без разбора второстепенных мелочей.
 - По умолчанию отвечай коротким связным абзацем. Список используй только для нескольких самостоятельных пунктов или по явной просьбе.

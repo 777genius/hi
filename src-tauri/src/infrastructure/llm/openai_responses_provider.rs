@@ -197,9 +197,25 @@ fn build_responses_payload(request: &LlmStreamRequest) -> Value {
         "store": false
     });
 
-    // Постоянный prompt_cache_key + prompt_cache_options замедляли первый токен примерно на 1,5 с
-    // (замер на одном приложении: медиана 3,7 с с ключом против 2,1 с без ключа или с уникальным ключом).
-    // Неявное кэширование префикса работает и без ключа.
+    // Long stable profiles belong in the reusable input prefix, rather than
+    // request-only instructions. Keep a short instruction to prevent the relay
+    // from injecting its own default Codex system prompt.
+    if request.model == "gpt-6.1-terra" && request.system_prompt.len() >= 4096 {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(request.system_prompt.as_bytes());
+        payload["instructions"] = serde_json::json!("Follow the developer message.");
+        payload["input"].as_array_mut().unwrap().insert(0, serde_json::json!({
+            "role": "developer",
+            "content": [{"type": "input_text", "text": request.system_prompt}]
+        }));
+        // Terra's relay reuses completed message boundaries; keep the profile
+        // prefix reusable even when the following transcript changes each turn.
+        let input = payload["input"].as_array_mut().unwrap();
+        input.insert(1, serde_json::json!({"role": "user", "content": [{"type": "input_text", "text": "Use this candidate profile as reference for the interview."}]}));
+        input.insert(2, serde_json::json!({"role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}));
+        payload["prompt_cache_key"] = serde_json::json!(format!("hi-profile-{:x}", digest)[..48].to_string());
+        payload["prompt_cache_options"] = serde_json::json!({"mode": "implicit", "ttl": "30m"});
+    }
 
     // Some callers use a generic LlmStreamRequest without specifying effort.
     // Honor the configured Responses effort there too, while keeping any
@@ -340,10 +356,22 @@ mod tests {
     }
 
     #[test]
-    fn does_not_pin_a_prompt_cache_key() {
+    fn short_prompts_do_not_pin_a_prompt_cache_key() {
         let payload = build_responses_payload(&LlmStreamRequest::new("gpt-6.1-terra", "system", "first", 64, 0.2));
         assert!(payload.get("prompt_cache_key").is_none());
         assert!(payload.get("prompt_cache_options").is_none());
+    }
+
+    #[test]
+    fn long_terra_profile_is_a_stable_cached_developer_prefix() {
+        let system = "Flutter profile ".repeat(400);
+        let first = build_responses_payload(&LlmStreamRequest::new("gpt-6.1-terra", &system, "first", 64, 0.2));
+        let second = build_responses_payload(&LlmStreamRequest::new("gpt-6.1-terra", &system, "second", 64, 0.2));
+        assert_eq!(first["input"][0]["role"], "developer");
+        assert_eq!(first["input"][0]["content"][0]["text"], system);
+        assert_eq!(first["input"][3]["content"][0]["text"], "first");
+        assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
+        assert_ne!(first["instructions"], system);
     }
 
     #[test]

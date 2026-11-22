@@ -411,3 +411,17 @@ cargo install tauri-driver --locked
 cd frontend
 pnpm e2e:tauri
 ```
+# Flutter interview tooling
+
+`pnpm interviewer:flutter` opens a built macOS bundle in interviewer test mode.
+Build the bundle first, or set `HACKINTERVIEW_APP` to an existing installation.
+These tools are opt-in and are not run when the normal app starts.
+
+- `node --experimental-strip-types e2e-tests/flutter-interview-benchmark.ts` exercises alternating injected microphone transcripts and real LLM replies. This is a context/UI benchmark, not an acoustic STT test. It requires test-mode timeline endpoints and an idle app.
+- `flutter-{cache-probe,effort-compare,conversational-style,answer-depth}.ts` send real requests through the configured provider. Set `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_RESPONSES_MODEL`, or `FLUTTER_BENCHMARK_ENV_FILE`. `FLUTTER_BENCHMARK_PROMPT_FILE` optionally supplies a saved full prompt; otherwise checked-in Flutter reference material is used.
+- `node e2e-tests/companion-ua-interview-audio.mjs --scenario e2e-tests/scenarios/flutter-senior-soak.json --duration-min 60 --alternating --preserve-history --strict --no-judge --skip-images` exercises real audio routing. It requires macOS TTS, BlackHole, ffmpeg/ffprobe, recording permissions and the app's explicit test mode. It switches the input device during the test and restores it on exit.
+- Add `--tolerate-term-errors` when synthetic pronunciation variants are acceptable: missing keyterms remain reported, while empty/low-coverage transcripts, invented loops, recording interruptions and failed LLM responses still fail the run. `--early-reply-every 4` attempts an early LLM request on every fourth turn only when a real preview already covers most of the question; skipped attempts and actual preview text are recorded.
+- Use `--scenario e2e-tests/scenarios/flutter-senior-mixed-soak.json` for 30 Russian (Milena) and 30 Ukrainian (Lesya) turns. `--early-reply-every 6` exercises early submission in both languages.
+- `flutter-soak-ui-monitor.ts` observes the real desktop WebDriver and companion; `flutter-soak-service-monitor.ts` observes the local Sub2API service. Run them only for an explicit test session.
+
+Generated output goes under ignored `artifacts/`. Do not publish personal transcripts, screenshots, credentials or local provider usage logs in a PR. Coverage and required-term checks do not prove verbatim STT accuracy or answer quality; review the actual transcripts and responses. A short benchmark does not establish a clean continuous hour.

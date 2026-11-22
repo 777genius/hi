@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { toDataURL as toQrDataUrl } from 'qrcode';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { LogicalSize } from '@tauri-apps/api/dpi';
 import { getVersion } from '@tauri-apps/api/app';
 import { useTranscriptionStore } from '../../stores/transcription';
 import { useChatStore } from '../../stores/chat';
@@ -84,13 +85,6 @@ const showUpdateDialog = ref(false);
 const appVersion = ref('');
 const glowColor = ref<'blue' | 'red' | null>(null);
 const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-const microphoneMuteHotkeyLabel = computed(() => (isMac ? 'Option+Z' : 'Alt+Z'));
-const webSearchToggleTooltip = computed(() =>
-  chatStore.openaiResponsesWebSearchEnabled
-    ? 'Web search для OpenAI включён'
-    : 'Web search для OpenAI выключен'
-);
-
 const audioPermissions = useAudioPermissions();
 const testInterviewer = useTestInterviewer();
 function onTestInterviewerClick(e: MouseEvent) {
@@ -318,12 +312,12 @@ const CODE_EXPLAIN_SYSTEM_PROMPT = `Ты — ассистент на техни�
 
 Твоя задача:
 1) Понять, что пользователь хочет про выделенный фрагмент: объяснить, исправить, улучшить, ответить на вопрос, или дать краткий разбор.
-2) Дать лучший краткий ответ по делу (без воды), используя контекст чата, но не пересказывая его целиком.
-3) Если запрос неясен из-за распознавания/обрывков — задай 1 уточняющий вопрос и предложи 1–2 вероятные интерпретации.
+2) Дать ясный ответ по делу, используя контекст чата, но не пересказывая его целиком.
+3) Если запрос неясен из-за распознавания/обрывков — выбери наиболее вероятный смысл и ответь прямо.
 
 Формат ответа:
-- Сначала 3–7 буллетов (каждый пункт начинай с "- ").
-- Затем (если нужно) короткий пример кода (в fenced-блоке).
+- Начни с краткой сути **жирным**, затем объясни важные детали разговорно и без переусложнения.
+- Используй список только для нескольких самостоятельных пунктов. Пример кода добавляй, когда он помогает ответу.
 
 Правила для кода:
 - Для упоминаний технических идентификаторов используй inline code (одинарные обратные кавычки).
@@ -1069,6 +1063,19 @@ onMounted(async () => {
     return;
   }
 
+  try {
+    const win = getCurrentWebviewWindow();
+    const saved = JSON.parse(localStorage.getItem('mainWindowSizeV1') || 'null');
+    if (saved && Number.isFinite(saved.width) && Number.isFinite(saved.height)) {
+      await win.setSize(new LogicalSize(Math.max(50, saved.width), Math.max(50, saved.height)));
+    }
+    const stop = await win.onResized(async ({ payload }) => {
+      const scale = await win.scaleFactor();
+      localStorage.setItem('mainWindowSizeV1', JSON.stringify({ width: payload.width / scale, height: payload.height / scale }));
+    });
+    window.addEventListener('beforeunload', stop, { once: true });
+  } catch (error) { console.warn('Window size restore failed', error); }
+
   // Загружаем версию приложения
   try {
     appVersion.value = await getVersion();
@@ -1502,7 +1509,7 @@ const onMessageClick = (
   message: { id: string; kind: 'stt' | 'mic' | 'signal' | 'haiku' | 'prompt'; status: 'final' | 'streaming' | 'error'; deleted?: boolean },
 ) => {
   if (editingMessageId.value) return;
-  if (message.kind === 'haiku' || message.deleted || message.status !== 'final') return;
+  if (message.deleted || message.status !== 'final') return;
   // Если пользователь выделяет текст внутри пузыря — не мешаем.
   const sel = typeof window !== 'undefined' ? window.getSelection?.() : null;
   if (sel && !sel.isCollapsed && sel.toString().trim()) return;
@@ -1529,6 +1536,35 @@ const clearMessageSelection = () => {
   chatStore.clearSelection();
 };
 
+let suppressNextLassoClick = false;
+const onPopoverMouseDown = () => {
+  // A new gesture cannot be the terminating click of the previous drag.
+  suppressNextLassoClick = false;
+};
+
+const onOutsideMessageClick = (event: MouseEvent) => {
+  if (suppressNextLassoClick) {
+    suppressNextLassoClick = false;
+    // Keyboard activation has detail=0 and cannot terminate a mouse drag.
+    if (event.detail > 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+  }
+  const target = event.target as HTMLElement | null;
+  // Keep selected context until an action button has consumed it.
+  if (target?.closest('.chat-bubble, .code-selection-robot-button, button, [role="button"], a, input, textarea, select, [contenteditable="true"]')) return;
+  if (chatStore.selectedCount > 0) chatStore.clearSelection();
+
+  const selection = window.getSelection?.();
+  const anchor = selection?.anchorNode;
+  if (selection && anchor && chatScrollRef.value?.contains(anchor)) {
+    selection.removeAllRanges();
+    hideCodeSelectionUi();
+  }
+};
+
 const clearAllHistory = async () => {
   await runCompanionClear(CMD_COMPANION_CLEAR_HISTORY);
 };
@@ -1538,6 +1574,7 @@ const lassoRect = ref<{ left: number; top: number; width: number; height: number
 let lassoStartClient: { x: number; y: number } | null = null;
 let lassoAdditive = false;
 let lassoBaseSelection: string[] = [];
+let lassoMoved = false;
 
 function rectIntersects(a: DOMRect, b: { left: number; top: number; right: number; bottom: number }): boolean {
   return !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
@@ -1561,6 +1598,7 @@ function computeIdsInViewportRect(viewport: { left: number; top: number; right: 
 function updateLasso(clientX: number, clientY: number): void {
   const container = chatScrollRef.value;
   if (!container || !lassoStartClient) return;
+  lassoMoved ||= clientX !== lassoStartClient.x || clientY !== lassoStartClient.y;
 
   const cr = container.getBoundingClientRect();
   const left = Math.min(lassoStartClient.x, clientX);
@@ -1598,6 +1636,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   lassoAdditive = isAdditiveSelection(e);
   lassoBaseSelection = lassoAdditive ? [...chatStore.selectedMessageIds] : [];
   lassoStartClient = { x: e.clientX, y: e.clientY };
+  lassoMoved = false;
   lassoActive.value = true;
   updateLasso(e.clientX, e.clientY);
 
@@ -1608,6 +1647,7 @@ const onChatMouseDown = (e: MouseEvent) => {
   const onUp = (ev: MouseEvent) => {
     if (!lassoActive.value) return;
     updateLasso(ev.clientX, ev.clientY);
+    suppressNextLassoClick = lassoMoved;
     lassoActive.value = false;
     lassoStartClient = null;
     lassoRect.value = null;
@@ -1622,7 +1662,7 @@ const onChatMouseDown = (e: MouseEvent) => {
 </script>
 
 <template>
-  <div class="popover-container">
+  <div class="popover-container" @mousedown.capture="onPopoverMouseDown" @click.capture="onOutsideMessageClick">
     <div class="popover">
       <div
         v-if="shouldShowSystemAudioPermissionWarning || shouldShowMicrophonePermissionWarning"
@@ -1716,7 +1756,7 @@ const onChatMouseDown = (e: MouseEvent) => {
           </v-tooltip>
           <v-tooltip v-if="authStore.isAuthenticated" :text="t('profile.title')" location="bottom">
             <template #activator="{ props: tp }">
-              <button v-bind="tp" class="profile-button no-drag" @click="openProfile">
+              <button v-bind="tp" v-show="false" class="profile-button no-drag" @click="openProfile">
                 <span class="mdi mdi-account-circle-outline"></span>
               </button>
             </template>
@@ -1833,9 +1873,17 @@ const onChatMouseDown = (e: MouseEvent) => {
             </template>
 
             <v-card class="system-prompt-card no-drag">
-              <v-card-title>Системный промпт</v-card-title>
+              <v-card-title>Профили промпта</v-card-title>
               <v-divider />
               <v-card-text>
+                <v-select
+                  :model-value="chatStore.activePromptProfileId"
+                  :items="chatStore.promptProfiles"
+                  item-title="name"
+                  item-value="id"
+                  label="Профиль собеседования"
+                  @update:model-value="(id: string) => { chatStore.selectPromptProfile(id); promptDraft = chatStore.systemPrompt; }"
+                />
                 <v-textarea
                   v-model="promptDraft"
                   label="Инструкция для модели"
@@ -1944,7 +1992,7 @@ const onChatMouseDown = (e: MouseEvent) => {
         <ConversationFeed
           ref="conversationFeedRef"
           :messages="chatStore.messages"
-          :assistant-streaming="chatStore.isHaikuStreaming"
+          :assistant-streaming="haikuRequestPending || chatStore.isHaikuStreaming"
           :empty-text="emptyFeedText"
           :selecting="lassoActive"
           :editing-message-id="editingMessageId"
@@ -2085,10 +2133,9 @@ const onChatMouseDown = (e: MouseEvent) => {
       <!-- Controls -->
       <div class="controls">
         <div class="controls-center">
-          <v-tooltip :text="webSearchToggleTooltip" location="top">
-            <template #activator="{ props: tp }">
+
               <button
-                v-bind="tp"
+
                 class="web-search-toggle-button no-drag"
                 :class="{ active: chatStore.openaiResponsesWebSearchEnabled }"
                 :aria-pressed="chatStore.openaiResponsesWebSearchEnabled"
@@ -2096,32 +2143,15 @@ const onChatMouseDown = (e: MouseEvent) => {
               >
                 <span class="mdi mdi-web"></span>
               </button>
-            </template>
-          </v-tooltip>
-          <v-tooltip
-            :text="chatStore.microphoneEnabled
-              ? `Замьютить микрофон (${microphoneMuteHotkeyLabel})`
-              : `Размьютить микрофон (${microphoneMuteHotkeyLabel})`"
-            location="top"
-          >
-            <template #activator="{ props: tp }">
+
+
+
+
+
+
+
               <button
-                v-bind="tp"
-                class="mic-toggle-button no-drag"
-                :class="{ disabled: !chatStore.microphoneEnabled }"
-                @click="onMicToggleClick"
-              >
-                <span
-                  class="mdi"
-                  :class="chatStore.microphoneEnabled ? 'mdi-microphone' : 'mdi-microphone-off'"
-                ></span>
-              </button>
-            </template>
-          </v-tooltip>
-          <v-tooltip :text="store.isRecording ? 'Остановить запись' : store.isProcessing ? 'Обработка...' : 'Начать запись'" location="top">
-            <template #activator="{ props: tp }">
-              <button
-                v-bind="tp"
+
                 v-ripple="{ class: store.isRecording ? 'text-red' : 'text-blue' }"
                 class="record-button no-drag"
                 :class="{
@@ -2138,8 +2168,8 @@ const onChatMouseDown = (e: MouseEvent) => {
                 <span v-else-if="store.isProcessing" class="mdi mdi-cached record-icon-spin"></span>
                 <span v-else class="mdi mdi-record-circle-outline"></span>
               </button>
-            </template>
-          </v-tooltip>
+
+
           <div class="haiku-control-group">
             <span v-if="haikuRequestPending || chatStore.isHaikuStreaming" class="haiku-wait-label">
               {{ haikuRequestPending ? 'Отправляю…' : `AI отвечает · ${haikuWaitSeconds} с` }}
@@ -2162,10 +2192,21 @@ const onChatMouseDown = (e: MouseEvent) => {
             </button>
           </div>
         </div>
-        <div class="controls-right no-drag">
-          <v-tooltip v-if="chatStore.selectedCount > 0" text="Снять выделение" location="top">
-            <template #activator="{ props: tp }">
-              <div v-bind="tp" class="selection-clear-wrapper">
+        <div class="controls-right no-drag">              <button
+
+                class="mic-toggle-button no-drag"
+
+                @click="onMicToggleClick"
+                @contextmenu.prevent="chatStore.microphoneMuteMode = chatStore.microphoneMuteMode === 'app' ? 'system' : 'app'"
+                :aria-label="chatStore.microphoneMuteMode === 'app' ? 'Микрофон приложения; правый клик: системный режим' : 'Системный микрофон; правый клик: режим приложения'"
+                :class="{ 'system-mute-mode': chatStore.microphoneMuteMode === 'system', disabled: !chatStore.microphoneEnabled }"
+              >
+                <span
+                  class="mdi"
+                  :class="chatStore.microphoneEnabled ? 'mdi-microphone' : 'mdi-microphone-off'"
+                ></span>
+              </button>
+              <div v-if="chatStore.selectedCount > 0" class="selection-clear-wrapper">
                 <button
                   class="selection-clear-button"
                   @click="clearMessageSelection"
@@ -2174,33 +2215,31 @@ const onChatMouseDown = (e: MouseEvent) => {
                 </button>
                 <span class="selection-badge">{{ chatStore.selectedCount }}</span>
               </div>
-            </template>
-          </v-tooltip>
 
-          <v-tooltip text="Очистить контекст AI" location="top">
-            <template #activator="{ props: tp }">
+
+
+
               <button
-                v-bind="tp"
+
                 class="context-clear-button"
                 :disabled="!chatStore.hasContextToClear"
                 @click="clearLlmContext"
               >
                 <span class="mdi mdi-broom"></span>
               </button>
-            </template>
-          </v-tooltip>
 
-          <v-tooltip text="Очистить историю" location="top">
-            <template #activator="{ props: tp }">
+
+
+
               <button
-                v-bind="tp"
+
                 class="history-clear-button"
                 @click="clearAllHistory"
               >
                 <span class="mdi mdi-trash-can-outline"></span>
               </button>
-            </template>
-          </v-tooltip>
+
+
 
         </div>
       </div>
@@ -3111,10 +3150,10 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 .ask-fab {
   position: fixed;
-  right: 16px;
-  bottom: 16px;
-  width: 52px;
-  height: 52px;
+  left: 12px;
+  top: 12px;
+  width: 40px;
+  height: 40px;
   border-radius: 16px;
   border: 1px solid rgba(59, 130, 246, 0.4);
   background: rgba(59, 130, 246, 0.92);
@@ -3541,6 +3580,11 @@ const onChatMouseDown = (e: MouseEvent) => {
 
 /* Connection Warning Banner */
 .connection-warning {
+  position: absolute;
+  top: 64px;
+  left: var(--popover-pad);
+  right: var(--popover-pad);
+  z-index: 20;
   display: flex;
   align-items: center;
   gap: var(--spacing-xs);
@@ -3548,8 +3592,9 @@ const onChatMouseDown = (e: MouseEvent) => {
   background: rgba(255, 193, 7, 0.15);
   border: 1px solid rgba(255, 193, 7, 0.3);
   border-radius: var(--radius-sm);
-  width: 100%;
+  width: auto;
   box-sizing: border-box;
+  pointer-events: none;
 }
 
 .connection-warning .warning-icon {
@@ -3725,10 +3770,10 @@ const onChatMouseDown = (e: MouseEvent) => {
   }
 
   .ask-fab {
-    right: 12px;
-    bottom: 12px;
-    width: 46px;
-    height: 46px;
+    left: 10px;
+    top: 10px;
+    width: 36px;
+    height: 36px;
     border-radius: 14px;
     font-size: 20px;
   }
@@ -3783,4 +3828,31 @@ const onChatMouseDown = (e: MouseEvent) => {
 .theme-light .context-clear-button:hover {
   background: rgba(0, 0, 0, 0.06);
 }
+@media (max-width: 249px), (max-height: 479px) {
+  .web-search-toggle-button { display: none; }
+}
+
+.controls-right { display: flex !important; flex-wrap: nowrap !important; flex-direction: column !important; gap: 6px; width: auto !important; min-height: 36px !important; }
+.controls-right .mic-toggle-button,
+.controls-right .context-clear-button,
+.controls-right .history-clear-button { position: static !important; width: 36px !important; height: 36px !important; min-width: 36px; min-height: 36px; font-size: 18px !important; flex: 0 0 36px; border-radius: 6px; }
+.mic-toggle-button.system-mute-mode { outline: 2px solid var(--color-warning); }
+.record-button:hover:not(:disabled) { animation: record-hover 1s ease-in-out infinite alternate; }
+@keyframes record-hover { from { transform: scale(1.03); } to { transform: scale(1.12); filter: brightness(1.15); } }
+@media (prefers-reduced-motion: reduce) { .record-button:hover:not(:disabled) { animation: none; } }
+.chat-area :deep(.chat-row.incoming .chat-bubble) { max-width: calc(100% - 10px); }
+
+.header { min-height: 42px; padding-top: 6px; padding-bottom: 6px; }
+.header .title-row { flex: 1; align-self: stretch; }
+.controls-right { top: auto !important; bottom: 4px !important; transform: none !important; gap: 3px !important; }
+.controls-right .mic-toggle-button, .controls-right .context-clear-button, .controls-right .history-clear-button { width: 30px !important; height: 30px !important; min-width: 30px; min-height: 30px; flex-basis: 30px; font-size: 16px !important; }
+.chat-area :deep(.chat-empty) { padding: 16px 20px; box-sizing: border-box; }
+
+.haiku-control-group { position: fixed; right: 12px; bottom: 12px; z-index: 28; }
+
+.chat-area :deep(.scroll-to-bottom-button) { position: fixed; top: auto !important; bottom: 68px; right: 16px; transform: none; }
+.chat-area :deep(.scroll-to-bottom-button:hover) { transform: translateY(-1px); }
+.chat-area :deep(.scroll-to-bottom-button:active) { transform: none; }
+@media (max-width: 560px) { .chat-area :deep(.scroll-to-bottom-button) { bottom: 62px; right: 15px; } }
+@media (max-width: 420px) { .chat-area :deep(.scroll-to-bottom-button) { bottom: 58px; right: 13px; } }
 </style>

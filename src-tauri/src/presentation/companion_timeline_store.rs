@@ -23,10 +23,11 @@ struct StoredTimeline {
 }
 
 fn path() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("HACKINTERVIEW_COMPANION_TIMELINE_PATH") {
+    if let Some(path) = std::env::var_os("HACKINTERVIEW_COMPANION_TIMELINE_PATH")
+            .map(PathBuf::from).and_then(crate::infrastructure::storage_paths::writable_override) {
         return Ok(PathBuf::from(path));
     }
-    let base = dirs::config_dir().ok_or("Config directory unavailable")?;
+    let base = crate::infrastructure::storage_paths::config_dir().ok_or("Config directory unavailable")?;
     Ok(base.join("HackInterview").join("companion_timeline.json"))
 }
 

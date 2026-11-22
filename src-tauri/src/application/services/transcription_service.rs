@@ -23,6 +23,7 @@ fn epoch_millis() -> u64 {
 ///
 /// This service follows the Dependency Inversion Principle by depending on
 /// abstractions (traits) rather than concrete implementations
+#[derive(Clone)]
 pub struct TranscriptionService {
     audio_capture: Arc<RwLock<Box<dyn AudioCapture>>>,
     stt_factory: Arc<dyn SttProviderFactory>,
@@ -40,10 +41,53 @@ pub struct TranscriptionService {
 /// Сколько раз повторять перезапуск ScreenCaptureKit после сбоя (паузы 1,5 с, 3 с, 4,5 с ... суммарно около 40 с).
 const CAPTURE_REFRESH_RETRIES: u32 = 6;
 
-/// Обновление ScreenCaptureKit делаем только в долгой тишине и не чаще этого интервала. В часовых прогонах
+/// Обновление ScreenCaptureKit делаем только при долгом отсутствии PCM и не чаще этого интервала. В часовых прогонах
 /// обновление каждые 26 с давало потерянные вопросы: новый поток иногда какое-то время не отдаёт звук.
 const CAPTURE_REFRESH_MIN_QUIET_MS: u64 = 30_000;
 const CAPTURE_REFRESH_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
+const MAX_NATIVE_CAPTURE_RECOVERIES: u32 = 6;
+
+#[derive(Debug, PartialEq, Eq)]
+enum NativeRecoveryAction {
+    Retry,
+    Wait,
+    Exhausted,
+}
+
+fn native_recovery_action(attempts: u32, since_recovery: std::time::Duration) -> NativeRecoveryAction {
+    if attempts >= MAX_NATIVE_CAPTURE_RECOVERIES {
+        return NativeRecoveryAction::Exhausted;
+    }
+    if attempts == 0 {
+        return NativeRecoveryAction::Retry;
+    }
+    let delay_ms = (1_500u64 << (attempts - 1)).min(30_000);
+    if since_recovery < std::time::Duration::from_millis(delay_ms) {
+        NativeRecoveryAction::Wait
+    } else {
+        NativeRecoveryAction::Retry
+    }
+}
+
+fn recovery_delivery_expired(recovering: bool, delivered_pcm: bool, elapsed: std::time::Duration) -> bool {
+    recovering && !delivered_pcm && elapsed >= std::time::Duration::from_secs(30)
+}
+
+fn capture_refresh_reason(
+    native_gap_ms: Option<u64>,
+    pcm_gap_ms: u64,
+    since_refresh: std::time::Duration,
+) -> Option<&'static str> {
+    let native_gap_ms = native_gap_ms?;
+    if pcm_gap_ms < CAPTURE_REFRESH_MIN_QUIET_MS || since_refresh < CAPTURE_REFRESH_MIN_INTERVAL {
+        return None;
+    }
+    Some(if native_gap_ms >= CAPTURE_REFRESH_MIN_QUIET_MS {
+        "native buffer gap (source may be idle)"
+    } else {
+        "native buffers arrived without PCM"
+    })
+}
 
 impl TranscriptionService {
     /// Load local weights after the UI starts, so the first recording can reuse
@@ -141,6 +185,37 @@ impl TranscriptionService {
         task.abort();
         let _ = task.await;
         Ok(())
+    }
+
+    /// Called from the refresh task itself: never abort/await that task here.
+    /// Its own PCM sender must be dropped before draining the processor.
+    async fn finish_failed_capture(&self) {
+        // Claim finalization before taking any resources. A user Stop that
+        // already owns Processing may cancel this refresh task safely.
+        {
+            let mut status = self.status.write().await;
+            if *status != RecordingStatus::Recording { return; }
+            *status = RecordingStatus::Processing;
+        }
+        if let Err(error) = self.audio_capture.write().await.stop_capture().await {
+            log::warn!("Failed to stop failed capture: {error}");
+        }
+        let drain_local = self.config.read().await.provider.is_local_utterance();
+        if let Err(error) = self.finish_audio_processor(drain_local).await {
+            log::warn!("Failed capture PCM drain: {error}");
+        }
+        let current_provider = self.stt_provider.write().await.take();
+        if let Some(mut provider) = current_provider {
+            if let Err(error) = provider.stop_stream().await {
+                log::warn!("Failed capture STT finalization: {error}");
+                let _ = provider.abort().await;
+            }
+        }
+        if let Some(timer) = self.inactivity_timer_task.write().await.take() {
+            timer.abort();
+            let _ = timer.await;
+        }
+        *self.status.write().await = RecordingStatus::Idle;
     }
 
     /// Start recording and transcription
@@ -698,33 +773,95 @@ impl TranscriptionService {
             let capture = self.audio_capture.clone();
             let status = self.status.clone();
             let on_error_for_refresh = on_error.clone();
+            let on_quality_for_refresh = on_connection_quality.clone();
+            let service_for_terminal_cleanup = self.clone();
             let refresh_task = tokio::spawn(async move {
                 let mut last_refresh = std::time::Instant::now();
                 let mut refresh_number: u32 = 0;
+                let mut native_recoveries: u32 = 0;
+                let mut native_error_reported = false;
+                let mut native_healthy_since: Option<std::time::Instant> = None;
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     if *status.read().await != RecordingStatus::Recording {
                         break;
                     }
-                    // Refresh only well inside a quiet gap. A fixed timer can
-                    // interrupt the next spoken question, while macOS may stop
-                    // including output audio after a long silent interval.
+                    // Healthy silent PCM is not a stall. A native-buffer gap
+                    // can also be legitimate idle output, so retain the long
+                    // threshold/cooldown and require previously healthy native
+                    // delivery. Do not restart a stream that never armed.
                     let quiet_ms = epoch_millis()
                         .saturating_sub(last_loud_audio_ms.load(Ordering::Relaxed));
-                    if quiet_ms < CAPTURE_REFRESH_MIN_QUIET_MS
-                        || last_refresh.elapsed() < CAPTURE_REFRESH_MIN_INTERVAL
-                    {
-                        continue;
-                    }
                     let mut guard = capture.write().await;
                     if !guard.is_capturing() {
                         break;
                     }
+                    let pcm_gap_ms = epoch_millis()
+                        .saturating_sub(last_any_chunk_ms.load(Ordering::Relaxed));
+                    let native_gap_ms = guard.capture_starvation_ms();
+                    let native_error = guard.capture_error().or_else(|| {
+                        recovery_delivery_expired(native_error_reported, guard.has_delivered_pcm(), last_refresh.elapsed())
+                            .then(|| crate::domain::AudioError::Capture("Replacement capture delivered no PCM within 30s".to_string()))
+                    });
+                    let reason = if let Some(error) = native_error {
+                        native_healthy_since = None;
+                        if !matches!(&error, crate::domain::AudioError::Capture(_)) {
+                            // Respect a stop in macOS UI or revoked permission;
+                            // only an explicit new Start can resume capture.
+                            drop(guard);
+                            drop(on_chunk);
+                            service_for_terminal_cleanup.finish_failed_capture().await;
+                            on_error_for_refresh(SttError::Processing(format!(
+                                "System audio capture ended: {error}"
+                            )));
+                            break;
+                        }
+                        if !native_error_reported {
+                            log::error!("System capture reported a native stop: {error}");
+                            on_quality_for_refresh("Poor".to_string(), Some(
+                                "Системный захват остановлен macOS. Восстанавливаем запись.".to_string()
+                            ));
+                            native_error_reported = true;
+                        }
+                        match native_recovery_action(native_recoveries, last_refresh.elapsed()) {
+                            NativeRecoveryAction::Wait => continue,
+                            NativeRecoveryAction::Exhausted => {
+                                drop(guard);
+                                drop(on_chunk);
+                                service_for_terminal_cleanup.finish_failed_capture().await;
+                                on_error_for_refresh(SttError::Processing(format!(
+                                    "System audio capture repeatedly stopped in macOS after {native_recoveries} recovery attempts: {error}"
+                                )));
+                                break;
+                            }
+                            NativeRecoveryAction::Retry => native_recoveries += 1,
+                        }
+                        "confirmed native stop"
+                    } else {
+                        // A minute of actual native delivery resets the flap
+                        // budget. Merely returning Ok from start is not enough.
+                        if native_gap_ms.is_some_and(|gap| gap < 1_000) && pcm_gap_ms < 1_000 {
+                            if native_error_reported {
+                                on_quality_for_refresh("Good".to_string(), None);
+                                native_error_reported = false;
+                            }
+                            let healthy_since = native_healthy_since.get_or_insert_with(std::time::Instant::now);
+                            if healthy_since.elapsed() >= std::time::Duration::from_secs(60) {
+                                native_recoveries = 0;
+                            }
+                        } else {
+                            native_healthy_since = None;
+                        }
+                        let Some(reason) = capture_refresh_reason(native_gap_ms, pcm_gap_ms, last_refresh.elapsed()) else {
+                            continue;
+                        };
+                        reason
+                    };
                     refresh_number += 1;
                     log::info!(
-                        "Refreshing ScreenCaptureKit #{refresh_number} after {quiet_ms}ms of silence ({}s since the previous refresh, last chunk of any level {}ms ago)",
+                        "Refreshing ScreenCaptureKit #{refresh_number}: {reason}; {quiet_ms}ms of silence ({}s since the previous refresh, last PCM {pcm_gap_ms}ms ago, last native buffer {}ms ago)",
                         last_refresh.elapsed().as_secs(),
-                        epoch_millis().saturating_sub(last_any_chunk_ms.load(Ordering::Relaxed))
+                        native_gap_ms.unwrap_or_default()
                     );
                     // Новый SCStream сразу после остановки старого иногда не стартует: даём системе вдохнуть.
                     let mut result = match guard.stop_capture().await {
@@ -740,6 +877,11 @@ impl TranscriptionService {
                     // не удерживая блокировку захвата между попытками, и сдаёмся только после всех попыток.
                     for attempt in 1..=CAPTURE_REFRESH_RETRIES {
                         let Err(error) = &result else { break };
+                        if matches!(error, crate::domain::AudioError::AccessDenied(_)
+                            | crate::domain::AudioError::StoppedByUser(_)
+                            | crate::domain::AudioError::Configuration(_)) {
+                            break;
+                        }
                         log::warn!(
                             "System audio refresh #{refresh_number} failed ({error}; {error:?}), retry {attempt}/{CAPTURE_REFRESH_RETRIES}"
                         );
@@ -755,13 +897,15 @@ impl TranscriptionService {
                     }
                     if let Err(error) = result {
                         log::error!("System audio stream refresh failed: {error}");
+                        drop(on_chunk);
+                        service_for_terminal_cleanup.finish_failed_capture().await;
                         on_error_for_refresh(SttError::Processing(format!(
                             "System audio capture could not recover: {error}"
                         )));
-                        *status.write().await = RecordingStatus::Idle;
                         break;
                     }
                     last_refresh = std::time::Instant::now();
+                    native_healthy_since = None;
                 }
             });
             *self.capture_refresh_task.write().await = Some(refresh_task);
@@ -1149,6 +1293,40 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::Duration;
 
+    #[test]
+    fn native_capture_recovery_is_prompt_but_backoff_and_attempts_are_bounded() {
+        assert_eq!(native_recovery_action(0, Duration::ZERO), NativeRecoveryAction::Retry);
+        assert_eq!(native_recovery_action(1, Duration::ZERO), NativeRecoveryAction::Wait);
+        assert_eq!(native_recovery_action(1, Duration::from_millis(1_500)), NativeRecoveryAction::Retry);
+        assert_eq!(native_recovery_action(5, Duration::from_millis(23_999)), NativeRecoveryAction::Wait);
+        assert_eq!(native_recovery_action(5, Duration::from_millis(24_000)), NativeRecoveryAction::Retry);
+        assert_eq!(native_recovery_action(6, Duration::from_secs(120)), NativeRecoveryAction::Exhausted);
+    }
+
+    #[test]
+    fn capture_refresh_preserves_healthy_silence_and_unarmed_sources() {
+        let elapsed = Duration::from_secs(300);
+        assert_eq!(capture_refresh_reason(Some(0), 0, elapsed), None);
+        assert_eq!(capture_refresh_reason(None, 300_000, elapsed), None);
+        assert_eq!(capture_refresh_reason(Some(29_999), 29_999, elapsed), None);
+    }
+
+    #[test]
+    fn capture_refresh_requires_long_pcm_gap_and_preserves_recovery_backoff() {
+        assert_eq!(
+            capture_refresh_reason(Some(30_000), 30_000, Duration::from_secs(119)),
+            None
+        );
+        assert_eq!(
+            capture_refresh_reason(Some(30_000), 30_000, Duration::from_secs(120)),
+            Some("native buffer gap (source may be idle)")
+        );
+        assert_eq!(
+            capture_refresh_reason(Some(0), 30_000, Duration::from_secs(120)),
+            Some("native buffers arrived without PCM")
+        );
+    }
+
     struct BurstAudioCapture {
         config: AudioConfig,
         is_capturing: Arc<AtomicBool>,
@@ -1317,6 +1495,9 @@ mod tests {
 
     #[derive(Default)]
     struct CachedSttCounters {
+        block_stop: AtomicBool,
+        stop_entered: tokio::sync::Notify,
+        release_stop: tokio::sync::Notify,
         created: AtomicUsize,
         initialized: AtomicUsize,
         starts: AtomicUsize,
@@ -1369,6 +1550,10 @@ mod tests {
         }
 
         async fn stop_stream(&mut self) -> SttResult<()> {
+            if self.counters.block_stop.load(Ordering::SeqCst) {
+                self.counters.stop_entered.notify_one();
+                self.counters.release_stop.notified().await;
+            }
             self.active = false;
             self.counters.stops.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -1413,6 +1598,81 @@ mod tests {
             Arc::new(|_| {}),
             Arc::new(|_, _| {}),
         ).await.unwrap();
+    }
+
+    #[test]
+    fn replacement_delivery_deadline_does_not_restart_initial_idle_capture() {
+        assert!(!recovery_delivery_expired(false, false, Duration::from_secs(120)));
+        assert!(!recovery_delivery_expired(true, false, Duration::from_secs(29)));
+        assert!(recovery_delivery_expired(true, false, Duration::from_secs(30)));
+        // A first frame at 28s and another at 28.999s prove delivery even
+        // though neither burst establishes the native one-second cadence.
+        assert!(!recovery_delivery_expired(true, true, Duration::from_secs(30)));
+        assert!(!recovery_delivery_expired(true, true, Duration::from_secs(120)));
+    }
+
+    #[tokio::test]
+    async fn user_stop_cannot_cancel_claimed_terminal_finalization() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = cached_stt_test_service(counters.clone());
+        service.update_config(SttConfig::new(SttProviderType::ParakeetUltra)).await.unwrap();
+        start_cached_test_recording(&service).await;
+        counters.block_stop.store(true, Ordering::SeqCst);
+        let cleanup = service.clone();
+        let task = tokio::spawn(async move { cleanup.finish_failed_capture().await; });
+        *service.capture_refresh_task.write().await = Some(task);
+        tokio::time::timeout(Duration::from_secs(3), counters.stop_entered.notified()).await.unwrap();
+        assert!(service.stop_recording().await.is_err());
+        assert!(service.stop_recording_hard().await.is_err());
+        assert!(service.abort_starting().await.is_err());
+        assert_eq!(service.get_status().await, RecordingStatus::Processing);
+        counters.release_stop.notify_one();
+        let task = service.capture_refresh_task.write().await.take().unwrap();
+        tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap();
+        assert_eq!(counters.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn terminal_cleanup_cannot_take_provider_owned_by_user_stop() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = cached_stt_test_service(counters.clone());
+        service.update_config(SttConfig::new(SttProviderType::ParakeetUltra)).await.unwrap();
+        start_cached_test_recording(&service).await;
+        *service.status.write().await = RecordingStatus::Processing;
+        service.finish_failed_capture().await;
+        assert!(service.stt_provider.read().await.is_some());
+        assert!(service.audio_processor_task.read().await.is_some());
+        assert_eq!(counters.stops.load(Ordering::SeqCst), 0);
+        // Return ownership to the ordinary Stop path for test cleanup.
+        *service.status.write().await = RecordingStatus::Recording;
+        service.stop_recording().await.unwrap();
+        assert_eq!(counters.stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_capture_failure_finalizes_stt_without_awaiting_own_refresh_task() {
+        let counters = Arc::new(CachedSttCounters::default());
+        let service = cached_stt_test_service(counters.clone());
+        service.update_config(SttConfig::new(SttProviderType::ParakeetUltra)).await.unwrap();
+        start_cached_test_recording(&service).await;
+        let cleanup_service = service.clone();
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = start_rx.await;
+            cleanup_service.finish_failed_capture().await;
+            let _ = done_tx.send(());
+        });
+        *service.capture_refresh_task.write().await = Some(task);
+        start_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), done_rx).await.unwrap().unwrap();
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+        assert!(!service.audio_capture.read().await.is_capturing());
+        assert!(service.audio_processor_task.read().await.is_none());
+        assert!(service.stt_provider.read().await.is_none());
+        assert_eq!(counters.stops.load(Ordering::SeqCst), 1);
+        service.stop_capture_refresh_task().await;
     }
 
     /// Captures a frame synchronously during start_capture(), then yields.

@@ -17,7 +17,7 @@ fn profile_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(PROFILE_ENV).filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    dirs::config_dir().map(|root| root.join(PROFILE_FILE_NAME))
+    crate::infrastructure::storage_paths::config_dir().map(|root| root.join(PROFILE_FILE_NAME))
 }
 
 /// Вырезает HTML-комментарии `<!-- ... -->` (заметки автора файла не должны попадать в промпт).
@@ -74,6 +74,11 @@ pub(crate) fn with_candidate_profile_text(system_prompt: String, profile: Option
 /// Дописывает профиль кандидата в КОНЕЦ системного промпта (стабильный префикс лучше для prompt cache).
 /// Нет файла или он пуст: промпт возвращается без изменений.
 pub fn with_candidate_profile(system_prompt: String) -> String {
+    // An explicitly selected resume is authoritative; do not append the legacy
+    // global profile as a second, potentially conflicting candidate biography.
+    if system_prompt.contains("<resume>") && system_prompt.contains("</resume>") {
+        return remove_existing_block(&system_prompt);
+    }
     let profile = profile_path().and_then(|path| match std::fs::read_to_string(&path) {
         Ok(text) => Some(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,

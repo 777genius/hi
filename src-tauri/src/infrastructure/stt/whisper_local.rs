@@ -32,7 +32,7 @@ mod whisper_impl {
         }
 
         fn get_model_path(model_name: &str) -> SttResult<PathBuf> {
-            let app_data_dir = dirs::data_dir().ok_or_else(|| {
+            let app_data_dir = crate::infrastructure::storage_paths::data_dir().ok_or_else(|| {
                 SttError::Configuration("Cannot determine app data directory".to_string())
             })?;
 

@@ -1406,7 +1406,7 @@ pub async fn on_microphone_partial(state: &AppState, payload: &PartialTranscript
     }
 }
 
-async fn append_microphone_message(
+pub(super) async fn append_microphone_message(
     state: &AppState,
     session_id: u64,
     utterance_text: &str,

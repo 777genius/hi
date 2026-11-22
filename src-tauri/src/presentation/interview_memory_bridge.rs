@@ -279,6 +279,10 @@ fn apply_app_config_mode_override(
 }
 
 pub async fn resolved_mode_for_state(state: &AppState) -> InterviewMemoryMode {
+    // Synthetic interview fixtures must never enter the user's persistent memory.
+    if std::env::var("INTERVIEW_TEST_MODE").ok().as_deref() == Some("1") {
+        return InterviewMemoryMode::Disabled;
+    }
     let interview_memory_enabled = state.config.read().await.interview_memory_enabled;
     apply_app_config_mode_override(resolved_mode(), interview_memory_enabled)
 }
@@ -445,10 +449,15 @@ pub async fn assemble_stream_context_or_fallback(
     }
 
     let fallback_context = local_prompt_fallback_context(local_context);
-    match assemble_stream_context(state, local_context, memory_context_evidence).await {
-        Ok(Some(text)) => text,
-        Ok(None) => fallback_context,
-        Err(err) => {
+    match tokio::time::timeout(Duration::from_millis(400), assemble_stream_context(state, local_context, memory_context_evidence)).await {
+        Ok(Ok(Some(text))) => text,
+        Ok(Ok(None)) => fallback_context,
+        Err(_) => {
+            log::info!("Interview memory context exceeded 400ms; using local context");
+            record_context_diagnostics(state, "fallback", Some("Memory context timed out".to_string()), Some(400)).await;
+            fallback_context
+        }
+        Ok(Err(err)) => {
             log::warn!("Interview memory active context fallback: {}", err);
             fallback_context
         }
@@ -469,9 +478,13 @@ pub async fn assemble_chat_context_or_fallback(
         return None;
     }
 
-    match assemble_chat_context(state, local_context, question, memory_context_evidence).await {
-        Ok(text) => text,
-        Err(err) => {
+    match tokio::time::timeout(Duration::from_millis(400), assemble_chat_context(state, local_context, question, memory_context_evidence)).await {
+        Ok(Ok(text)) => text,
+        Err(_) => {
+            log::info!("Interview memory chat context exceeded 400ms; using local context");
+            None
+        }
+        Ok(Err(err)) => {
             log::warn!("Interview memory chat context fallback: {}", err);
             None
         }

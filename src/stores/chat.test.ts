@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
+import { preferTextAnswers } from '@/profiles/promptProfiles';
 import { useChatStore } from './chat';
 import { reactive } from 'vue';
 import type { CompanionSnapshotData } from '@/windowing/stateSync';
 
-const DEFAULT_PROMPT = `Ты — ассистент на техническом собеседовании. Всегда отвечай по-русски, даже если вопрос задан на украинском или английском. Технические термины оставляй на английском.
+const DEFAULT_PROMPT = preferTextAnswers(`Ты — ассистент на техническом собеседовании. Всегда отвечай по-русски, даже если вопрос задан на украинском или английском. Технические термины оставляй на английском.
 
 Контекст ниже — транскрипция, возможны ошибки распознавания. В нём есть строки:
 - "ОС:" — то, что я слышу (обычно реплики собеседника/вопросы).
@@ -15,13 +16,14 @@ const DEFAULT_PROMPT = `Ты — ассистент на техническом 
 Твоя задача:
 1) Если есть свежий "ЗАПРОС:" — ответь на него, используя "ОС:", "МИКРОФОН:" и "ПОМОЩНИК:" как контекст.
 2) Если "ЗАПРОС:" нет — найди последний явный или неявный вопрос/задачу: в первую очередь из строк "ОС:". Если строк "ОС:" нет — используй строки "МИКРОФОН:".
-3) Дать лучший краткий ответ по делу (без воды), можно с короткими примерами/шагами.
+3) Дать ясный ответ по делу, затем важные детали и, если полезно, короткий пример или шаги.
 4) Если речь распознана неточно, выбери наиболее вероятный смысл и ответь прямо, без уточняющих вопросов.
 5) Возможно в вопросах не будет "?". Ты должен понимать где вопросы.
 
 Формат ответа:
-- По умолчанию отвечай коротким связным абзацем. Список нужен только для действительно нескольких пунктов или если его попросили.
-- Затем (если нужно) короткий пример кода.
+- Начни с краткой ясной сути и выдели её **жирным**. После неё объясни важные детали разговорно и понятно.
+- Не ограничивай весь ответ фиксированным числом предложений: дай столько деталей, сколько нужно для точного и полезного ответа. Список используй, когда есть несколько самостоятельных пунктов.
+- Код и развёрнутые примеры давай, когда они нужны для ответа или их попросили. Сохраняй важные технические нюансы, избегай воды и переусложнения.
 - Не пересказывай весь контекст и не цитируй теги "ОС:"/"МИКРОФОН:"/"ПОМОЩНИК:"/"ЗАПРОС:".
 
 Правила для кода:
@@ -34,7 +36,7 @@ const DEFAULT_PROMPT = `Ты — ассистент на техническом 
 - Если это именно код (даже короткий фрагмент/выражение) и важна подсветка — используй fenced-блок с языком.
 - Код должен быть ровно отформатирован: без нумерации строк, с корректными отступами, без мусорных префиксов.
 - Старайся давать минимально‑самодостаточный пример, который иллюстрирует главную идею (как на собеседовании).
-- Если полный код слишком длинный, допускается сокращать только с помощью комментариев соответствующего языка (например "// ...", "# ...", "/* ... */") и после блока 1 строкой объяснить, что именно опущено. Не вставляй голые "..." как код.`;
+- Если полный код слишком длинный, допускается сокращать только с помощью комментариев соответствующего языка (например "// ...", "# ...", "/* ... */") и после блока 1 строкой объяснить, что именно опущено. Не вставляй голые "..." как код.`);
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
@@ -112,6 +114,8 @@ describe('chat store (selection + context)', () => {
     transcriptionProxy = reactive(transcriptionState);
 
     try {
+      localStorage.removeItem('llmPromptProfilesV1');
+      localStorage.removeItem('llmActivePromptProfileV1');
       localStorage.removeItem('llmSystemPrompt');
       localStorage.removeItem('anthropicSystemPrompt');
       localStorage.removeItem('openaiResponsesWebSearchEnabled');
@@ -125,6 +129,118 @@ describe('chat store (selection + context)', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('restores app transcription when system unmute is a no-op', async () => {
+    const paint = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+    let appEnabled = true;
+    let systemMuted = false;
+    invokeMock.mockImplementation(async (command: string, args?: { enabled?: boolean; muted?: boolean }) => {
+      if (command === 'set_microphone_transcription_enabled') {
+        appEnabled = !!args?.enabled;
+      } else if (command === 'set_microphone_muted') {
+        // The backend only synchronizes transcription on an actual OS transition.
+        if (systemMuted !== args?.muted) {
+          systemMuted = !!args?.muted;
+          appEnabled = !systemMuted;
+        }
+        return { muted: systemMuted, supported: true, source: 'system' };
+      } else if (command === 'get_companion_snapshot') {
+        const data = companionSnapshot();
+        data.microphone.systemMuted = systemMuted;
+        data.microphone.appEnabled = appEnabled;
+        return { revision: '1', data };
+      }
+    });
+
+    try {
+      const store = useChatStore();
+      await store.setMicrophoneEnabled(false);
+      expect(appEnabled).toBe(false);
+      expect(systemMuted).toBe(false);
+      store.microphoneMuteMode = 'system';
+      await store.setMicrophoneEnabled(true);
+
+      expect(store.microphoneEnabled).toBe(true);
+      expect(systemMuted).toBe(false);
+      expect(appEnabled).toBe(true);
+      expect(invokeMock).toHaveBeenCalledWith('set_microphone_muted', { muted: false });
+      expect(invokeMock).toHaveBeenCalledWith('set_microphone_transcription_enabled', { enabled: true });
+    } finally {
+      paint.mockRestore();
+    }
+  });
+
+  it('does not restart transcription twice when system unmute already enabled it', async () => {
+    const paint = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+    let appEnabled = false;
+    let systemMuted = true;
+    invokeMock.mockImplementation(async (command: string, args?: { enabled?: boolean; muted?: boolean }) => {
+      if (command === 'set_microphone_muted') {
+        systemMuted = !!args?.muted;
+        appEnabled = !systemMuted;
+        return { muted: systemMuted, supported: true, source: 'system' };
+      }
+      if (command === 'get_companion_snapshot') {
+        const data = companionSnapshot();
+        data.microphone.systemMuted = systemMuted;
+        data.microphone.appEnabled = appEnabled;
+        return { revision: '1', data };
+      }
+    });
+
+    try {
+      const store = useChatStore();
+      store.microphoneMuteMode = 'system';
+      await store.setMicrophoneEnabled(true);
+
+      expect(store.microphoneEnabled).toBe(true);
+      expect(appEnabled).toBe(true);
+      expect(invokeMock).toHaveBeenCalledTimes(2);
+      expect(invokeMock).not.toHaveBeenCalledWith('set_microphone_transcription_enabled', { enabled: true });
+    } finally {
+      paint.mockRestore();
+    }
+  });
+
+  it('does not enable app transcription when the system remains muted', async () => {
+    const paint = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+    invokeMock.mockResolvedValue({ muted: true, supported: true, source: 'system' });
+    try {
+      const store = useChatStore();
+      store.microphoneMuteMode = 'system';
+      await store.setMicrophoneEnabled(true);
+      expect(store.microphoneEnabled).toBe(false);
+      expect(invokeMock).toHaveBeenCalledTimes(1);
+      expect(invokeMock).not.toHaveBeenCalledWith('set_microphone_transcription_enabled', { enabled: true });
+    } finally {
+      paint.mockRestore();
+    }
+  });
+
+  it('preserves the original prompt while switching and editing resume profiles', () => {
+    localStorage.removeItem('llmPromptProfilesV1');
+    localStorage.removeItem('llmActivePromptProfileV1');
+    const store = useChatStore();
+    const original = store.systemPrompt;
+    store.selectPromptProfile('flutter-resume');
+    expect(store.systemPrompt).toContain('m10 by PashaPay');
+    store.saveSystemPrompt(store.systemPrompt + '\nCustom Flutter guidance');
+    store.selectPromptProfile('original');
+    expect(store.systemPrompt).toBe(original);
+    store.selectPromptProfile('flutter-resume');
+    expect(store.systemPrompt).toContain('Custom Flutter guidance');
+    localStorage.removeItem('llmPromptProfilesV1');
+    localStorage.removeItem('llmActivePromptProfileV1');
   });
 
   it('tail anchor uses all utterances after context clear + partial', async () => {
@@ -201,7 +317,7 @@ describe('chat store (selection + context)', () => {
     expect(invokeMock).toHaveBeenCalledWith(
       'start_haiku_stream',
       expect.objectContaining({
-        text: ['ОС: a', 'ОС: c'].join('\n'),
+        text: ['Выбранные сообщения (отвечай именно на них):', 'ОС: a', 'ОС: c'].join('\n'),
         system_prompt: DEFAULT_PROMPT,
         companionMeta: expect.objectContaining({
           insertAfterId: 'stt:1:3:c',
@@ -241,7 +357,7 @@ describe('chat store (selection + context)', () => {
     expect(store.messages.map((message) => message.id)).toEqual(['question', 'answer', 'later-speech']);
   });
 
-  it('selection ignores non-final and assistant messages', () => {
+  it('selection includes final assistant messages and ignores live speech', () => {
     transcriptionProxy.finalUtterances.push({ id: 'stt:1:1:a', sessionId: 1, text: 'alpha', timestamp: 1 });
     transcriptionProxy.partialText = 'live alpha';
 
@@ -257,7 +373,7 @@ describe('chat store (selection + context)', () => {
     });
 
     store.setSelection(['stt:live', 'haiku:1', 'stt:1:1:a'], false);
-    expect(store.selectedMessageIds).toEqual(['stt:1:1:a']);
+    expect(store.selectedMessageIds).toEqual(['haiku:1', 'stt:1:1:a']);
 
     store.toggleSelection('haiku:1');
     expect(store.selectedMessageIds).toEqual(['stt:1:1:a']);
@@ -956,6 +1072,7 @@ describe('chat store (selection + context)', () => {
       'start_haiku_stream',
       expect.objectContaining({
         text: [
+          'Выбранные сообщения (отвечай именно на них):',
           'ОС: selected transcript',
           'ЗАПРОС: selected manual note',
         ].join('\n'),
@@ -1076,7 +1193,7 @@ describe('chat store (selection + context)', () => {
     expect(invokeMock).toHaveBeenCalledWith(
       'start_haiku_stream',
       expect.objectContaining({
-        text: 'ОС: old selected question',
+        text: 'Выбранные сообщения (отвечай именно на них):\nОС: old selected question',
         companionMeta: expect.objectContaining({
           insertAfterId: 'stt:old',
         }),

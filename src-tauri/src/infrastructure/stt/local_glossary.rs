@@ -2,7 +2,7 @@
 //! One line per term: `Canonical term = heard variant | another variant`.
 use std::path::PathBuf;
 
-const MAX_RULES: usize = 400;
+const MAX_RULES: usize = 800;
 const MAX_ALIASES_PER_RULE: usize = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11,7 +11,7 @@ struct Rule {
     alias: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LocalGlossary {
     rules: Vec<Rule>,
     /// Canonical terms in file order, used as the Whisper decoding vocabulary.
@@ -24,8 +24,8 @@ impl LocalGlossary {
             return Self::default();
         };
         match std::fs::read_to_string(&path) {
-            Ok(source) => Self::parse(&source),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Ok(source) => Self::from_profile_source(source),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::from_profile_source(String::new()),
             Err(error) => {
                 log::warn!("Could not read local STT glossary at {}: {error}", path.display());
                 Self::default()
@@ -33,11 +33,20 @@ impl LocalGlossary {
         }
     }
 
-    pub fn path() -> Option<PathBuf> {
-        dirs::config_dir().map(|root| root.join("HackInterview/parakeet_glossary.txt"))
+    fn from_profile_source(mut source: String) -> Self {
+        let selected = crate::infrastructure::storage_paths::config_dir().and_then(|root| std::fs::read_to_string(root.join("HackInterview/stt_profile.txt")).ok());
+        let flutter_profile = selected.as_deref().map(str::trim) == Some("flutter");
+        if flutter_profile {
+            source = format!("{}\n{}", include_str!("flutter_glossary.txt"), source);
+        }
+        Self::parse(&source)
     }
 
-    fn parse(source: &str) -> Self {
+    pub fn path() -> Option<PathBuf> {
+        crate::infrastructure::storage_paths::config_dir().map(|root| root.join("HackInterview/parakeet_glossary.txt"))
+    }
+
+    pub(super) fn parse(source: &str) -> Self {
         let mut rules = Vec::new();
         let mut terms: Vec<String> = Vec::new();
         let rule_lines = source
