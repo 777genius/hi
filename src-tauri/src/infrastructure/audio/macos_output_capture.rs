@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
+use screencapturekit::error::{SCError, SCStreamErrorCode};
 use screencapturekit::prelude::*;
+use screencapturekit::stream::delegate_trait::StreamCallbacks;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -44,13 +46,12 @@ struct CaptureDiagnostics {
     started: Instant,
     callbacks: AtomicU64,
     frames: AtomicU64,
-    screen_callbacks: AtomicU64,
-    last_screen_ms: AtomicU64,
     rejected: AtomicU64,
     last_callback_ms: AtomicU64,
     last_frame_ms: AtomicU64,
     cadence_started_ms: AtomicU64,
     recovery_armed: AtomicBool,
+    native_error: Mutex<Option<SCError>>,
 }
 
 impl CaptureDiagnostics {
@@ -59,13 +60,12 @@ impl CaptureDiagnostics {
             started: Instant::now(),
             callbacks: AtomicU64::new(0),
             frames: AtomicU64::new(0),
-            screen_callbacks: AtomicU64::new(0),
-            last_screen_ms: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
             last_callback_ms: AtomicU64::new(0),
             last_frame_ms: AtomicU64::new(0),
             cadence_started_ms: AtomicU64::new(0),
             recovery_armed: AtomicBool::new(false),
+            native_error: Mutex::new(None),
         }
     }
 
@@ -93,6 +93,64 @@ impl CaptureDiagnostics {
             return None;
         }
         Some(now_ms.saturating_sub(self.last_callback_ms.load(Ordering::Relaxed)))
+    }
+
+    fn native_error(&self) -> Option<SCError> {
+        self.native_error
+            .lock()
+            .ok()
+            .and_then(|error| error.clone())
+    }
+
+    fn note_native_error(&self, error: SCError) {
+        if let Ok(mut slot) = self.native_error.lock() {
+            if slot.is_none() {
+                log::error!(
+                    "ScreenCaptureKit stopped by macOS after {}ms, code={:?}: {error:?}",
+                    self.elapsed_ms(),
+                    error.stream_error_code().map(|code| code.as_raw())
+                );
+                *slot = Some(error);
+            }
+        }
+    }
+}
+
+fn native_capture_error(error: SCError) -> AudioError {
+    let message = format!("{error:?}");
+    match error.stream_error_code() {
+        Some(SCStreamErrorCode::UserStopped) => AudioError::StoppedByUser(message),
+        Some(SCStreamErrorCode::UserDeclined | SCStreamErrorCode::MissingEntitlements) => {
+            AudioError::AccessDenied(message)
+        }
+        Some(
+            SCStreamErrorCode::SystemStoppedStream
+            | SCStreamErrorCode::FailedApplicationConnectionInvalid
+            | SCStreamErrorCode::FailedApplicationConnectionInterrupted
+            | SCStreamErrorCode::InternalError
+            | SCStreamErrorCode::FailedToStartAudioCapture
+            | SCStreamErrorCode::FailedToStopAudioCapture,
+        ) => AudioError::Capture(message),
+        _ if matches!(error, SCError::PermissionDenied(_)) => AudioError::AccessDenied(message),
+        // Unknown codes/configuration failures require an explicit new Start.
+        _ => AudioError::Configuration(message),
+    }
+}
+
+fn capture_start_error(error: SCError, native_error: Option<SCError>) -> AudioError {
+    if let Some(native_error) = native_error {
+        return native_capture_error(native_error);
+    }
+    if error.stream_error_code().is_some() || matches!(error, SCError::PermissionDenied(_)) {
+        return native_capture_error(error);
+    }
+    match error {
+        // The bridge start completion only carries a localized string. Do not
+        // infer a permission/configuration failure from that lossy result.
+        SCError::CaptureStartFailed(_) | SCError::StreamError(_) | SCError::Timeout(_) => {
+            AudioError::Capture(format!("Failed to start ScreenCaptureKit capture: {error}"))
+        }
+        _ => native_capture_error(error),
     }
 }
 
@@ -395,8 +453,6 @@ impl AudioCapture for MacosOutputAudioCapture {
             // Минимальные размеры, чтобы не тратить ресурсы на видео.
             .with_width(2)
             .with_height(2)
-            .with_minimum_frame_interval(&screencapturekit::cm::CMTime::new(1, 1))
-            .with_shows_cursor(false)
             .with_captures_audio(true)
             // Важно: не захватывать звук самого приложения.
             .with_excludes_current_process_audio(true)
@@ -411,7 +467,13 @@ impl AudioCapture for MacosOutputAudioCapture {
         let diagnostics = Arc::new(CaptureDiagnostics::new());
         let diagnostics_for_cb = diagnostics.clone();
 
-        let mut stream = SCStream::new(&filter, &config);
+        let diagnostics_for_error = diagnostics.clone();
+        let callback_enabled_for_error = callback_enabled.clone();
+        let delegate = StreamCallbacks::new().on_error(move |error| {
+            callback_enabled_for_error.store(false, Ordering::Release);
+            diagnostics_for_error.note_native_error(error);
+        });
+        let mut stream = SCStream::new_with_delegate(&filter, &config, delegate);
         let added = stream.add_output_handler(
             move |sample: CMSampleBuffer, output: SCStreamOutputType| {
                 if output != SCStreamOutputType::Audio
@@ -505,38 +567,9 @@ impl AudioCapture for MacosOutputAudioCapture {
             ));
         }
 
-        // Keep the screen side of SCStream drained as in Apple's capture
-        // sample. The 2x2, 1fps frames are discarded immediately; no pixels are
-        // retained or sent to STT. An audio-only stream lost its AudioTap near
-        // 120s in the endurance run; whether this prevents that needs a soak.
-        let diagnostics_for_screen = diagnostics.clone();
-        let callback_enabled_for_screen = callback_enabled.clone();
-        if stream
-            .add_output_handler(
-                move |_sample: CMSampleBuffer, output: SCStreamOutputType| {
-                    if output == SCStreamOutputType::Screen
-                        && callback_enabled_for_screen.load(Ordering::Acquire)
-                    {
-                        diagnostics_for_screen
-                            .screen_callbacks
-                            .fetch_add(1, Ordering::Relaxed);
-                        diagnostics_for_screen
-                            .last_screen_ms
-                            .store(diagnostics_for_screen.elapsed_ms(), Ordering::Relaxed);
-                    }
-                },
-                SCStreamOutputType::Screen,
-            )
-            .is_none()
-        {
-            return Err(AudioError::Internal(
-                "Failed to register ScreenCaptureKit screen drain".to_string(),
-            ));
-        }
-
-        stream.start_capture().map_err(|e| {
-            AudioError::Capture(format!("Failed to start ScreenCaptureKit capture: {e}"))
-        })?;
+        stream
+            .start_capture()
+            .map_err(|error| capture_start_error(error, diagnostics.native_error()))?;
 
         self.stream = Some(stream);
         self.callback_enabled = callback_enabled;
@@ -556,23 +589,30 @@ impl AudioCapture for MacosOutputAudioCapture {
         // from the old stream must never enter the next recording/recovery.
         self.callback_enabled.store(false, Ordering::Release);
         self.is_capturing = false;
+        let native_stopped = self
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.native_error())
+            .is_some();
         if let Some(diagnostics) = self.diagnostics.take() {
             let now_ms = diagnostics.elapsed_ms();
             log::info!(
-                "ScreenCaptureKit audio stopped: callbacks={}, frames={}, rejected={}, last_raw={}ms ago, last_pcm={}ms ago, screen_callbacks={}, last_screen={}ms ago",
+                "ScreenCaptureKit audio stopped: callbacks={}, frames={}, rejected={}, last_raw={}ms ago, last_pcm={}ms ago",
                 diagnostics.callbacks.load(Ordering::Relaxed),
                 diagnostics.frames.load(Ordering::Relaxed),
                 diagnostics.rejected.load(Ordering::Relaxed),
                 now_ms.saturating_sub(diagnostics.last_callback_ms.load(Ordering::Relaxed)),
                 now_ms.saturating_sub(diagnostics.last_frame_ms.load(Ordering::Relaxed)),
-                diagnostics.screen_callbacks.load(Ordering::Relaxed),
-                now_ms.saturating_sub(diagnostics.last_screen_ms.load(Ordering::Relaxed)),
             );
         }
         if let Some(stream) = self.stream.take() {
-            stream.stop_capture().map_err(|e| {
-                AudioError::Capture(format!("Failed to stop ScreenCaptureKit capture: {e}"))
-            })?;
+            // didStopWithError already ended the native stream. A second stop
+            // fails with "already stopped" and must not block its replacement.
+            if !native_stopped {
+                stream.stop_capture().map_err(|e| {
+                    AudioError::Capture(format!("Failed to stop ScreenCaptureKit capture: {e}"))
+                })?;
+            }
         }
         Ok(())
     }
@@ -592,11 +632,73 @@ impl AudioCapture for MacosOutputAudioCapture {
             .as_ref()
             .and_then(|diagnostics| diagnostics.starvation_ms(diagnostics.elapsed_ms()))
     }
+    fn capture_error(&self) -> Option<AudioError> {
+        self.diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.native_error())
+            .map(native_capture_error)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_preserves_typed_native_denial_but_retries_lossy_start_failures() {
+        assert!(matches!(
+            capture_start_error(
+                SCError::CaptureStartFailed("localized failure".to_string()),
+                None
+            ),
+            AudioError::Capture(_)
+        ));
+        assert!(matches!(
+            capture_start_error(
+                SCError::CaptureStartFailed("localized failure".to_string()),
+                Some(SCError::from(SCStreamErrorCode::UserDeclined))
+            ),
+            AudioError::AccessDenied(_)
+        ));
+        assert!(matches!(
+            capture_start_error(
+                SCError::InvalidConfiguration("bad config".to_string()),
+                None
+            ),
+            AudioError::Configuration(_)
+        ));
+    }
+
+    #[test]
+    fn native_failure_is_retained_even_before_capture_cadence_arms() {
+        let diagnostics = CaptureDiagnostics::new();
+        let error = SCError::from(SCStreamErrorCode::SystemStoppedStream);
+        diagnostics.note_native_error(error.clone());
+        diagnostics.note_native_error(SCError::StreamError("secondary error".to_string()));
+        assert_eq!(diagnostics.native_error(), Some(error));
+        assert_eq!(diagnostics.starvation_ms(0), None);
+        assert_eq!(CaptureDiagnostics::new().native_error(), None);
+    }
+
+    #[test]
+    fn native_user_stop_and_permission_revocation_are_not_recoverable() {
+        assert!(matches!(
+            native_capture_error(SCError::from(SCStreamErrorCode::UserStopped)),
+            AudioError::StoppedByUser(_)
+        ));
+        assert!(matches!(
+            native_capture_error(SCError::from(SCStreamErrorCode::UserDeclined)),
+            AudioError::AccessDenied(_)
+        ));
+        assert!(matches!(
+            native_capture_error(SCError::from(SCStreamErrorCode::SystemStoppedStream)),
+            AudioError::Capture(_)
+        ));
+        assert!(matches!(
+            native_capture_error(SCError::StreamError("unknown native failure".to_string())),
+            AudioError::Configuration(_)
+        ));
+    }
 
     #[test]
     fn native_liveness_arms_on_cadence_and_new_capture_must_rearm() {

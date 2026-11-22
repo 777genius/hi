@@ -21,6 +21,9 @@ pub enum AudioError {
     #[error("Capture error: {0}")]
     Capture(String),
 
+    #[error("Capture stopped by user: {0}")]
+    StoppedByUser(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -60,6 +63,11 @@ pub trait AudioCapture: Send + Sync {
     /// delivery. None means the source is unarmed or cannot report liveness.
     /// A gap is a recovery hint, not proof of a fault: sources may become idle.
     fn capture_starvation_ms(&self) -> Option<u64> {
+        None
+    }
+
+    /// A confirmed native capture failure, retained until stop/restart.
+    fn capture_error(&self) -> Option<AudioError> {
         None
     }
 }
