@@ -132,12 +132,13 @@ impl InterviewMemorySessionStore {
     }
 
     fn sessions_path() -> Result<PathBuf> {
-        if let Some(path) = std::env::var_os(MEMORY_SESSIONS_PATH_ENV) {
+        if let Some(path) = std::env::var_os(MEMORY_SESSIONS_PATH_ENV)
+            .map(PathBuf::from).and_then(crate::infrastructure::storage_paths::writable_override) {
             return Ok(PathBuf::from(path));
         }
 
         let config_dir =
-            dirs::config_dir().ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
+            crate::infrastructure::storage_paths::config_dir().ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
         Ok(config_dir
             .join("HackInterview")
             .join("interview_memory_sessions.json"))

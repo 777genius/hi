@@ -2304,7 +2304,7 @@ pub async fn set_companion_system_prompt(
     prompt: String,
     profile_id: Option<String>,
 ) -> Result<(), String> {
-    if let Some(root) = dirs::config_dir() {
+    if let Some(root) = crate::infrastructure::storage_paths::config_dir() {
         let dir = root.join("HackInterview");
         if let Err(error) = std::fs::create_dir_all(&dir) { log::warn!("Cannot create STT profile directory: {error}"); }
         let profile = if profile_id.as_deref() == Some("flutter-resume") { "flutter" } else { "original" };

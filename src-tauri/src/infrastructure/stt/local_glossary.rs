@@ -34,7 +34,7 @@ impl LocalGlossary {
     }
 
     fn from_profile_source(mut source: String) -> Self {
-        let selected = dirs::config_dir().and_then(|root| std::fs::read_to_string(root.join("HackInterview/stt_profile.txt")).ok());
+        let selected = crate::infrastructure::storage_paths::config_dir().and_then(|root| std::fs::read_to_string(root.join("HackInterview/stt_profile.txt")).ok());
         let flutter_profile = selected.as_deref().map(str::trim) == Some("flutter");
         if flutter_profile {
             source = format!("{}\n{}", include_str!("flutter_glossary.txt"), source);
@@ -43,7 +43,7 @@ impl LocalGlossary {
     }
 
     pub fn path() -> Option<PathBuf> {
-        dirs::config_dir().map(|root| root.join("HackInterview/parakeet_glossary.txt"))
+        crate::infrastructure::storage_paths::config_dir().map(|root| root.join("HackInterview/parakeet_glossary.txt"))
     }
 
     pub(super) fn parse(source: &str) -> Self {

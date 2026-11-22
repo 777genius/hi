@@ -335,7 +335,7 @@ impl LocalModel {
             return self.require_file(PathBuf::from(value));
         }
 
-        let home = dirs::home_dir().ok_or_else(|| {
+        let home = crate::infrastructure::storage_paths::home_dir().ok_or_else(|| {
             SttError::Configuration("Cannot locate home directory for local STT model".into())
         })?;
         // Handy may store a manually imported file in its app data directory.

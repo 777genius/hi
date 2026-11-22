@@ -5,6 +5,7 @@ pub mod auth_store; // Auth session + device_id (Rust SoT)
 pub mod auto_paste; // Автоматическая вставка текста
 pub mod clipboard; // Кроссплатформенная работа с clipboard
 pub mod config_store;
+pub(crate) mod storage_paths;
 pub mod embedded_keys; // API ключи встроенные в build
 pub mod factory;
 pub mod focus_copy_helper;

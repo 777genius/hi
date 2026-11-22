@@ -17,7 +17,7 @@ fn profile_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(PROFILE_ENV).filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    dirs::config_dir().map(|root| root.join(PROFILE_FILE_NAME))
+    crate::infrastructure::storage_paths::config_dir().map(|root| root.join(PROFILE_FILE_NAME))
 }
 
 /// Вырезает HTML-комментарии `<!-- ... -->` (заметки автора файла не должны попадать в промпт).
