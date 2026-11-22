@@ -19,6 +19,8 @@ const result = spawnSync('pnpm', args, {
     // Включаем e2e hooks и упрощаем авторизацию в debug режиме.
     VITE_E2E: '1',
     VOICETEXT_E2E: '1',
+    // Native timeline fixture routes require explicit test mode, also under tauri-driver.
+    INTERVIEW_TEST_MODE: '1',
     // Synthetic timeline fixtures must never enter an external memory service.
     INTERVIEW_MEMORY_FORCE_DISABLED: 'true',
   },
